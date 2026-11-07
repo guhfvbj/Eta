@@ -412,19 +412,6 @@ fun AgentAppRoot(
             navigatorOpen = conversationNavigatorOpen,
             conversationPaneState = agentState.conversationPaneState,
             isConversationPaneOpen = conversationPaneOpen,
-            conversationStatus = {
-                io.github.mangi.eta.ui.components.ConversationStatusCapsules(
-                    model = agentState.modelPickerState.selectedModel,
-                    onOpenWorkspace = {
-                        // 会话列表和工作区都浮在对话页之上，同时开会重叠；
-                        // 按「左列表 / 中对话 / 右工作区」的层次，开右边的先把左边的收起。
-                        conversationPaneOpen = false
-                        workspaceSheetOpen = true
-                    },
-                    workspaceActive = workspaceSheetOpen,
-                    onCloseWorkspace = { workspaceSheetOpen = false },
-                )
-            },
             workspaceShifted = workspaceSheetOpen,
             workspaceVisible = workspaceSheetOpen,
             onWorkspaceOpen = {

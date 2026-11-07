@@ -180,7 +180,6 @@ internal object AgentModelClient {
                 memoryWritable = roleplayContext == null,
                 capabilities = capabilities,
                 localWebSearch = !config.usesHostedWebSearch,
-                localProfile = LocalToolProfileStore.current(config.providerId, config.model),
                 policy = toolPolicy,
                 additionalTools = compactedAdditionalTools,
                 restrictedToolNames = restrictedToolNames,

@@ -23,15 +23,12 @@ internal object AgentToolDirectory {
         memoryWritable: Boolean,
         capabilities: AgentToolCapabilities,
         localWebSearch: Boolean,
-        localProfile: LocalToolProfile,
         policy: AgentToolPolicy,
         additionalTools: JSONArray? = null,
         restrictedToolNames: Set<String>? = null,
         rewriteReply: Boolean = false,
     ): JSONArray {
         if (rewriteReply) return JSONArray()
-        // 纯聊天档不声明任何工具，请求里也不会带 tools 字段。
-        if (localProfile == LocalToolProfile.CHAT) return JSONArray()
         val tools = AgentToolCatalog.build(
             terminalTools = terminalTools,
             browserTools = browserTools,

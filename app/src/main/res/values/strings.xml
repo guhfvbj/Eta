@@ -1503,12 +1503,8 @@
     <string name="virtual_screen_text_toggle">文本输入</string>
     <string name="virtual_screen_text_placeholder">输入文本</string>
     <string name="virtual_screen_text_insert">插入文本</string>
-    <string name="local_profile_chat">纯聊天</string>
-    <string name="local_profile_full">全部工具</string>
     <string name="memory_auto_compact_title">记忆自动精简</string>
     <string name="memory_auto_compact_summary">超过 60 KB 时自动把最旧的段落正文移入冷区 MEMORY-ARCHIVE.md；环境包、硬边界、偏好、进行中项目永不搬动。标题含 ⛔ 或「硬约束」的段落另外每轮随核心记忆注入，即使被精简也照样生效</string>
-  <string name="local_profile_switched_chat">已切到聊天模式：这一轮不带任何工具</string>
-  <string name="local_profile_switched_tools">已切到工具模式：设备、技能、MCP 都可用</string>
   <string name="memory_sheet_title">内存</string>
   <string name="memory_sheet_used">已用 %1$s / 共 %2$s</string>
   <string name="memory_sheet_available">可用 %1$s</string>

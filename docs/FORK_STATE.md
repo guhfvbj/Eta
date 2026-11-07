@@ -22,8 +22,7 @@
 
 - **虚拟屏（灵屏）**整套：`agent/display/`、`VirtualScreenFrameRate`、截图裁剪与 JPEG 质量降档、灵屏设置页
   - 2026-10-27 追加：**虚拟屏多开**（会话级多屏、宿主面按 owner 分槽、焦点镜像），设计见 `docs/虚拟屏多开.md`
-- **工具档**：`LocalToolProfile`、`LocalToolProfileStore`、`AgentToolSchemaCompactor.compact`、`AgentHistoryTrimmer`、`AgentToolDirectory`
-  - 现在只剩 `FULL` / `CHAT` 两档（顶栏胶囊：全部工具 / 纯聊天）
+- **工具档**：原 `LocalToolProfile` / `LocalToolProfileStore` 的双档（全部工具 / 纯聊天）已在 2026-11-07 整体删除，只保留「全部工具」行为；`AgentToolSchemaCompactor.compact`、`AgentHistoryTrimmer`、`AgentToolDirectory` 仍在
 - **MCP 工具 schema 压缩**：`AgentToolSchemaCompactor.compactMcp`（第三方 server 描述可达约 190KB）
 - **记忆热区自动压缩**：`memoryAutoCompactEnabled` / `AgentMemoryRepository.maybeCompact`
 - **会话分类、会话导航面板、工作区面板、提示词工坊、@ 引用、斜杠命令**等 UI 能力

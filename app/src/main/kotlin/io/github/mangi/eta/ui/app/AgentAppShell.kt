@@ -50,7 +50,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
-import io.github.mangi.eta.agent.model.LocalToolProfileStore
 import io.github.mangi.eta.ui.components.WorkspaceShiftHost
 import io.github.mangi.eta.ui.components.AdaptiveTopAppBar
 import io.github.mangi.eta.ui.components.CharacterAvatar
@@ -133,7 +132,6 @@ internal fun AgentAppShell(
     onRenameCategory: (String, String) -> Unit,
     onMoveCategory: (String, Int) -> Unit,
     onDeleteCategoryConfirmed: (String) -> Unit,
-    conversationStatus: (@Composable () -> Unit)? = null,
     /** 工作区面板打开时，只把顶栏以下的内容左移，顶栏那一行保持原样。 */
     workspaceShifted: Boolean = false,
     onDropConversationToCategory: ((io.github.mangi.eta.ui.model.ConversationSummaryUi, String?) -> Unit)? = null,
@@ -179,7 +177,6 @@ internal fun AgentAppShell(
                             onOpenBranchGraph = onOpenBranchGraph,
                             homeCharacter = homeCharacter,
                             onOpenCharacter = onOpenCharacter,
-                            conversationStatus = conversationStatus,
                             conversationTrimmed = conversationTrimmed,
                         )
                     }
@@ -287,7 +284,6 @@ private fun AgentTopBar(
     onOpenBranchGraph: () -> Unit,
     homeCharacter: RoleplayChatUi?,
     onOpenCharacter: () -> Unit,
-    conversationStatus: (@Composable () -> Unit)?,
     conversationTrimmed: Pair<Int, Int>?,
 ) {
     val isHome = route is AppRoute.Home
@@ -342,7 +338,7 @@ private fun AgentTopBar(
     val compactTitle = isHome || route is AppRoute.Browser || route is AppRoute.Terminal ||
         route is AppRoute.ConversationBranches
     if (isHome) {
-        // 首页自绘一行：pump 两侧等权留白，胶囊才真正居中；SmallTopAppBar 的 title 只收 String，
+        // 首页自绘一行：导航图标靠左，新建与溢出菜单靠右；SmallTopAppBar 的 title 只收 String，
         // 塞不进去 Composable。
         Row(
             modifier = Modifier
@@ -354,8 +350,6 @@ private fun AgentTopBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             navigationIcon()
-            Spacer(Modifier.weight(1f))
-            conversationStatus?.invoke()
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onNewConversation) {
                 Icon(

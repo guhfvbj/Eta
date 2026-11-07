@@ -1271,7 +1271,6 @@ private fun AgentChatBottomBar(
                 .navigationBarsPadding()
                 .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
         ) {
-            LocalProfileSwitchToast(modifier = Modifier.fillMaxWidth())
             AnimatedVisibility(
                 visible = commandResult != null,
                 enter = fadeIn(tween(140)) + expandVertically(tween(160)),

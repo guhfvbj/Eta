@@ -286,7 +286,7 @@ internal fun ConversationPanePanel(
                 ) {
                     Spacer(Modifier.height(ConversationPanelMetrics.TopInset))
                     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(painterResource(R.drawable.ic_launcher_foreground), contentDescription = null, tint = Color.Unspecified,
+                        Icon(painterResource(R.drawable.ic_eta_logo), contentDescription = null, tint = Color.Unspecified,
                             modifier = Modifier.size(40.dp).clip(CircleShape)
                                 .background(MiuixTheme.colorScheme.surfaceContainerHighest).padding(4.dp))
                         Row(

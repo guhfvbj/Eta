@@ -17,7 +17,6 @@ import io.github.mangi.eta.agent.model.AgentPromptBuilder
 import io.github.mangi.eta.agent.model.AgentToolCatalog
 import io.github.mangi.eta.agent.model.AgentConversationToolCatalog
 import io.github.mangi.eta.agent.model.AgentToolDirectory
-import io.github.mangi.eta.agent.model.LocalToolProfileStore
 import io.github.mangi.eta.agent.prompt.PromptConflict
 import io.github.mangi.eta.agent.prompt.PromptConflictLevel
 import io.github.mangi.eta.agent.model.SystemSegmentKind
@@ -146,7 +145,6 @@ internal suspend fun buildEffectivePreview(
         memoryWritable = true,
         capabilities = capabilities,
         localWebSearch = !config.usesHostedWebSearch,
-        localProfile = LocalToolProfileStore.current(config.providerId, config.model),
         policy = policy,
         additionalTools = additionalTools,
     )
