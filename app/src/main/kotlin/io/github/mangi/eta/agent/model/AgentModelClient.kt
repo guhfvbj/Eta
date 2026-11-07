@@ -113,6 +113,7 @@ internal object AgentModelClient {
         rewriteReply: Boolean = false,
         assistantScreenContext: String = "",
         toolFilter: ((JSONArray) -> JSONArray)? = null,
+        featureSession: AgentFeatureSession? = null,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
         restrictedToolNames: Set<String>? = null,
@@ -181,12 +182,15 @@ internal object AgentModelClient {
                 capabilities = capabilities,
                 localWebSearch = !config.usesHostedWebSearch,
                 policy = toolPolicy,
-                additionalTools = compactedAdditionalTools,
+                additionalTools = JSONArray(compactedAdditionalTools.toString()).also { array ->
+                    featureSession?.extraSchemas()?.let { extra -> for (i in 0 until extra.length()) array.put(extra.get(i)) }
+                },
                 restrictedToolNames = restrictedToolNames,
                 rewriteReply = rewriteReply,
             )
             // 子代理用 toolFilter 在父工具目录上裁剪；主运行不传，走原样。
-            return toolFilter?.invoke(built) ?: built
+            val projected = featureSession?.project(built) ?: built
+            return toolFilter?.invoke(projected) ?: projected
         }
         val tools = toolsFor(initialCapabilities)
         // 只在请求侧丢最老轮次：数据库与界面一条不删；系统提示、记忆与当前输入永不裁。
@@ -216,6 +220,9 @@ internal object AgentModelClient {
         var promptVirtualScreenFallbackEnabled = initialCapabilities.virtualScreenFallbackEnabled
         fun toolsForRound(): JSONArray {
             val capabilities = capabilitiesProvider()
+            if (featureSession != null) {
+                publishedTools = toolsFor(capabilities)
+            }
             if (capabilities.rootAvailable != promptRootAvailable ||
                 capabilities.virtualScreenEnabled != promptVirtualScreenEnabled ||
                 capabilities.virtualScreenFallbackEnabled != promptVirtualScreenFallbackEnabled) {
@@ -252,7 +259,7 @@ internal object AgentModelClient {
             tools = tools,
             provider = provider,
             toolExecutor = ToolExecutor { call ->
-                if (!toolPolicy.allows(call.name)) {
+                if (!toolPolicy.allows(call.name) && !(featureSession != null && call.name in setOf("tools_use_group", "tools_search"))) {
                     ToolResult(JSONObject().put("ok", false).put("code", "TOOL_NOT_ALLOWED_BY_POLICY")
                         .put("message", "该工具不在本次工具白名单中，未执行").toString())
                 } else if (restrictedToolNames != null && call.name !in restrictedToolNames) {
@@ -262,7 +269,7 @@ internal object AgentModelClient {
                     val unavailable = AgentToolRequirements.find(call.name)
                         ?.let { capabilitiesProvider().unavailableCode(call.name) }
                     if (unavailable == null) {
-                        toolExecutor.execute(call)
+                        featureSession?.execute(call, toolExecutor) ?: toolExecutor.execute(call)
                     } else {
                         ToolResult(
                             JSONObject().put("ok", false).put("code", unavailable)
@@ -279,6 +286,8 @@ internal object AgentModelClient {
             initialSupplementIndex = initialSupplementIndex,
             remoteToolNames = remoteToolNames,
             toolsForRound = ::toolsForRound,
+            dynamicTools = featureSession != null,
+            configForRound = featureSession?.let { it::configForRound },
         )
         val result = try {
             if (compactOnly) loop.compactOnly() else loop.run()

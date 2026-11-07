@@ -1676,6 +1676,7 @@ internal class AgentAppState(
     fun renameConversation(conversationId: String, title: String) {
         val trimmed = title.trim()
         if (trimmed.isBlank()) return
+        io.github.mangi.eta.agent.model.AgentFeaturePreferences.protectTitle(conversationId, appContext)
         conversationTitles = conversationTitles + (conversationId to trimmed)
         conversationUpdatedAt = conversationUpdatedAt + (conversationId to System.currentTimeMillis())
         refreshConversationSummaries()
@@ -2936,6 +2937,9 @@ internal class AgentAppState(
                 }
             }
         }
+        if (result.ok && result.operation != AgentRuntimeWire.OP_COMPACT && completedConversationId != null) {
+            scheduleModelTitle(completedConversationId, runId, result.content)
+        }
         setConversationStreaming(runId, false)
         conversationIdForRun(runId)?.let { id -> conversationsById[id]?.let {
             updateConversation(id, RoleplayConversationReducer.linkRun(it, runId))
@@ -2966,6 +2970,40 @@ internal class AgentAppState(
                     dispatchQueuedMessage(completedConversationId, nextQueued)
                 }
             }
+        }
+    }
+
+    private val titleRequests = mutableMapOf<String, String>()
+    private fun scheduleModelTitle(id: String, runId: String, answer: String) {
+        val preferences = io.github.mangi.eta.agent.model.AgentFeaturePreferences
+        val settings = preferences.load(appContext)
+        val state = conversationsById[id] ?: return
+        if (state.roleplay != null || !settings.optBoolean("title_enabled", true) || preferences.manualTitle(id, appContext)) return
+        val prefs = appContext.getSharedPreferences("eta_agent_features", Context.MODE_PRIVATE)
+        if (!settings.optBoolean("title_follow") && prefs.getBoolean("generated_title_$id", false)) return
+        val question = state.messages.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>().lastOrNull() ?: return
+        val expected = conversationTitles[id]
+        val first = state.messages.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>().firstOrNull()
+        if (!prefs.getBoolean("generated_title_$id", false) && expected != first?.content?.defaultConversationTitleFromMessage()) return
+        titleRequests[id] = runId
+        scope.launch {
+            val title = withContext(Dispatchers.IO) {
+                runCatching {
+                    val modelId = settings.optString("title_model")
+                    val config = if (modelId.isBlank()) RuntimeConfigRepository.runtimeConfigFor(state.modelId)
+                        else preferences.model(modelId)
+                    requireNotNull(config)
+                    io.github.mangi.eta.agent.model.ConversationTitleModel.generate(config, question.content, answer,
+                        io.github.mangi.eta.agent.runtime.AgentRunController(), id,
+                        if (settings.optBoolean("title_follow")) expected.orEmpty() else "")
+                }.getOrNull()
+            } ?: return@launch
+            if (!preferences.load(appContext).optBoolean("title_enabled", true) || titleRequests[id] != runId || preferences.manualTitle(id, appContext) || conversationTitles[id] != expected ||
+                conversationsById[id]?.messages?.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>()?.lastOrNull()?.id != question.id) return@launch
+            conversationTitles = conversationTitles + (id to title)
+            prefs.edit().putBoolean("generated_title_$id", true).apply()
+            refreshConversationSummaries()
+            persistConversations()
         }
     }
 

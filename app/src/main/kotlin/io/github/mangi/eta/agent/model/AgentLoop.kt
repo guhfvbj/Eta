@@ -29,6 +29,8 @@ internal class AgentLoop(
     private val traceFormatter: AgentTraceFormatter,
     private val onEvent: (AgentEvent) -> Unit,
     private val toolsForRound: (() -> JSONArray)? = null,
+    private val dynamicTools: Boolean = false,
+    private val configForRound: (() -> AgentModelClient.ModelConfig)? = null,
     /** 远端（MCP）工具名：它们的参数 schema 属于第三方服务器，循环只转发不预检。 */
     private val remoteToolNames: Set<String> = emptySet(),
     private val modelRetry: AgentModelRetry = AgentModelRetry(),
@@ -99,7 +101,7 @@ internal class AgentLoop(
             if (purpose.allowsTools) appendPendingSteeringMessage()
 
             // 带签名的工具链沿用发出调用时的请求前缀，工具链完成后再刷新目录。
-            val roundTools = if (SignedToolContext.hasPendingResponse(messages)) {
+            val roundTools = if (SignedToolContext.hasPendingResponse(messages) && !dynamicTools) {
                 precedingTools ?: tools
             } else if (purpose.allowsTools) {
                 toolsForRound?.invoke() ?: tools
@@ -121,7 +123,7 @@ internal class AgentLoop(
             val completedRound = try {
                 modelRetry.complete(
                     initialRound = round,
-                    initialRequest = ProviderRequest(config, requestMessages, roundTools, sessionId, purpose),
+                    initialRequest = ProviderRequest(configForRound?.invoke() ?: config, requestMessages, roundTools, sessionId, purpose),
                     provider = provider,
                     controller = runController,
                     onEvent = { event ->

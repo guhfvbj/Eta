@@ -686,6 +686,9 @@ fun AgentAppRoot(
                     },
                 )
             }
+            entry<AppRoute.AgentFeatures>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.tools.AgentFeatureSettingsScreen(::popRoute)
+            }
             entry<AppRoute.WebToolsSettings>(swipeDismiss = swipeDismiss) {
                 WebToolsSettingsScreen(onBack = ::popRoute)
             }
@@ -1151,6 +1154,8 @@ fun AgentAppRoot(
             )
         }
     }
+
+    io.github.mangi.eta.ui.screens.tools.AgentToolAuthorizationHost()
 
     // 底部弹层必须始终在 composition 里（由 show 控制显隐），条件式调用会挂不上窗口导致点了没反应。
     io.github.mangi.eta.ui.components.ConversationMoveCategorySheet(

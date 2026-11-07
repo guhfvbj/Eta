@@ -282,6 +282,16 @@ internal class AgentRuntimeRunExecutor(
             val subagentAllowed = {
                 request.config.subagentTools && currentPermissions().subagentTools
             }
+            val featureSession = if (request.operation == AgentRuntimeWire.OP_COMPACT ||
+                request.operation == AgentRuntimeWire.OP_REWRITE_REPLY) null else io.github.mangi.eta.agent.model.AgentFeatureSession(
+                context = appContext,
+                conversation = conversationId ?: request.effectiveModelSessionId,
+                prompt = request.prompt, history = request.history, config = request.config,
+                controller = runController,
+                rootAvailable = { AgentToolCapabilities.capture(appContext).rootAvailable },
+                mcpGroups = mcpSnapshot.tools.associate { it.modelName to "mcp:${it.server.id}" },
+                writable = roleplayContext == null,
+            )
             val subagentExecutor = SubagentExecutor(
                 // 子代理会话按「对话」隔离；无对话（外部入口）时退回 runId。
                 conversationKey = conversationId ?: request.runId,
@@ -299,7 +309,9 @@ internal class AgentRuntimeRunExecutor(
                     )
                     AgentRuntimePolicy.constrain(overridden, currentPermissions())
                 },
-                baseToolExecutor = routingExecutor,
+                baseToolExecutor = AgentModelClient.ToolExecutor { call ->
+                    featureSession?.execute(call, routingExecutor, requireLoaded = false) ?: routingExecutor.execute(call)
+                },
                 skillContext = skillContext,
                 memoryContext = memoryContext,
                 mcpTools = mcpTools,
@@ -382,6 +394,7 @@ internal class AgentRuntimeRunExecutor(
             }
             val completedResponse = AgentModelClient.complete(
                 config = request.config,
+                featureSession = featureSession,
                 sessionId = request.effectiveModelSessionId,
                 operationId = request.runId,
                 initialUserMessageId = uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}",

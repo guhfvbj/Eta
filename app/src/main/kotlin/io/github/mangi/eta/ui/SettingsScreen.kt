@@ -462,6 +462,13 @@ private fun SettingsPageContent(
                         },
                         onClick = { onNavigate(AppRoute.WebToolsSettings) },
                     )
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
+                        title = "模型与工具策略",
+                        summary = "按需加载、工具配方、标题与判断模型、分级审查",
+                        startAction = { EtaPreferenceIcon(Icons.Rounded.Psychology, tint = EtaPreferenceColors.Blue) },
+                        onClick = { onNavigate(AppRoute.AgentFeatures) },
+                    )
 
                     EtaPreferenceDivider()
                     SwitchPref(
