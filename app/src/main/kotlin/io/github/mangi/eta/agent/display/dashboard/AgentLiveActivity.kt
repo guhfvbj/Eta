@@ -11,6 +11,8 @@ import android.net.Uri
 import android.os.Build
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.runtime.AgentRuntimeClient
+import io.github.mangi.eta.agent.runtime.FluidCapsuleText
+import io.github.mangi.eta.agent.runtime.FluidCapsuleState
 import io.github.mangi.eta.agent.runtime.FluidNotificationPolicy
 import kotlinx.coroutines.launch
 import io.github.mangi.eta.agent.runtime.AgentRuntimeService
@@ -178,16 +180,26 @@ internal object AgentLiveActivityBridge {
     }
 
     /** 状态栏胶囊只有几个字的位置：先给「待确认」这种必须被看见的词。 */
-    private fun capsule(spec: AgentLiveSpec): String = when (spec.mode) {
-        LiveMode.NEEDS_CONFIRM -> "待确认"
-        LiveMode.SUSPENDED -> "已挂起"
-        LiveMode.PAUSED -> "已暂停"
-        LiveMode.TAKEN_OVER -> "你操作中"
-        LiveMode.NORMAL -> if (spec.stepTotal > 0) {
-            spec.step.ifBlank { "执行中" }.take(6) + " " + spec.stepIndex.coerceAtMost(spec.stepTotal) + "/" + spec.stepTotal
-        } else {
-            spec.step.ifBlank { "执行中" }.take(8)
+    private fun capsule(spec: AgentLiveSpec): String {
+        val original = when (spec.mode) {
+            LiveMode.NEEDS_CONFIRM -> "待确认"
+            LiveMode.SUSPENDED -> "已挂起"
+            LiveMode.PAUSED -> "已暂停"
+            LiveMode.TAKEN_OVER -> "你操作中"
+            LiveMode.NORMAL -> if (spec.stepTotal > 0) {
+                spec.step.ifBlank { "执行中" }.take(6) + " " + spec.stepIndex.coerceAtMost(spec.stepTotal) + "/" + spec.stepTotal
+            } else {
+                spec.step.ifBlank { "执行中" }.take(8)
+            }
         }
+        val state = when (spec.mode) {
+            LiveMode.NORMAL -> FluidCapsuleState.RUNNING
+            LiveMode.PAUSED -> FluidCapsuleState.PAUSED
+            LiveMode.NEEDS_CONFIRM -> FluidCapsuleState.CONFIRM
+            LiveMode.TAKEN_OVER -> FluidCapsuleState.TAKEN_OVER
+            LiveMode.SUSPENDED -> FluidCapsuleState.SUSPENDED
+        }
+        return FluidCapsuleText.text(state, original)
     }
 
     private fun action(app: Context, spec: AgentLiveSpec, live: LiveAction): Notification.Action {

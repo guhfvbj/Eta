@@ -313,7 +313,7 @@ internal object RunProgressNotifier {
                 Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
                 FluidNotificationPolicy.allowsFluid()
             ) {
-                builder.setShortCriticalText("空闲")
+                builder.setShortCriticalText(FluidCapsuleText.text(FluidCapsuleState.IDLE, "空闲"))
                 builder.setRequestPromotedOngoing(true)
             }
             manager(app).notify(SessionNotificationIds.IDLE_NOTIFICATION_ID, builder.build())
@@ -380,7 +380,10 @@ internal object RunProgressNotifier {
             Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
             FluidNotificationPolicy.allowsFluid()
         ) {
-            builder.setShortCriticalText(if (paused) "已暂停" else card.actionShort)
+            builder.setShortCriticalText(FluidCapsuleText.text(
+                if (paused) FluidCapsuleState.PAUSED else FluidCapsuleState.RUNNING,
+                if (paused) "已暂停" else card.actionShort,
+            ))
             builder.setRequestPromotedOngoing(true)
         }
         return builder.build()
