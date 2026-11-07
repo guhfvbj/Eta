@@ -1,5 +1,6 @@
 package io.github.mangi.eta.hook.system
 
+import io.github.mangi.eta.BuildConfig
 import io.github.mangi.eta.config.PowerAssistantTarget
 import io.github.mangi.eta.core.ModuleConfig
 import org.junit.Assert.assertEquals
@@ -29,6 +30,16 @@ class AssistantBindingTest {
         assertEquals(ModuleConfig.GOOGLE_ASSISTANT_COMPONENT, gemini.componentName)
         assertEquals(ModuleConfig.ETA_PACKAGE, eta.packageName)
         assertEquals(ModuleConfig.ETA_VOICE_INTERACTION_COMPONENT, eta.componentName)
+    }
+
+    @Test
+    fun `Eta binding targets this installed variant while keeping the service class namespace`() {
+        val eta = requireNotNull(assistantBindingFor(PowerAssistantTarget.ETA))
+        assertEquals(BuildConfig.APPLICATION_ID, eta.packageName)
+        assertEquals(
+            "${BuildConfig.APPLICATION_ID}/io.github.mangi.eta.agent.voice.EtaVoiceInteractionService",
+            eta.componentName,
+        )
     }
 
     @Test

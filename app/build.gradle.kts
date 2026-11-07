@@ -58,9 +58,9 @@ android {
         // 两条线各自计号：正式线沿用主干号段，测试线独立递增（beta.8）。
         versionCode = if (isBetaBuild) 2026110409 else 2026110703
         versionName = if (isBetaBuild) "3.4.0-beta.28" else "3.3.7"
-        // 桌面名与包名一起区分，避免和官方版/测试版混淆。
+        // 桌面显示 Eta；通过独立 applicationId 与其他分支版本共存。
         manifestPlaceholders["applicationLabel"] =
-            if (isBetaBuild) "Eta β" else "@string/app_name_fork"
+            if (isBetaBuild) "Eta β" else "@string/app_name"
         // 只对测试包生效的运行时标记：常驻测试版提示条、同意页强制展示等。
         buildConfigField("boolean", "BETA_BUILD", isBetaBuild.toString())
         testInstrumentationRunner = "io.github.mangi.eta.validation.DeviceValidationRunner"

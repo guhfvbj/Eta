@@ -7,16 +7,12 @@ package io.github.mangi.eta.ui.onboarding
  */
 internal object OnboardingKeys {
     const val SwipeRight = "gesture.swipeRight"
-    const val SwipeLeft = "gesture.swipeLeft"
     const val SwipeUp = "gesture.swipeUp"
     const val SidebarHint = "sidebar.hint"
-    const val WorkspaceHint = "workspace.hint"
 
     val All: Set<String> = setOf(
         SwipeRight,
-        SwipeLeft,
         SwipeUp,
         SidebarHint,
-        WorkspaceHint,
     )
 }

@@ -23,9 +23,6 @@ import androidx.compose.ui.zIndex
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -107,7 +104,6 @@ import io.github.mangi.eta.ui.screens.terminal.LinuxEnvironmentScreen
 import io.github.mangi.eta.ui.screens.terminal.LinuxFilesScreen
 import io.github.mangi.eta.ui.screens.terminal.SharedFoldersScreen
 import io.github.mangi.eta.ui.screens.terminal.TerminalEntryScreen
-import io.github.mangi.eta.ui.screens.terminal.WorkspaceBrowserSheet
 import io.github.mangi.eta.ui.screens.terminal.WorkspaceScreen
 import io.github.mangi.eta.ui.screens.tools.AgentToolsScreen
 import io.github.mangi.eta.ui.screens.tools.WebToolsSettingsScreen
@@ -231,8 +227,6 @@ fun AgentAppRoot(
     }
 
     var conversationPaneOpen by remember { mutableStateOf(false) }
-    // 工作区文件面板：顶栏以下的内容左移、面板从右滑入，顶栏那一行保持原样。
-    var workspaceSheetOpen by remember { mutableStateOf(false) }
     var conversationNavigatorOpen by remember { mutableStateOf(false) }
     // 工具与技能面板的数据：改成「打开时主动读一次」，不依赖 Flow 的首次发射，
     // 也不怕读取失败时静默为空——面板每次打开都会重新拉。
@@ -277,9 +271,6 @@ fun AgentAppRoot(
     }
     var conversationRenameTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var categoryMoveTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
-    // 工作区里点的 Markdown：路径 to 内容。宿主放在页面层，避免在工作区 sheet 里再套一层弹层。
-    var workspaceMarkdown by remember { mutableStateOf<Pair<String, String>?>(null) }
-    val workspaceStore = remember { io.github.mangi.eta.ui.app.WorkspaceFileStore(context) }
     var conversationDeleteTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationBatchDeleteTarget by remember { mutableStateOf<List<ConversationSummaryUi>?>(null) }
     var conversationExportTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
@@ -399,8 +390,6 @@ fun AgentAppRoot(
         }
     }
 
-    // 标 @Composable：函数体里要读 WindowInsets（只读源）并挂工作区面板，
-    // 都不是普通函数能做的。调用点都在 NavDisplay 的 entry lambda 里，本来就是 Composable 上下文。
     @Composable
     fun RoutedShell(
         route: AppRoute,
@@ -412,26 +401,9 @@ fun AgentAppRoot(
             navigatorOpen = conversationNavigatorOpen,
             conversationPaneState = agentState.conversationPaneState,
             isConversationPaneOpen = conversationPaneOpen,
-            workspaceShifted = workspaceSheetOpen,
-            workspaceVisible = workspaceSheetOpen,
-            onWorkspaceOpen = {
-                conversationPaneOpen = false
-                workspaceSheetOpen = true
-            },
-            onWorkspaceDismiss = { workspaceSheetOpen = false },
-            workspaceContent = {
-                WorkspaceBrowserSheet(
-                    visible = true,
-                    topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 56.dp,
-                    onDismiss = { workspaceSheetOpen = false },
-                    onOpenMarkdown = { path, text -> workspaceMarkdown = path to text },
-                )
-            },
             conversationTrimmed = agentState.historyTrimNotice,
             onBack = { popRoute() },
             onOpenConversationPane = {
-                // 反向同理：开左侧列表时把右侧工作区收起，避免两层叠在一起。
-                workspaceSheetOpen = false
                 conversationPaneOpen = true
             },
             onDismissConversationPane = { conversationPaneOpen = false },
@@ -1178,22 +1150,6 @@ fun AgentAppRoot(
                 text = "知道了", onClick = characterStore::dismissNotice, modifier = Modifier.fillMaxWidth(),
             )
         }
-    }
-
-    // 工作区 Markdown 预览：在页面层弹出，OverlayBottomSheet 才能自带跟手与返回同步退场。
-    workspaceMarkdown?.let { (path, original) ->
-        io.github.mangi.eta.ui.markdown.MarkdownFileDialog(
-            path = path,
-            original = original,
-            onDismiss = { workspaceMarkdown = null },
-            readDisk = { relative -> io.github.mangi.eta.ui.app.readWorkspaceText(workspaceStore, relative) },
-            editRealPath = {
-                java.io.File(io.github.mangi.eta.agent.terminal.TerminalRuntime.ROOT_WORKSPACE_PATH, path)
-                    .absolutePath
-            },
-            // 工作区浏览器本身是 sheet，这里用 Dialog 卡片；会话里的卡片保持原来的底部弹层。
-            useBottomSheet = false,
-        )
     }
 
     // 底部弹层必须始终在 composition 里（由 show 控制显隐），条件式调用会挂不上窗口导致点了没反应。

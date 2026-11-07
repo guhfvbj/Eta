@@ -17,7 +17,6 @@ import io.github.mangi.eta.ui.navigation.AppRoute
  *
  * 完成判定不靠触摸监听，而是靠「目标界面真的被打开了」：
  * - 右滑 → 侧栏打开（`surface == Sidebar`）
- * - 左滑 → 工作区打开（`surface == Workspace`）
  * - 上滑小白条 → 会话导航面板打开（`navigatorOpen`）
  *
  * 这样教练层完全不需要 pointerInput，也就不会抢走侧栏的拖动手势。
@@ -52,7 +51,6 @@ internal fun OnboardingHost(
     val onHome = currentRoute is AppRoute.Home
     val satisfied = step != null && when (step.direction) {
         GestureDirection.SwipeRight -> surface == SurfaceKey.Sidebar
-        GestureDirection.SwipeLeft -> surface == SurfaceKey.Workspace
         GestureDirection.SwipeUp -> navigatorOpen || navigatorEverOpened
     }
 

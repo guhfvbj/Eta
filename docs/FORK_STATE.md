@@ -16,7 +16,13 @@
 
 结论：判断「某功能是否存在」时必须读工作区文件，`git show HEAD:` 会漏掉大量未提交实现。
 
-> 2026-11-07 追加：二开正式线改用独立 applicationId `io.github.mangi.eta.oo0520`（桌面名「Eta 二开」），可与官方版 `io.github.mangi.eta`、测试版 `io.github.mangi.eta.beta`、EtaExpressive 同时安装共存；`namespace` 仍为 `io.github.mangi.eta`，源码包名与 Xposed 入口不变。
+> 2026-11-07 追加：二开正式线改用独立 applicationId `io.github.mangi.eta.oo0520`（桌面名「Eta」，2026-11-07 UI 回退时统一），可与官方版 `io.github.mangi.eta`、测试版 `io.github.mangi.eta.beta`、EtaExpressive 同时安装共存；`namespace` 仍为 `io.github.mangi.eta`，源码包名与 Xposed 入口不变。
+
+### 2026-11-07 主界面回退
+
+- 移除顶栏自动朗读按钮，新建对话放在 ⋯ 菜单第一项；首页使用与 main 相同的 Miuix `SmallTopAppBar` 默认高度与边距。
+- 删除左滑工作区文件树的负向锚点、专用面板、状态回调与对应手势教学；右滑会话列表保留。
+- 默认桌面名称为 `Eta`，安装标识仍为 `io.github.mangi.eta.oo0520`。`ModuleConfig.ETA_PACKAGE` 随 `BuildConfig.APPLICATION_ID`，系统助手绑定和 Hook 的自身包名判断使用当前安装版本。
 
 ## 2. 上游没有、本项目自己实现的能力（别当成上游行为）
 

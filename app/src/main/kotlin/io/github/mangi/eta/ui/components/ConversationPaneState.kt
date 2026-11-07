@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.components
 
 import androidx.compose.foundation.gestures.AnchoredDraggableState
+import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.runtime.snapshotFlow
 import kotlin.math.abs
 import kotlinx.coroutines.flow.Flow
@@ -9,14 +10,11 @@ import kotlinx.coroutines.flow.filterNotNull
 internal enum class ConversationPaneAnchor {
     Closed,
     Open,
-    /** 向左拖到底：右侧工作区面板占据主视觉。 */
-    Workspace,
 }
 
-/** 右侧工作区面板的锚点：Closed = 停在屏外，Open = 完全展开。 */
-internal enum class WorkspaceAnchor {
-    Closed,
-    Open,
+internal fun conversationPaneAnchors(paneWidth: Float) = DraggableAnchors {
+    ConversationPaneAnchor.Closed at 0f
+    ConversationPaneAnchor.Open at paneWidth
 }
 
 internal fun conversationPaneSettledValues(

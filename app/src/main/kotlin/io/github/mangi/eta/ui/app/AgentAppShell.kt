@@ -9,10 +9,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -50,7 +46,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
-import io.github.mangi.eta.ui.components.WorkspaceShiftHost
 import io.github.mangi.eta.ui.components.AdaptiveTopAppBar
 import io.github.mangi.eta.ui.components.CharacterAvatar
 import io.github.mangi.eta.ui.components.ConversationSidePaneScaffold
@@ -81,7 +76,6 @@ import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.window.WindowListPopup
-import io.github.mangi.eta.ui.voice.SpeechAutoReadToggle
 
 /**
  * Agent App 统一壳层。
@@ -132,13 +126,7 @@ internal fun AgentAppShell(
     onRenameCategory: (String, String) -> Unit,
     onMoveCategory: (String, Int) -> Unit,
     onDeleteCategoryConfirmed: (String) -> Unit,
-    /** 工作区面板打开时，只把顶栏以下的内容左移，顶栏那一行保持原样。 */
-    workspaceShifted: Boolean = false,
     onDropConversationToCategory: ((io.github.mangi.eta.ui.model.ConversationSummaryUi, String?) -> Unit)? = null,
-    workspaceVisible: Boolean = false,
-    onWorkspaceOpen: () -> Unit = {},
-    onWorkspaceDismiss: () -> Unit = {},
-    workspaceContent: (@Composable () -> Unit)? = null,
     /** 顶栏放不下的低频状态提示，改在 ⋯ 菜单里以文字列出。 */
     conversationTrimmed: Pair<Int, Int>? = null,
     /** 会话导航面板是否打开：手势教练「上滑小白条」那一步的完成条件。 */
@@ -183,7 +171,7 @@ internal fun AgentAppShell(
                 }
             },
         ) { padding ->
-            // 首页顶栏是自绘的，不参与折叠；此时再把内容接到 MiuixScrollBehavior 上，
+            // 首页顶栏保持紧凑高度，不参与折叠；此时再把内容接到 MiuixScrollBehavior 上，
             // 它的 onPreScroll 会持续吞掉上滑（想把工具栏往上收却没人收），表现就是只能下滑不能上滑。
             val contentScrollConnection = remember(currentRoute) {
                 if (currentRoute is AppRoute.Home) null else scrollBehavior.nestedScrollConnection
@@ -200,11 +188,7 @@ internal fun AgentAppShell(
                         },
                     ),
             ) {
-                // 只移内容层：顶栏在 Scaffold 的 topBar 里，不在这棵子树，所以不会跟着走。
-                // 这就是「顶栏不动、会话页左移」与「整页滑出」的区别。
-                WorkspaceShiftHost(shifted = workspaceShifted) {
-                    content(padding)
-                }
+                content(padding)
             }
         }
     }
@@ -241,10 +225,6 @@ internal fun AgentAppShell(
                 onMoveCategory = onMoveCategory,
                 onDeleteCategoryConfirmed = onDeleteCategoryConfirmed,
                 onDropConversationToCategory = onDropConversationToCategory,
-                workspaceVisible = workspaceVisible,
-                onWorkspaceOpen = onWorkspaceOpen,
-                onWorkspaceDismiss = onWorkspaceDismiss,
-                workspaceContent = workspaceContent,
             ) {
                 pageContent()
             }
@@ -258,7 +238,6 @@ internal fun AgentAppShell(
             currentRoute = currentRoute,
             surface = when {
                 isConversationPaneOpen -> SurfaceKey.Sidebar
-                workspaceVisible -> SurfaceKey.Workspace
                 else -> null
             },
             navigatorOpen = navigatorOpen,
@@ -297,8 +276,6 @@ private fun AgentTopBar(
                         contentDescription = stringResource(R.string.action_conversation_history),
                     )
                 }
-                // 语音播报放在会话列表右边：两者都在左起第一个位置会互相压住。
-                SpeechAutoReadToggle()
                 // 角色对话的身份标识放在顶栏左侧，点按进入角色详情；普通对话保持空标题。
                 homeCharacter?.let { character ->
                     CharacterTopBarIdentity(character = character, onClick = onOpenCharacter)
@@ -310,14 +287,6 @@ private fun AgentTopBar(
     }
     val actions: @Composable RowScope.() -> Unit = {
         if (isHome) {
-            // 顶栏第一排：紧挨速度/内存/工具档，放一个新建对话入口。
-            IconButton(onClick = onNewConversation) {
-                Icon(
-                    imageVector = Icons.Rounded.AddComment,
-                    contentDescription = stringResource(R.string.action_new_conversation),
-                    modifier = Modifier.size(TopBarMenuIconSize),
-                )
-            }
             TopBarOverflowMenu(
                 onNewConversation = onNewConversation,
                 onOpenTerminal = onOpenTerminal,
@@ -337,42 +306,6 @@ private fun AgentTopBar(
     // 白占一屏顶部；它们使用紧凑标题，其余二级内容页统一使用可折叠大标题。
     val compactTitle = isHome || route is AppRoute.Browser || route is AppRoute.Terminal ||
         route is AppRoute.ConversationBranches
-    if (isHome) {
-        // 首页自绘一行：导航图标靠左，新建与溢出菜单靠右；SmallTopAppBar 的 title 只收 String，
-        // 塞不进去 Composable。
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(color)
-                .statusBarsPadding()
-                .height(TopBarRowHeight)
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            navigationIcon()
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = onNewConversation) {
-                Icon(
-                    imageVector = Icons.Rounded.AddComment,
-                    contentDescription = stringResource(R.string.action_new_conversation),
-                    modifier = Modifier.size(TopBarMenuIconSize),
-                )
-            }
-            TopBarOverflowMenu(
-                onNewConversation = onNewConversation,
-                onOpenTerminal = onOpenTerminal,
-                onLaunchKimiWeb = onLaunchKimiWeb,
-                kimiWebLabel = kimiWebLabel,
-                canStopKimiWeb = canStopKimiWeb,
-                onStopKimiWeb = onStopKimiWeb,
-                onRefreshKimiWeb = onRefreshKimiWeb,
-                onOpenBrowser = onOpenBrowser,
-                onOpenBranchGraph = onOpenBranchGraph,
-                conversationTrimmed = conversationTrimmed,
-            )
-        }
-        return
-    }
     if (compactTitle) {
         SmallTopAppBar(
             title = titleForRoute(route),
@@ -380,9 +313,6 @@ private fun AgentTopBar(
             scrollBehavior = scrollBehavior,
             navigationIcon = navigationIcon,
             actions = actions,
-            // miuix 的 actions 行本身是 Arrangement.End（靠右），右边原来有 16dp 默认留白，
-            // 收到 6dp：胶囊组、＋、⋯ 一起往右贴，行尾也不空。
-            actionIconPadding = 6.dp,
         )
     } else {
         AdaptiveTopAppBar(
@@ -396,9 +326,6 @@ private fun AgentTopBar(
 }
 
 private val TopBarMenuIconSize = 20.dp
-
-/** 首页自绘顶栏的高度（与 miuix 紧凑顶栏一致）。 */
-private val TopBarRowHeight = 56.dp
 
 /**
  * 首页顶栏溢出菜单。WindowListPopup 以父布局为锚点，因此与触发按钮包在同一个 Box 中，
@@ -437,10 +364,22 @@ private fun TopBarOverflowMenu(
             val openTerminalText = stringResource(R.string.action_open_terminal)
             val stopKimiWebText = stringResource(R.string.capability_kimi_stop)
             val openBrowserText = stringResource(R.string.action_open_browser)
-            // 灵屏入口与收藏应用平铺在菜单最上方：点开菜单就能直达，不再有二级页面。
+            // 新建对话优先，随后平铺灵屏入口与收藏应用。
             // 菜单项与动作成对：原来按下标硬分发，插一项就会串位（点「打开浏览器」打到别处）。
             val kimiMenuIcon = if (canStopKimiWeb) Icons.Rounded.Stop else Icons.Rounded.Code
             val rows = buildList<Pair<DropdownItem, () -> Unit>> {
+                add(
+                    DropdownItem(
+                        text = stringResource(R.string.action_new_conversation),
+                        icon = { modifier ->
+                            Icon(
+                                imageVector = Icons.Rounded.AddComment,
+                                contentDescription = null,
+                                modifier = modifier.size(TopBarMenuIconSize),
+                            )
+                        },
+                    ) to onNewConversation,
+                )
                 virtualEntries.forEach { entry ->
                     add(
                         DropdownItem(

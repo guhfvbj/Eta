@@ -90,12 +90,6 @@ internal fun GestureCoach(
                 startY = screenHeight * 0.46f
                 endY = startY
             }
-            GestureDirection.SwipeLeft -> {
-                startX = screenWidth * 0.86f
-                endX = screenWidth * 0.34f
-                startY = screenHeight * 0.46f
-                endY = startY
-            }
             GestureDirection.SwipeUp -> {
                 startX = screenWidth * 0.50f
                 endX = startX

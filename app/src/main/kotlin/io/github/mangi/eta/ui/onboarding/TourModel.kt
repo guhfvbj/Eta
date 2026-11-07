@@ -33,8 +33,8 @@ internal data class TourStep(
 
 internal enum class TourPlacement { Auto, Above, Below }
 
-/** 手势演示方向：往右拉出侧栏，往左进工作区。 */
-internal enum class GestureDirection { SwipeRight, SwipeLeft, SwipeUp }
+/** 手势演示方向：往右拉出侧栏，上滑打开会话导航。 */
+internal enum class GestureDirection { SwipeRight, SwipeUp }
 
 /** 包的渲染形态。 */
 internal enum class TourStyle {
@@ -104,10 +104,9 @@ internal data class TourPack(
     }
 }
 
-/** 覆盖层的稳定标识：宿主打开侧栏 / 工作区时上报，触发对应引导包。 */
+/** 覆盖层的稳定标识：宿主打开侧栏时上报，触发对应引导包。 */
 internal object SurfaceKey {
     const val Sidebar = "sidebar"
-    const val Workspace = "workspace"
 }
 
 /** 路由 → 屏 key。只区分「引导包关心的那几屏」，其余返回 FQCN，不会误命中。 */

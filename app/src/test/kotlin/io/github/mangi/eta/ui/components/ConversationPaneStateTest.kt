@@ -4,7 +4,6 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.gestures.AnchoredDraggableState
-import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.foundation.gestures.animateTo
 import androidx.compose.foundation.gestures.snapTo
 import androidx.compose.runtime.MonotonicFrameClock
@@ -34,12 +33,23 @@ class ConversationPaneStateTest {
         target = ConversationPaneAnchor.Closed,
     )
 
+    @Test
+    fun leftDragStopsAtChatAndRightDragStillOpensHistory() {
+        val state = AnchoredDraggableState(
+            initialValue = ConversationPaneAnchor.Closed,
+            anchors = conversationPaneAnchors(320f),
+        )
+        assertEquals(0f, state.dispatchRawDelta(-600f), 0f)
+        assertEquals(0f, state.offset, 0f)
+        assertEquals(320f, state.dispatchRawDelta(600f), 0f)
+        assertEquals(320f, state.offset, 0f)
+        assertEquals(-320f, state.dispatchRawDelta(-600f), 0f)
+        assertEquals(0f, state.offset, 0f)
+    }
+
     private fun verifyInterruptedTransition(initial: ConversationPaneAnchor, target: ConversationPaneAnchor) = runBlocking {
         withTimeout(5_000) {
-            val anchors = DraggableAnchors {
-                ConversationPaneAnchor.Closed at 0f
-                ConversationPaneAnchor.Open at 320f
-            }
+            val anchors = conversationPaneAnchors(320f)
             val state = AnchoredDraggableState(initialValue = initial, anchors = anchors)
             val dragging = mutableStateOf(false)
             val observed = mutableListOf<ConversationPaneAnchor>()
