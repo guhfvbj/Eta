@@ -180,7 +180,7 @@ internal fun AgentFeatureSettingsScreen(onBack: () -> Unit) {
             summary = "会话：${request.conversation}\n工具：${request.tool}\n${request.risk.reasons.joinToString("\n")}\n参数：${request.arguments.take(3000)}",
             onDismissRequest = { AgentToolAuthorization.answer(request.id, false) }) {
             TextButton(text = "拒绝", onClick = { AgentToolAuthorization.answer(request.id, false) })
-            TextButton(text = "允许这次操作", onClick = { AgentToolAuthorization.answer(request.id, true) })
+            TextButton(text = if (request.repeatAllowed) "允许本次运行中的相同操作" else "允许这次操作", onClick = { AgentToolAuthorization.answer(request.id, true) })
         }
     }
 }

@@ -179,7 +179,7 @@ internal class AgentFeatureSession(
         if (risk.level == AgentRiskLevel.LOW) return true
         val grantKey = call.name + "\u0000" + call.argumentsJson
         if (risk.level == AgentRiskLevel.MEDIUM && mode != "strict" && grantKey in sessionGrants) return true
-        val allowed = AgentToolAuthorization.confirm(conversation, call.name, call.argumentsJson, risk, controller)
+        val allowed = AgentToolAuthorization.confirm(conversation, call.name, call.argumentsJson, risk, controller, repeatAllowed = risk.level == AgentRiskLevel.MEDIUM && mode != "strict")
         if (allowed && risk.level == AgentRiskLevel.MEDIUM && mode != "strict") sessionGrants += grantKey
         return allowed
     }
