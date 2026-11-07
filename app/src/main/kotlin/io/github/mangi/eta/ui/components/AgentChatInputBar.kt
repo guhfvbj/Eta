@@ -250,17 +250,10 @@ internal fun AgentChatInputBar(
                 .reversed()
         }
     }
-    // 内存百分比从顶栏搬到这里：顶栏太挤，输入框右上角更顺手，点开就是内存面板。
-    val memoryContext = LocalContext.current
-    var memoryUsage by remember { mutableStateOf(readMemoryUsage(memoryContext)) }
+    // 输入框上方的数据行（tok/s、MCP/技能计数、内存百分比）已按需求移除，
+    // 这里保留两个面板的开关状态，方便以后把入口挪到别处（⋯ 菜单等）时直接复用。
     var showMemorySheet by remember { mutableStateOf(false) }
     var showToolSheet by remember { mutableStateOf(false) }
-    LaunchedEffect(memoryContext) {
-        while (true) {
-            memoryUsage = readMemoryUsage(memoryContext)
-            kotlinx.coroutines.delay(5_000)
-        }
-    }
     val draftContext = LocalContext.current
     if (draftKey != null) {
         // 只记录到草稿仓库，不把每个字符推回业务状态，聊天舞台不会被拖着重组成。
@@ -565,71 +558,6 @@ internal fun AgentChatInputBar(
                             }
                         }
                     }
-                }
-                // @ 引用面板 / 命令面板打开时收起这行状态，别让它压住输入内容。
-                val mentionPanelOpen = mentionQuery != null && referenceCandidates.isNotEmpty()
-                if (!mentionPanelOpen && !paletteVisible) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 8.dp, end = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // 左上角：最近一次响应的平均输出速度（和内存百分比同一行，靠最左）。
-                    contextUsage.averageTokensPerSecond?.let { speed ->
-                        val speedText = java.text.NumberFormat.getNumberInstance()
-                            .apply { maximumFractionDigits = 1 }
-                            .format(speed)
-                        Text(
-                            text = "$speedText tok/s",
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            modifier = Modifier.padding(start = 4.dp, end = 8.dp),
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
-                    // 入口常驻：数据还没加载完时也要能点开看，否则会像“功能没生效”。
-                    run {
-                        Text(
-                            text = if (toolAccess.mcpItems.isEmpty()) {
-                                stringResource(R.string.tool_access_mcp_chip_plain)
-                            } else if (toolAccess.mcpEnabled == 0) {
-                                stringResource(R.string.tool_access_mcp_chip_off)
-                            } else {
-                                stringResource(
-                                    R.string.tool_access_mcp_chip,
-                                    toolAccess.mcpEnabled,
-                                    toolAccess.mcpItems.size,
-                                )
-                            },
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            modifier = Modifier
-                                .clickable { showToolSheet = true }
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                        )
-                        Text(
-                            text = if (toolAccess.skillItems.isEmpty()) {
-                                stringResource(R.string.tool_access_skill_chip_plain)
-                            } else {
-                                stringResource(R.string.tool_access_skill_chip, toolAccess.skillEnabled)
-                            },
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            modifier = Modifier
-                                .clickable { showToolSheet = true }
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                        )
-                    }
-                    Text(
-                        text = stringResource(R.string.memory_inline_label, memoryUsage.usedPercent),
-                        style = MiuixTheme.textStyles.footnote2,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier
-                            .clickable { showMemorySheet = true }
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                    )
-                }
                 }
                 MemoryUsageSheet(show = showMemorySheet, onDismiss = { showMemorySheet = false })
                 ToolAccessSheet(

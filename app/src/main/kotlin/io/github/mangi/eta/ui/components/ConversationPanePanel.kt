@@ -1,6 +1,5 @@
 package io.github.mangi.eta.ui.components
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -8,7 +7,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -184,9 +182,6 @@ internal fun ConversationPanePanel(
 ) {
     // state.conversations 已由 AgentAppState 按标题、预览与消息内容过滤。
     val query = state.searchQuery.trim()
-    // 最近打开过的会话：越靠前越新；搜索和批量模式下不显示，免得干扰结果。
-    val recentOpened = state.recentOpenedIds
-        .mapNotNull { id -> state.conversations.firstOrNull { it.id == id } }
     var batchMode by remember { mutableStateOf(false) }
     // 侧栏内联分类：新建/重命名共用一个输入对话框，不再跳分类页。
     var categoryEditing by remember { mutableStateOf<CategoryEditTarget?>(null) }
@@ -365,14 +360,6 @@ internal fun ConversationPanePanel(
                 verticalArrangement = Arrangement.spacedBy(ConversationPanelMetrics.RowGap),
                 overscrollEffect = null,
             ) {
-                if (query.isBlank() && !batchMode && recentOpened.isNotEmpty()) {
-                    item(key = "recent-opened") {
-                        RecentOpenedSection(
-                            conversations = recentOpened,
-                            onOpen = onConversationSelected,
-                        )
-                    }
-                }
                 item(key = "history-heading") {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 10.dp, bottom = 4.dp, end = 8.dp),
@@ -799,54 +786,6 @@ private fun ConversationSectionHeader(
             }
         }
     }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-/** 侧栏最上面一栏：最近打开过的对话，最多 3 条，多的折叠成 +N。 */
-@Composable
-private fun RecentOpenedSection(
-    conversations: List<ConversationSummaryUi>,
-    onOpen: (String) -> Unit,
-) {
-    val expanded = remember { mutableStateOf(false) }
-    val shown = if (expanded.value) conversations else conversations.take(3)
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 10.dp, bottom = 4.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "最近打开",
-                style = MiuixTheme.textStyles.body2,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MiuixTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
-            if (conversations.size > 3) {
-                Text(
-                    if (expanded.value) "收起" else "+${conversations.size - 3}",
-                    color = MiuixTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(horizontal = 8.dp).clickable { expanded.value = !expanded.value },
-                )
-            }
-        }
-        shown.forEach { conversation ->
-            Text(
-                text = conversation.title.ifBlank { conversation.preview }.ifBlank { "会话" },
-                color = MiuixTheme.colorScheme.onSurface,
-                fontSize = 15.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onOpen(conversation.id) }
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-        }
     }
 }
 
