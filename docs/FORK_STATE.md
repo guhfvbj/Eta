@@ -16,6 +16,8 @@
 
 结论：判断「某功能是否存在」时必须读工作区文件，`git show HEAD:` 会漏掉大量未提交实现。
 
+> 2026-11-07 追加：二开正式线改用独立 applicationId `io.github.mangi.eta.oo0520`（桌面名「Eta 二开」），可与官方版 `io.github.mangi.eta`、测试版 `io.github.mangi.eta.beta`、EtaExpressive 同时安装共存；`namespace` 仍为 `io.github.mangi.eta`，源码包名与 Xposed 入口不变。
+
 ## 2. 上游没有、本项目自己实现的能力（别当成上游行为）
 
 用 `git grep <关键字> origin/main` 实测确认，以下在上游 `origin/main` 里**完全不存在**：

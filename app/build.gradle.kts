@@ -37,24 +37,30 @@ val buildMetadataSuffix = buildMetadata?.let { "+$it" }.orEmpty()
 val isBetaBuild = providers.gradleProperty("eta.beta").orNull.toBoolean()
 val betaApplicationId = "io.github.mangi.eta.beta"
 
+// ── 二开正式线（可与官方版、测试版、EtaExpressive 同时安装）──────────────────
+// 官方正式版与 EtaExpressive 都用 io.github.mangi.eta，同一 applicationId 在系统里
+// 只能存在一份；二开版改用独立 applicationId 实现共存。namespace 保持不变，
+// 源码包名、类名、Xposed 入口与 R 类都不受影响。
+val forkApplicationId = "io.github.mangi.eta.oo0520"
+
 android {
     namespace = "io.github.mangi.eta"
     compileSdk = 37
     ndkVersion = libs.versions.ndk.get()
 
     defaultConfig {
-        applicationId = if (isBetaBuild) betaApplicationId else "io.github.mangi.eta"
+        applicationId = if (isBetaBuild) betaApplicationId else forkApplicationId
         minSdk = 33
         targetSdk = 37
         // versionCode 规则：yyyyMMdd + 两位当日序号（01 起），发版时随 versionName 一起手动递增。
         // 跨零点必须换成当天日期、序号归 01，不能接着前一天的号往下加——
         // 之前从 2026102020 起就一直在沿用 10-20 的日期，日期不再反映实际构建日。
         // 两条线各自计号：正式线沿用主干号段，测试线独立递增（beta.8）。
-        versionCode = if (isBetaBuild) 2026110409 else 2026110702
-        versionName = if (isBetaBuild) "3.4.0-beta.28" else "3.3.6"
-        // 桌面名与包名一起区分，避免志愿者装错包；正式版继续用 @string/app_name。
+        versionCode = if (isBetaBuild) 2026110409 else 2026110703
+        versionName = if (isBetaBuild) "3.4.0-beta.28" else "3.3.7"
+        // 桌面名与包名一起区分，避免和官方版/测试版混淆。
         manifestPlaceholders["applicationLabel"] =
-            if (isBetaBuild) "Eta β" else "@string/app_name"
+            if (isBetaBuild) "Eta β" else "@string/app_name_fork"
         // 只对测试包生效的运行时标记：常驻测试版提示条、同意页强制展示等。
         buildConfigField("boolean", "BETA_BUILD", isBetaBuild.toString())
         testInstrumentationRunner = "io.github.mangi.eta.validation.DeviceValidationRunner"

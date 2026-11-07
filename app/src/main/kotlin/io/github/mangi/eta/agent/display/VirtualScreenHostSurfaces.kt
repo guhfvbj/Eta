@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.display
 
 import android.view.Surface
+import io.github.mangi.eta.BuildConfig
 import java.util.UUID
 
 /**
@@ -12,8 +13,8 @@ import java.util.UUID
  * 不会互相抢同一块 BufferQueue。
  */
 internal object VirtualScreenHostSurfaces {
-    /** 与 AndroidManifest 的 ${applicationId}.hostsurface 对应；正式版 io.github.mangi.eta.hostsurface。 */
-    const val AUTHORITY = "io.github.mangi.eta.hostsurface"
+    /** 与 AndroidManifest 的 ${applicationId}.hostsurface 对应，随安装身份变化。 */
+    val AUTHORITY = "${BuildConfig.APPLICATION_ID}.hostsurface"
 
     const val EXTRA_OWNER = "owner"
 

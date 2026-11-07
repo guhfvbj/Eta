@@ -137,7 +137,7 @@
             android:theme="@style/Theme.Eta" android:windowSoftInputMode="adjustResize" />
 <activity android:name=".agent.display.VirtualScreenHomeActivity" android:exported="false"
             android:excludeFromRecents="true" android:resizeableActivity="true"
-            android:taskAffinity="io.github.mangi.eta.virtualscreen"
+            android:taskAffinity="${applicationId}.virtualscreen"
             android:theme="@style/Theme.Eta" />
 
         <service
