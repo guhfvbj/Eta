@@ -39,6 +39,13 @@ internal class AgentFeatureSession(
     private var decisionStarted = false
     private var allowedGroups: Set<String>? = null
     private fun group(name: String) = mcpGroups[name] ?: AgentToolGroups.classify(name)
+    private fun description(id: String, names: List<String>): String {
+        val summary = AgentToolGroups.groups.firstOrNull { it.id == id }?.summary ?: "MCP 工具服务器"
+        val indexed = if (id.startsWith("mcp:")) names else names.filter { it.startsWith("recipe_") }
+        return summary + indexed.take(16).joinToString(prefix = if (indexed.isEmpty()) "" else ": ", separator = "; ") { name ->
+            "$name: ${catalog[name]?.optJSONObject("function")?.optString("description").orEmpty().take(160)}"
+        }
+    }
     private fun permitted(name: String): Boolean {
         val prefs = AgentFeaturePreferences.load(context)
         val disabled = prefs.optString("disabled_tools").split(',', '\n').map { it.trim() }
@@ -62,7 +69,7 @@ internal class AgentFeatureSession(
         if (!decisionStarted) {
             decisionStarted = true
             val groups = catalog.keys.groupBy(::group).map { (id, names) ->
-                AgentToolGroup(id, AgentToolGroups.groups.firstOrNull { it.id == id }?.summary ?: "MCP server $id", names.toSet())
+                AgentToolGroup(id, description(id, names), names.toSet())
             }
             val historyText = history.takeLast(8).joinToString("\n") { "${it.role}: ${it.content}" }
             if (settings.optBoolean("decision_enabled")) {
@@ -91,7 +98,7 @@ internal class AgentFeatureSession(
                 name.startsWith("mcp_") && !settings.optBoolean("mcp_deferred", true)) result.put(tool)
         }
         val groupIndex = eligible.keys.groupBy(::group).entries.joinToString("; ") { (id, names) ->
-            "$id (${names.size}): ${AgentToolGroups.groups.firstOrNull { it.id == id }?.summary ?: "MCP tools"}"
+            "$id (${names.size}): ${description(id, names)}"
         }
         result.put(schema("tools_use_group", "Load a permitted group or exact tools for the NEXT round. Loading grants no device permissions. Available groups: $groupIndex",
             JSONObject().put("group", property("string")).put("tools", property("array").put("items", property("string")))))
@@ -155,10 +162,10 @@ internal class AgentFeatureSession(
         if (step is ToolRecipeStep.SettingsWrite) check(config.deviceSensitiveActionTools) { "设备写入权限已关闭" }
         if (step is ToolRecipeStep.ContentQuery) check(config.deviceSensitiveReadTools) { "设备敏感读取权限已关闭" }
     }
+    fun allowsHostedSearch(): Boolean = AgentFeaturePreferences.load(context).optBoolean("group_web", true) &&
+        (allowedGroups == null || "web" in allowedGroups.orEmpty())
     fun configForRound(): AgentModelClient.ModelConfig = config.copy(
-        hostedWebSearchEnabled = config.hostedWebSearchEnabled &&
-            AgentFeaturePreferences.load(context).optBoolean("group_web", true) &&
-            (allowedGroups == null || "web" in allowedGroups.orEmpty()),
+        hostedWebSearchEnabled = config.hostedWebSearchEnabled && allowsHostedSearch(),
     )
     private fun isReadOnly(call: AgentModelClient.ToolCall): Boolean {
         if (call.name.startsWith("mcp_") || call.name.startsWith("recipe_")) return false
@@ -172,7 +179,7 @@ internal class AgentFeatureSession(
                 !isReadOnly(call))) return false
         if (mode == "auto" && risk.level < AgentRiskLevel.FATAL) return true
         if (mode == "smart" && risk.level != AgentRiskLevel.FATAL) {
-            val verdict = AgentFeatureReview.review(current, call, prompt, config, controller)
+            val verdict = AgentFeatureReview.review(current, call, prompt, config, controller, history)
             if (verdict == false) return false
             if (verdict == true && risk.level < AgentRiskLevel.HIGH) return true
         }

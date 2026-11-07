@@ -300,14 +300,16 @@ internal class AgentRuntimeRunExecutor(
                     val rawSubagentConfig = runBlocking {
                         RuntimeConfigRepository.subagentRuntimeConfig(request.config)
                     }
-                    AgentRuntimePolicy.constrain(rawSubagentConfig, currentPermissions())
+                    AgentRuntimePolicy.constrain(rawSubagentConfig, currentPermissions()).let { it.copy(
+                        hostedWebSearchEnabled = it.hostedWebSearchEnabled && featureSession?.allowsHostedSearch() != false) }
                 },
                 capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
                 configForOverride = { modelId, effort ->
                     val overridden = RuntimeConfigRepository.subagentRuntimeConfig(
                         request.config, overrideModelId = modelId, overrideEffortWire = effort,
                     )
-                    AgentRuntimePolicy.constrain(overridden, currentPermissions())
+                    AgentRuntimePolicy.constrain(overridden, currentPermissions()).let { it.copy(
+                        hostedWebSearchEnabled = it.hostedWebSearchEnabled && featureSession?.allowsHostedSearch() != false) }
                 },
                 baseToolExecutor = AgentModelClient.ToolExecutor { call ->
                     featureSession?.execute(call, routingExecutor, requireLoaded = false) ?: routingExecutor.execute(call)

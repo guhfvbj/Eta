@@ -110,6 +110,19 @@ class AgentFeatureSessionTest {
         assertEquals("done", response.content)
         assertEquals(listOf("mcp_one"), invoked)
     }
+    @Test fun mcpDiscoveryIncludesCapabilitiesForRoutingInsteadOfOpaqueServerIdsOnly() {
+        val projected = session().project(catalog())
+        val loader = (0 until projected.length()).map { projected.getJSONObject(it).getJSONObject("function") }
+            .single { it.getString("name") == "tools_use_group" }
+        assertTrue(loader.getString("description").contains("mcp_one"))
+        assertTrue(loader.getString("description").contains("mcp_two"))
+    }
+    @Test fun webGroupSwitchAlsoRestrictsProviderHostedSearch() {
+        val session = session()
+        assertTrue(session.allowsHostedSearch())
+        AgentFeaturePreferences.set("group_web", false, context)
+        assertFalse(session.allowsHostedSearch())
+    }
     @Test fun manualTitleProtectionSurvivesPreferenceReload() {
         AgentFeaturePreferences.protectTitle("conversation", context)
         assertTrue(AgentFeaturePreferences.manualTitle("conversation", context))
