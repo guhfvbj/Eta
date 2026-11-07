@@ -308,7 +308,11 @@ internal object RunProgressNotifier {
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setContentIntent(launchIntent(app, "", SessionNotificationIds.IDLE_NOTIFICATION_ID))
             // 降级开关打开时不再申请提升：这张卡就只当普通常驻通知留着。
-            if (Build.VERSION.SDK_INT >= LIVE_UPDATE_SDK && FluidNotificationPolicy.allowsFluid()) {
+            // promoted ongoing 是 API 36.1 才有的能力，36.0 设备上同样没有这个方法。
+            if (Build.VERSION.SDK_INT >= LIVE_UPDATE_SDK &&
+                Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
+                FluidNotificationPolicy.allowsFluid()
+            ) {
                 builder.setShortCriticalText("空闲")
                 builder.setRequestPromotedOngoing(true)
             }
@@ -371,7 +375,11 @@ internal object RunProgressNotifier {
             .addAction(insertAction(app, card, cardId))
         // 会话进度卡才是真正会进流体云的那条，开关开着就必须跳过提升——
         // 之前只给空闲卡加了判断，这里漏了，导致「通知不进流体云」看着没生效。
-        if (Build.VERSION.SDK_INT >= LIVE_UPDATE_SDK && FluidNotificationPolicy.allowsFluid()) {
+        // promoted ongoing 是 API 36.1 才有的能力，36.0 设备上同样没有这个方法。
+        if (Build.VERSION.SDK_INT >= LIVE_UPDATE_SDK &&
+            Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
+            FluidNotificationPolicy.allowsFluid()
+        ) {
             builder.setShortCriticalText(if (paused) "已暂停" else card.actionShort)
             builder.setRequestPromotedOngoing(true)
         }

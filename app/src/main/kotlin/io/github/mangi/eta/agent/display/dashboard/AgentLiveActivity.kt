@@ -157,7 +157,12 @@ internal object AgentLiveActivityBridge {
             .setDeleteIntent(dismissIntent(app, spec))
         actionsFor(spec).forEach { builder.addAction(action(app, spec, it)) }
         // 降级开关打开时，仪表盘这张也只做普通通知，不进流体云。
-        if (Build.VERSION.SDK_INT >= LIVE_SDK && FluidNotificationPolicy.allowsFluid()) {
+        // promoted ongoing 是 Android 16 QPR1（API 36.1）才有的能力：SDK_INT 只有主版本号，
+        // 36.0 的机器上同样没有这两个方法，所以还要看 SDK_INT_FULL。
+        if (Build.VERSION.SDK_INT >= LIVE_SDK &&
+            Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
+            FluidNotificationPolicy.allowsFluid()
+        ) {
             builder.setShortCriticalText(capsule(spec))
             builder.setRequestPromotedOngoing(true)
         }
