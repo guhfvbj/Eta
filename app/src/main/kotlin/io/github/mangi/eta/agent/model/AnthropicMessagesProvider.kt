@@ -50,7 +50,7 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
             .url(ProviderUrls.anthropicMessagesUrl(config.baseUrl))
             .headers(headers)
             .post(
-                buildRequestJson(config, request.messages, request.effectiveTools)
+                buildRequestJson(config, request.messages, request.effectiveTools).also { body -> request.outputLimit?.let { body.put("max_tokens", it.coerceIn(1, 8192)) } }
                     .toString()
                     .toRequestBody(JSON_MEDIA_TYPE)
             )

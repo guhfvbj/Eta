@@ -82,6 +82,25 @@ internal object AgentDecisionEndpoint {
         return Resolution.Success(full)
     }
 
+    fun llmConfig(config: io.github.mangi.eta.agent.model.AgentModelClient.ModelConfig, override: String): io.github.mangi.eta.agent.model.AgentModelClient.ModelConfig {
+        if(override.isBlank()) return config
+        require(normalize(config.baseUrl,override) is Resolution.Success) { "LLM 端点无效" }
+        val raw=override.trim().trimEnd('/')
+        val suffix=listOf("/chat/completions","/responses","/messages","/interactions","/systemone").firstOrNull { raw.endsWith(it,true) }
+        return config.copy(baseUrl=if(suffix==null) raw else raw.dropLast(suffix.length))
+    }
+    fun requestUrl(config: io.github.mangi.eta.agent.model.AgentModelClient.ModelConfig, override: String, protocol: String): String? {
+        if(protocol=="systemone") return (normalize(config.baseUrl,override) as? Resolution.Success)?.url
+        val resolved=runCatching { llmConfig(config,override) }.getOrNull() ?: return null
+        val effective=io.github.mangi.eta.agent.model.ProviderRequest(resolved,org.json.JSONArray(),org.json.JSONArray(),purpose=io.github.mangi.eta.agent.model.ProviderRequestPurpose.COMPACTION).effectiveConfig
+        return when(effective.providerType) {
+            io.github.mangi.eta.data.model.ProviderTypes.ANTHROPIC -> io.github.mangi.eta.agent.model.ProviderUrls.anthropicMessagesUrl(effective.baseUrl)
+            io.github.mangi.eta.data.model.ProviderTypes.GEMINI -> io.github.mangi.eta.agent.model.ProviderUrls.geminiInteractionsUrl(effective.baseUrl)
+            else -> if(effective.openAiEndpointMode==io.github.mangi.eta.data.model.OpenAiEndpointMode.RESPONSES)
+                io.github.mangi.eta.agent.model.ProviderUrls.openAiResponsesUrl(effective.baseUrl) else io.github.mangi.eta.agent.model.ProviderUrls.openAiChatCompletionsUrl(effective.baseUrl)
+        }
+    }
+
     const val REASON_BLANK = "blank"
     const val REASON_QUERY = "query_not_allowed"
     const val REASON_MALFORMED = "malformed"
@@ -235,6 +254,7 @@ internal object AgentDecisionModelClient {
         state: JSONObject,
         questions: List<AgentDecisionQuestion>,
         dagEdges: Map<String, List<String>> = emptyMap(),
+        runController: io.github.mangi.eta.agent.runtime.AgentRunController? = null,
     ): AgentDecisionOutcome = withContext(Dispatchers.IO) {
         val url = AgentDecisionEndpoint.resolve(config.baseUrl)
             ?: return@withContext AgentDecisionOutcome.Failure(
@@ -266,7 +286,9 @@ internal object AgentDecisionModelClient {
             .build()
             .newCall(request)
 
+        val binding = runController?.register { call.cancel() }
         try {
+            runController?.throwIfCancelled()
             call.execute().use { response ->
                 handleResponse(response, startedAt, questions)
             }
@@ -291,7 +313,7 @@ internal object AgentDecisionModelClient {
                 latencyMs = elapsedMs(startedAt),
                 detail = "${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
-        }
+        } finally { binding?.close() }
     }
 
     private fun buildPayload(

@@ -45,6 +45,8 @@ internal class AgentRunMessageProjector(
         }
         is AgentEvent.SearchSuggestions -> attachSearchSuggestions(runId, event, messages)
         is AgentEvent.UsageReceived -> attachUsage(runId, event.round, event.usage.toUi(), messages)
+        is AgentEvent.DecisionFallback -> messages + SystemNoticeMessageUi(
+            id = "decision-fallback-$runId", code = SystemNoticeCode.CommandNote, detail = event.displayMessage)
         is AgentEvent.HistoryTrimmed -> messages
         is AgentEvent.ToolStarted ->
             startTool(runId, event, finalizeTextRound(runId, event.round, finalizeThinkingRound(runId, event.round, messages)))

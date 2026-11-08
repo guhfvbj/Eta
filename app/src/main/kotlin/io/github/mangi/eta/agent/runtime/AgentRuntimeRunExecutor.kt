@@ -291,6 +291,12 @@ internal class AgentRuntimeRunExecutor(
                 rootAvailable = { AgentToolCapabilities.capture(appContext).rootAvailable },
                 mcpGroups = mcpSnapshot.tools.associate { it.modelName to "mcp:${it.server.id}" },
                 writable = roleplayContext == null,
+                runId = request.runId,
+                onDecisionFallback = { reason -> acceptEvent(session, AgentEvent.DecisionFallback(reason,
+                    io.github.mangi.eta.agent.model.AgentFeaturePreferences.load(appContext).optString("decision_failure", "open") == "closed" && reason != "missing_model"),
+                    archivedEvents, entrySurfaceGuard, checkpointRecorder) },
+                persistentSession = conversationId != null || request.modelSessionId.isNotBlank(),
+                mcpLabels = mcpSnapshot.tools.associate { "mcp:${it.server.id}" to it.server.name },
             )
             val subagentExecutor = SubagentExecutor(
                 // 子代理会话按「对话」隔离；无对话（外部入口）时退回 runId。
@@ -311,12 +317,14 @@ internal class AgentRuntimeRunExecutor(
                     AgentRuntimePolicy.constrain(overridden, currentPermissions()).let { it.copy(
                         hostedWebSearchEnabled = it.hostedWebSearchEnabled && featureSession?.allowsHostedSearch() != false) }
                 },
-                baseToolExecutor = AgentModelClient.ToolExecutor { call ->
-                    featureSession?.execute(call, routingExecutor, requireLoaded = false) ?: routingExecutor.execute(call)
-                },
+                baseToolExecutor = routingExecutor,
+                featureExecution = featureSession?.let { features -> { call, childController ->
+                    features.execute(call, routingExecutor, requireLoaded = false, executionController = childController)
+                } },
                 skillContext = skillContext,
                 memoryContext = memoryContext,
                 mcpTools = mcpTools,
+                featureToolFilter = featureSession?.let { it::filterChildTools },
                 executionContext = executor.terminalExecutionContext,
                 onProgress = { progressEvent ->
                     acceptEvent(

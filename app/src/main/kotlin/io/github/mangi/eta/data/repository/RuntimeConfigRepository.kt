@@ -154,8 +154,14 @@ internal object RuntimeConfigRepository {
     )
 
     /** 会话绑定的模型仍可用时使用它，否则回落到默认模型。 */
-    suspend fun runtimeConfigFor(modelId: String?): AgentModelClient.ModelConfig? {
+    suspend fun runtimeConfigFor(modelId: String?, providerId: String? = null): AgentModelClient.ModelConfig? {
         ProviderRepository.ensureBuiltInsMerged()
+        if (!providerId.isNullOrBlank()) {
+            val provider = ProviderRepository.providerById(providerId)?.takeIf { it.isEnabled }
+            val model = provider?.models?.firstOrNull { it.id == modelId && it.isEnabled }
+            if (provider != null && model != null) return buildRuntimeConfig(provider, model)
+            return currentRuntimeConfig()
+        }
         ProviderRepository.allProviders().enabledModel(modelId)?.let { (provider, model) ->
             return buildRuntimeConfig(provider, model)
         }

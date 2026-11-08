@@ -8,6 +8,7 @@ internal object EtaBackupValidation {
     suspend fun validate(staged: EtaBackupJsonStreams.StagedDocument): EtaBackupSummary {
         val header = staged.header
         validateHeader(header)
+        AgentFeatureBackupTransfer.validate(header.agentFeaturesJson, header.toolRecipesJson)
         val conversationIds = mutableSetOf<String>()
         val revisionConversationIds = mutableSetOf<String>()
         val bindingIds = mutableSetOf<String>()

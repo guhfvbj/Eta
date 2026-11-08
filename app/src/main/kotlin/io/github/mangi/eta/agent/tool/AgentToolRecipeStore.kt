@@ -72,10 +72,36 @@ internal class AgentToolRecipeStore(
         persistLocked(recipe, previous = loadLocked()[recipe.name])
     }
 
+    /** Atomic replacement for trusted logical backups, validated before touching live files. */
+    fun replaceAll(recipes: List<ToolRecipe>) = lock.write {
+        require(recipes.size <= ToolRecipeConstants.MAX_STORED_RECIPES)
+        require(recipes.map { it.name }.toSet().size == recipes.size)
+        val names = recipes.map { it.name }.toSet()
+        require(recipes.all { names.containsAll(it.composedRecipes) } && detectCycle(recipes) == null)
+        val parent = requireNotNull(rootDir.parentFile)
+        parent.mkdirs()
+        val staged = File(parent, ".recipe-restore-${java.util.UUID.randomUUID()}")
+        val previous = File(parent, ".recipe-previous-${java.util.UUID.randomUUID()}")
+        check(staged.mkdirs())
+        try {
+            recipes.forEach { recipe ->
+                require(ToolRecipeParser.parse(ToolRecipeShareFormat.entryOf(recipe), names) is ToolRecipeParser.ParseResult.Ok)
+                File(staged, "${recipe.name}.json").writeText(serialize(recipe).toString())
+            }
+            if (rootDir.exists()) check(rootDir.renameTo(previous)) { "无法暂存旧配方" }
+            if (!staged.renameTo(rootDir)) {
+                check(!previous.exists() || previous.renameTo(rootDir)) { "无法恢复旧配方目录" }
+                error("无法切换配方目录")
+            }
+            cache = null
+            previous.deleteRecursively()
+        } finally { staged.deleteRecursively() }
+    }
+
     /** Batch import rejects conflicts and rolls back newly created files on failure. */
     fun importShared(raw: String): Int = lock.write {
-        val recipes = ToolRecipeShareFormat.decode(raw)
         val existing = loadLocked()
+        val recipes = ToolRecipeShareFormat.decode(raw, existing.keys)
         require(recipes.none { exists(it.name) }) { "存在同名配方；请先改名，不会覆盖已有配方" }
         require(existing.size + recipes.size <= ToolRecipeConstants.MAX_STORED_RECIPES)
         val combined = existing.values + recipes

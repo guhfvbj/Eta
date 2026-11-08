@@ -35,6 +35,10 @@ internal sealed interface AgentEvent {
     }
 
     /** 请求侧裁掉了最老轮次：只在本次请求里生效，界面与数据库都不删。 */
+    data class DecisionFallback(val reason: String, val closed: Boolean) : AgentEvent {
+        val displayMessage: String get() = if (closed) "判断模型不可用，已回退到基础工具：$reason" else "判断模型不可用，本轮恢复用户允许的工具：$reason"
+        override fun toLogLine() = "decision_fallback closed=$closed reason=${reason.toSafeLogToken()}"
+    }
     data class HistoryTrimmed(
         val omittedMessages: Int,
         val omittedUserRounds: Int,

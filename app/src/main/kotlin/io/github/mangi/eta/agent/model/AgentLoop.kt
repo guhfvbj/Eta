@@ -413,7 +413,7 @@ internal class AgentLoop(
                 round = round,
                 toolCall = toolCall,
                 code = "TOOL_NOT_AVAILABLE",
-                message = "工具未在本轮能力目录中提供，请使用当前可用工具",
+                message = "工具当前未加载或未获允许；若目录提供 tools_search / tools_use_group，请先加载并在下一轮调用。加载不会放宽权限。",
             )
         }
         val roundCall = if (toolCall.round == round) toolCall else toolCall.copy(round = round)

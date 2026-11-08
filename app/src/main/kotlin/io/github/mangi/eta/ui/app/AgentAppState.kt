@@ -1649,6 +1649,8 @@ internal class AgentAppState(
     }
 
     fun deleteConversation(conversationId: String) {
+        io.github.mangi.eta.agent.model.AgentFeaturePreferences.clearConversation(conversationId, appContext)
+        titleRequests.remove(conversationId)
         val wasSelected = selectedConversationId == conversationId
         forgetLoadedConversation(conversationId)
         conversationsById = conversationsById - conversationId
@@ -2135,6 +2137,9 @@ internal class AgentAppState(
             images = pendingImages.toHistoryImages(),
         ).copy(messageId = userMessage.id)
 
+        if (editBoundary?.userMessageIndex == 0 && io.github.mangi.eta.agent.model.AgentFeaturePreferences.resetGeneratedTitleForEdit(conversationId, appContext)) {
+            titleRequests.remove(conversationId)
+        }
         val currentTitle = conversationTitles[conversationId]
         val oldAutoTitle = editBoundary
             ?.takeIf { it.userMessageIndex == 0 }
@@ -2144,7 +2149,7 @@ internal class AgentAppState(
         val nextAutoTitle = defaultConversationTitle(prompt, fileReferences)
         val title = if (
             editBoundary?.userMessageIndex == 0 &&
-            (currentTitle == oldAutoTitle || currentTitle.isNullOrBlank())
+            (!io.github.mangi.eta.agent.model.AgentFeaturePreferences.manualTitle(conversationId, appContext))
         ) {
             nextAutoTitle
         } else {
@@ -2989,17 +2994,23 @@ internal class AgentAppState(
         scope.launch {
             val title = withContext(Dispatchers.IO) {
                 runCatching {
-                    val modelId = settings.optString("title_model")
-                    val config = if (modelId.isBlank()) RuntimeConfigRepository.runtimeConfigFor(state.modelId)
-                        else preferences.model(modelId)
-                    requireNotNull(config)
+                    val custom = settings.optBoolean("title_custom")
+                    val selectedId = settings.optString("title_custom_model_id")
+                    val providerId = settings.optString("title_custom_provider_id").ifBlank {
+                        ProviderRepository.providerByModelId(selectedId)?.id.orEmpty()
+                    }
+                    val current = if(custom) null else RuntimeConfigRepository.runtimeConfigFor(state.modelId,
+                        ProviderRepository.providerByModelId(state.modelId.orEmpty())?.id)
+                    val config = io.github.mangi.eta.agent.model.ConversationTitleModel.resolve(
+                        io.github.mangi.eta.agent.model.ModelFeatureSelection(custom,providerId,selectedId), current)
                     io.github.mangi.eta.agent.model.ConversationTitleModel.generate(config, question.content, answer,
                         io.github.mangi.eta.agent.runtime.AgentRunController(), id,
                         if (settings.optBoolean("title_follow")) expected.orEmpty() else "")
                 }.getOrNull()
             } ?: return@launch
+            val latestQuestion = conversationsById[id]?.messages?.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>()?.lastOrNull()
             if (!preferences.load(appContext).optBoolean("title_enabled", true) || titleRequests[id] != runId || preferences.manualTitle(id, appContext) || conversationTitles[id] != expected ||
-                conversationsById[id]?.messages?.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>()?.lastOrNull()?.id != question.id) return@launch
+                latestQuestion?.id != question.id || latestQuestion.content != question.content || latestQuestion.images != question.images) return@launch
             conversationTitles = conversationTitles + (id to title)
             prefs.edit().putBoolean("generated_title_$id", true).apply()
             refreshConversationSummaries()

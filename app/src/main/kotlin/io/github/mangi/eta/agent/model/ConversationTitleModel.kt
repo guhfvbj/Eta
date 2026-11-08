@@ -7,8 +7,8 @@ import org.json.JSONObject
 internal object ConversationTitleModel {
     private const val QUESTION_LIMIT = 4000
     private const val ANSWER_LIMIT = 4000
-    suspend fun resolve(selection: ModelFeatureSelection, current: AgentModelClient.ModelConfig): AgentModelClient.ModelConfig =
-        if (!selection.custom) current else selection.resolve() ?: error("自定义标题模型不可用，保留原标题")
+    suspend fun resolve(selection: ModelFeatureSelection, current: AgentModelClient.ModelConfig?): AgentModelClient.ModelConfig =
+        if (!selection.custom) requireNotNull(current) else selection.resolve() ?: error("自定义标题模型不可用，保留原标题")
 
     /** 当前标题本来就短（normalize 上限 24），留余量即可，避免把脏数据整段塞进提示词。 */
     private const val PREVIOUS_TITLE_LIMIT = 64

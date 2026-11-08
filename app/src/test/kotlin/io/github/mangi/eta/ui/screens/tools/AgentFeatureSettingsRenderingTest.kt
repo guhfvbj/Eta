@@ -34,13 +34,25 @@ import org.robolectric.shadows.ShadowLooper
 @RunWith(EtaRobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [34])
 class AgentFeatureSettingsRenderingTest {
-    @Test fun loadingControlsRenderUsingTheExistingMiuixPage() = withContent({ AgentFeatureSettingsScreen {} }) { view ->
+    @Test fun loadingControlsRenderUsingTheExistingMiuixPage() = withContent({ io.github.mangi.eta.ui.screens.models.DecisionModelSettingsScreen {} }) { view ->
         val ownerView = view.getChildAt(0)
         val owner = ownerView.javaClass.getMethod("getSemanticsOwner").invoke(ownerView) as SemanticsOwner
         val nodes = descendants(owner.unmergedRootSemanticsNode)
-        for (text in listOf("模型与工具策略", "工具按需加载", "加载方式")) {
+        for (text in listOf("判断模型", "总开关", "启用判断模型", "运行模式", "模型与端点", "连通性", "高级", "诊断与遥测", "清理")) {
             assertTrue("未渲染：$text", nodes.any { node -> node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true })
         }
+    }
+    @Test fun titleSettingsRenderIndependentCustomAndFollowOptions() = withContent({ io.github.mangi.eta.ui.screens.models.TitleModelSettingsScreen {} }) { view ->
+        assertRendered(view,listOf("标题模型","自动生成会话标题","使用自定义模型","每轮回复后刷新标题"))
+    }
+    @Test fun recipesRenderPermissionsAndAuditableEmptyState() = withContent({ ToolRecipesScreen {} }) { view ->
+        assertRendered(view,listOf("模型自建工具","配方步骤权限"))
+    }
+    private fun assertRendered(view: ComposeView,texts: List<String>) {
+        val ownerView=view.getChildAt(0)
+        val owner=ownerView.javaClass.getMethod("getSemanticsOwner").invoke(ownerView) as SemanticsOwner
+        val nodes=descendants(owner.unmergedRootSemanticsNode)
+        texts.forEach { text -> assertTrue("未渲染：$text",nodes.any { it.config.getOrNull(SemanticsProperties.Text)?.any { entry->entry.text==text }==true }) }
     }
     private fun descendants(node: SemanticsNode): List<SemanticsNode> =
         listOf(node) + node.children.flatMap(::descendants)
@@ -56,8 +68,8 @@ class AgentFeatureSettingsRenderingTest {
                 }
             }
             ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
-            view.measure(View.MeasureSpec.makeMeasureSpec(320, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.AT_MOST))
-            view.layout(0, 0, 320, view.measuredHeight)
+            view.measure(View.MeasureSpec.makeMeasureSpec(390, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(4000, View.MeasureSpec.EXACTLY))
+            view.layout(0, 0, 390, view.measuredHeight)
             ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
             verify(view)
         } finally {

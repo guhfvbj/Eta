@@ -124,7 +124,7 @@ internal object AgentModelClient {
         val customization = PromptCustomizationStore.load()
         val toolPolicy = AgentToolPolicyStore.load()
         val initialCapabilities = capabilitiesProvider()
-        val messages = AgentPromptBuilder.buildInitialMessages(
+        var messages = AgentPromptBuilder.buildInitialMessages(
             config,
             prompt,
             images,
@@ -154,7 +154,7 @@ internal object AgentModelClient {
         if (compactOnly) messages.remove(messages.length() - 1)
         val transcript = JSONArray()
         // 旧 history 中的无效消息可能在组装时被跳过，系统边界不能由 history 条数倒推。
-        val systemCount = AgentPromptBuilder.buildSystemMessages(
+        var systemCount = AgentPromptBuilder.buildSystemMessages(
             config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext, executionContext, initialCapabilities.virtualScreenEnabled, initialCapabilities.virtualScreenFallbackEnabled, customization,
         ).length()
         // MCP 工具只在 run 开始时压一次：每轮重复解析这 190KB JSON 纯属浪费。
@@ -165,7 +165,16 @@ internal object AgentModelClient {
         val compactedAdditionalTools = if (additionalTools.length() == 0) {
             additionalTools
         } else {
-            JSONArray(additionalTools.toString()).also { AgentToolSchemaCompactor.compactMcp(it) }
+            JSONArray().also { result ->
+                for (i in 0 until additionalTools.length()) {
+                    val tool = JSONObject(additionalTools.getJSONObject(i).toString())
+                    if (tool.getJSONObject("function").getString("name").startsWith("mcp_")) {
+                        val single = JSONArray().put(tool)
+                        AgentToolSchemaCompactor.compactMcp(single)
+                        result.put(single.getJSONObject(0))
+                    } else result.put(tool)
+                }
+            }
 
         }
         fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
@@ -193,6 +202,18 @@ internal object AgentModelClient {
             return toolFilter?.invoke(projected) ?: projected
         }
         val tools = toolsFor(initialCapabilities)
+        val promptConfig = if (featureSession?.chatOnly == true) config.copy(subagentTools = false) else config
+        val promptSkills = if (featureSession?.chatOnly == true) SkillContext.EMPTY else skillContext
+        val promptMemory = if (featureSession?.chatOnly == true) AgentMemoryContext.DISABLED else memoryContext
+        if (featureSession?.chatOnly == true) {
+            messages = AgentPromptBuilder.buildInitialMessages(promptConfig, prompt, images, history, promptSkills, promptMemory,
+                initialCapabilities.rootAvailable, roleplayContext, executionContext, initialCapabilities.virtualScreenEnabled,
+                initialCapabilities.virtualScreenFallbackEnabled, customization)
+            messages.getJSONObject(messages.length() - 1).put("_eta_message_id", initialUserMessageId)
+            AssistantScreenContextProjection.attach(messages.getJSONObject(messages.length() - 1), assistantScreenContext)
+            systemCount = AgentPromptBuilder.buildSystemMessages(promptConfig, promptSkills, promptMemory, initialCapabilities.rootAvailable,
+                roleplayContext, executionContext, initialCapabilities.virtualScreenEnabled, initialCapabilities.virtualScreenFallbackEnabled, customization).length()
+        }
         // 只在请求侧丢最老轮次：数据库与界面一条不删；系统提示、记忆与当前输入永不裁。
         val trimOutcome = if (rewriteReply || compactOnly) AgentHistoryTrimmer.Outcome() else
             AgentHistoryTrimmer.trimInPlace(
@@ -220,14 +241,14 @@ internal object AgentModelClient {
         var promptVirtualScreenFallbackEnabled = initialCapabilities.virtualScreenFallbackEnabled
         fun toolsForRound(): JSONArray {
             val capabilities = capabilitiesProvider()
-            if (featureSession != null) {
+            if (featureSession != null || toolFilter != null) {
                 publishedTools = toolsFor(capabilities)
             }
             if (capabilities.rootAvailable != promptRootAvailable ||
                 capabilities.virtualScreenEnabled != promptVirtualScreenEnabled ||
                 capabilities.virtualScreenFallbackEnabled != promptVirtualScreenFallbackEnabled) {
                 val systemMessages = AgentPromptBuilder.buildSystemMessages(
-                    config, skillContext, memoryContext, capabilities.rootAvailable, roleplayContext, executionContext, capabilities.virtualScreenEnabled, capabilities.virtualScreenFallbackEnabled, customization,
+                    promptConfig, promptSkills, promptMemory, capabilities.rootAvailable, roleplayContext, executionContext, capabilities.virtualScreenEnabled, capabilities.virtualScreenFallbackEnabled, customization,
                 )
                 for (index in 0 until systemMessages.length()) {
                     messages.put(index, systemMessages.getJSONObject(index))
@@ -286,7 +307,7 @@ internal object AgentModelClient {
             initialSupplementIndex = initialSupplementIndex,
             remoteToolNames = remoteToolNames,
             toolsForRound = ::toolsForRound,
-            dynamicTools = featureSession != null,
+            dynamicTools = featureSession != null || toolFilter != null,
             configForRound = featureSession?.let { it::configForRound },
         )
         val result = try {

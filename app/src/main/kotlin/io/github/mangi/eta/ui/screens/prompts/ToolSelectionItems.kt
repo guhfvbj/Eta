@@ -38,7 +38,11 @@ internal data class ToolGrouping(
     val grouped: Map<String, List<String>>,
 )
 
-internal val ALL_TOOL_NAMES: List<String> by lazy { AgentToolRequirements.toolNames.sorted() }
+internal val ALL_TOOL_NAMES: List<String> get() = (AgentToolRequirements.toolNames + setOf(
+    "subagent", "subagent_profile", "conversation_history", "eta_author_tool", "eta_list_recipes") +
+    runCatching { io.github.mangi.eta.agent.runtime.AgentAppContext.resolve()?.let {
+        io.github.mangi.eta.agent.tool.AgentToolRecipeStore.get(it).all().map { recipe -> recipe.modelToolName }
+    }.orEmpty() }.getOrDefault(emptyList())).sorted()
 
 /** 当前 MCP 服务器带来的工具名（mt_*），用于工具边界与预览同口径统计。 */
 internal suspend fun loadMcpToolNames(): List<String> = runCatching {
@@ -51,7 +55,7 @@ internal fun allToolNames(extra: List<String>): List<String> =
 
 internal fun groupingOf(state: ToolSelectorState, allTools: List<String> = ALL_TOOL_NAMES): ToolGrouping {
     val grouped: Map<String, List<String>> = when (state.grouping) {
-        "权限" -> allTools.groupBy { name -> AgentToolRequirements.rootRequirement(name).name }
+        "权限" -> allTools.groupBy { name -> (AgentToolRequirements.find(name)?.rootRequirement ?: io.github.mangi.eta.agent.tool.RootRequirement.NONE).name }
         "字母" -> allTools.groupBy { name -> name.first().uppercaseChar().toString() }
         else -> allTools.groupBy { name -> AgentToolNaming.face(name).category }
     }

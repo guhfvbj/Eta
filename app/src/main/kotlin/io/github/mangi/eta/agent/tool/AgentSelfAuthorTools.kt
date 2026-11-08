@@ -91,7 +91,7 @@ internal class AgentSelfAuthorTools(
     }
 
     private fun create(args: JSONObject): String {
-        val name = args.optString("name").trim()
+        val name = args.optString("name", args.optJSONObject("recipe")?.optString("name").orEmpty()).trim()
         if (name.isBlank()) {
             return error("INVALID_ARGUMENT", "create 需要提供 name")
         }
@@ -103,7 +103,7 @@ internal class AgentSelfAuthorTools(
     }
 
     private fun update(args: JSONObject): String {
-        val name = args.optString("name").trim()
+        val name = args.optString("name", args.optJSONObject("recipe")?.optString("name").orEmpty()).trim()
         if (name.isBlank()) {
             return error("INVALID_ARGUMENT", "update 需要提供 name")
         }
@@ -113,7 +113,7 @@ internal class AgentSelfAuthorTools(
     }
 
     private fun delete(args: JSONObject): String {
-        val name = args.optString("name").trim()
+        val name = args.optString("name", args.optJSONObject("recipe")?.optString("name").orEmpty()).trim()
         if (name.isBlank()) {
             return error("INVALID_ARGUMENT", "delete 需要提供 name")
         }
@@ -144,7 +144,7 @@ internal class AgentSelfAuthorTools(
     }
 
     private fun setEnabled(args: JSONObject, enabled: Boolean): String {
-        val name = args.optString("name").trim()
+        val name = args.optString("name", args.optJSONObject("recipe")?.optString("name").orEmpty()).trim()
         if (name.isBlank()) {
             return error("INVALID_ARGUMENT", "${if (enabled) "enable" else "disable"} 需要提供 name")
         }
@@ -178,11 +178,19 @@ internal class AgentSelfAuthorTools(
      * 3. 参数占位符与 schema 的一致性检查（避免模型写了永远填不上的模板）
      */
     private fun persist(args: JSONObject, isCreate: Boolean, existing: ToolRecipe? = null): String {
-        val definition = args.optJSONObject("recipe")
+        val definition = args.optJSONObject("recipe")?.let { JSONObject(it.toString()) }
+            ?: args.takeIf { it.has("steps") }?.let { JSONObject(it.toString()).apply { remove("action") } }
             ?: return error(
                 "INVALID_ARGUMENT",
                 "需要提供 recipe 对象，含 name / description / parameters / steps",
             )
+        val target = args.optString("name").ifBlank { definition.optString("name") }
+        if (definition.optString("name") != target) return error("RECIPE_NAME_MISMATCH", "name 与 recipe.name 必须相同")
+        if (isCreate && store.exists(target)) return error("RECIPE_EXISTS", "配方名称已存在，不会覆盖")
+        if (existing != null) {
+            if (definition.optString("name", existing.name) != existing.name) return error("RECIPE_NAME_MISMATCH", "更新不能隐式改名，请在配方管理页改名")
+            if (!definition.has("enabled")) definition.put("enabled", existing.enabled)
+        }
         val all = store.all()
         val existingNames = all.map { it.name }.toMutableSet()
 

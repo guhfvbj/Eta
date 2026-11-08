@@ -47,11 +47,13 @@ internal data class EtaBackupDocument(
     val conversationState: ConversationStateEntity? = null,
     val memoryMd: String = "",
     val roleplay: CharacterBackupData? = null,
+    val agentFeaturesJson: String? = null,
+    val toolRecipesJson: List<String>? = null,
 ) {
     companion object {
         const val FORMAT = "eta-backup"
         // 旧版会把未知原生 Provider 当作 OpenAI-compatible，必须通过备份版本阻止错误恢复。
-        const val SCHEMA_VERSION = 4
+        const val SCHEMA_VERSION = 5
     }
 }
 
@@ -100,6 +102,9 @@ internal object EtaBackupRepository {
                     writer.value("selectedModelId", String.serializer().nullable, settings.selectedModelId)
                     writer.value("conversationState", ConversationStateEntity.serializer().nullable, dao.state())
                     writer.value("memoryMd", String.serializer(), memory)
+                    val features = AgentFeatureBackupTransfer.snapshot(appContext)
+                    writer.value("agentFeaturesJson", String.serializer().nullable, features.settings)
+                    writer.value("toolRecipesJson", ListSerializer(String.serializer()).nullable, features.recipes)
                     // #002：分类数量很小，直接放 header，不进记录流。
                     writer.value(
                         "conversationCategories",
@@ -161,6 +166,7 @@ internal object EtaBackupRepository {
                 val document = staged.header
                 val database = EtaDatabase.get(appContext)
                 val previousMemory = AgentMemoryRepository.snapshot().content
+                val previousFeatures = AgentFeatureBackupTransfer.snapshot(appContext)
                 val previousRoleMemories = document.roleplay?.assets.orEmpty().associate {
                     it.characterId to CharacterMemoryRepository.snapshot(appContext, it.characterId).content
                 }
@@ -173,6 +179,7 @@ internal object EtaBackupRepository {
                 // 显式检查原任务取消，使 Room 提交到凭据清理之间不留下被取消打断的空隙。
                 withContext(NonCancellable) {
                     var memoryWriteStarted = false
+                    var featureWriteStarted = false
                     try {
                         database.withTransaction {
                             cancellation.ensureActive()
@@ -218,6 +225,9 @@ internal object EtaBackupRepository {
                                     roleplay.characters.map { it.copy(avatarPath = avatarPaths[it.id]) }, roleplay.persona,
                                 )
                             }
+                            phase = "restore_features"
+                            featureWriteStarted = true
+                            AgentFeatureBackupTransfer.restore(appContext, document.agentFeaturesJson, document.toolRecipesJson)
                             phase = "restore_memory"
                             cancellation.ensureActive()
                             memoryWriteStarted = true
@@ -226,6 +236,8 @@ internal object EtaBackupRepository {
                             cancellation.ensureActive()
                         }
                     } catch (failure: Throwable) {
+                        if (featureWriteStarted) runCatching { AgentFeatureBackupTransfer.restore(appContext, previousFeatures.settings, previousFeatures.recipes) }
+                            .onFailure { failure.addSuppressed(it) }
                         if (memoryWriteStarted) {
                             try { AgentMemoryRepository.replaceAll(previousMemory) } catch (restoreFailure: Throwable) {
                                 failure.addSuppressed(restoreFailure)

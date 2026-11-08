@@ -74,7 +74,7 @@ internal object ToolRecipeShareFormat {
      *
      * 失败一律抛 [ToolRecipeShareException]，带可读原因；不返回半份结果。
      */
-    fun decode(raw: String): List<ToolRecipe> {
+    fun decode(raw: String, existingNames: Set<String> = emptySet()): List<ToolRecipe> {
         if (raw.length > MAX_PAYLOAD_CHARS) {
             throw ToolRecipeShareException("分享内容过大（超过 ${MAX_PAYLOAD_CHARS} 字符）")
         }
@@ -102,7 +102,7 @@ internal object ToolRecipeShareFormat {
         for (index in 0 until entries.length()) {
             val entry = entries.optJSONObject(index)
                 ?: throw ToolRecipeShareException("第 ${index + 1} 份配方不是对象")
-            when (val result = ToolRecipeParser.parse(entry, existingNames = packageNames, nowMillis = now)) {
+            when (val result = ToolRecipeParser.parse(entry, existingNames = packageNames + existingNames, nowMillis = now)) {
                 is ToolRecipeParser.ParseResult.Invalid ->
                     throw ToolRecipeShareException("第 ${index + 1} 份配方无效：${result.message}")
 

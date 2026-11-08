@@ -496,7 +496,9 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.Browser -> stringResource(R.string.route_browser)
     is AppRoute.Terminal -> stringResource(R.string.route_terminal)
     is AppRoute.Tools -> stringResource(R.string.route_tools)
-    is AppRoute.AgentFeatures -> "模型与工具策略"
+    is AppRoute.DecisionModel -> "判断模型"
+    is AppRoute.TitleModel -> "标题模型"
+    is AppRoute.ToolRecipes -> "模型自建工具"
     is AppRoute.WebToolsSettings -> stringResource(R.string.web_tools_settings_title)
     is AppRoute.Skills -> stringResource(R.string.route_skills)
     is AppRoute.Subagents -> "Subagent"

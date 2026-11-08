@@ -690,6 +690,9 @@ internal object AgentRuntimeWire {
                 putInt("message_count", event.messageCount)
             }
 
+            is AgentEvent.DecisionFallback -> {
+                putString(KEY_TYPE, "decision_fallback"); putString("reason", event.reason); putBoolean("closed", event.closed)
+            }
             is AgentEvent.HistoryTrimmed -> {
                 putString(KEY_TYPE, "history_trimmed")
                 putInt("omitted_messages", event.omittedMessages)
@@ -850,6 +853,7 @@ internal object AgentRuntimeWire {
 
     /** 将 [Bundle] 还原为 [AgentEvent]，无法识别时返回 null。 */
     fun eventFromBundle(bundle: Bundle): AgentEvent? = when (bundle.getString(KEY_TYPE)) {
+        "decision_fallback" -> AgentEvent.DecisionFallback(bundle.getString("reason").orEmpty(), bundle.getBoolean("closed"))
         "history_trimmed" -> AgentEvent.HistoryTrimmed(
             omittedMessages = bundle.getInt("omitted_messages"),
             omittedUserRounds = bundle.getInt("omitted_rounds"),

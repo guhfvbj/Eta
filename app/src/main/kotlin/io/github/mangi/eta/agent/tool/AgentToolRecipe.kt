@@ -281,7 +281,7 @@ internal object ToolRecipeParser {
                 "配方名必须是 3 到 40 位小写字母/数字/下划线，且以字母开头；收到「$name」",
             )
         }
-        if (name in ToolRecipeReservedNames.RESERVED) {
+        if (name in ToolRecipeReservedNames.RESERVED || io.github.mangi.eta.agent.model.AgentToolGroups.groups.any { name in it.toolNames }) {
             return ParseResult.Invalid(
                 "RESERVED_RECIPE_NAME",
                 "配方名「$name」与内置能力冲突，换一个名字",

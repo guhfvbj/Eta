@@ -45,6 +45,8 @@ internal class SubagentExecutor(
     private val mcpTools: JSONArray,
     private val executionContext: TerminalExecutionContext?,
     private val onProgress: (AgentEvent.SubagentProgress) -> Unit,
+    private val featureExecution: ((AgentModelClient.ToolCall, AgentRunController) -> AgentModelClient.ToolResult)? = null,
+    private val featureToolFilter: ((JSONArray) -> JSONArray)? = null,
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
     private val latestSnapshots = ConcurrentHashMap<String, String>()
@@ -297,7 +299,7 @@ internal class SubagentExecutor(
                         .toString(),
                 )
             } else {
-                baseToolExecutor.execute(subCall)
+                featureExecution?.invoke(subCall,childController) ?: baseToolExecutor.execute(subCall)
             }
         }
 
@@ -335,7 +337,7 @@ internal class SubagentExecutor(
                 capabilitiesProvider = capabilitiesProvider,
                 sessionId = "$conversationKey-$subagentId",
                 operationId = "${toolCall.id}-$subagentId",
-                toolFilter = profile::filterTools,
+                toolFilter = { tools -> profile.filterTools(featureToolFilter?.invoke(tools) ?: tools) },
                 onEvent = { childEvent ->
                     if (abortCode == null) {
                         when (childEvent) {

@@ -102,14 +102,14 @@ internal object AgentToolSearch {
         val terms = text.split(' ').filter(String::isNotEmpty)
         val required = terms.filter { it.length > 1 && it.startsWith("+") }.map { it.drop(1) }
         val keywords = if (required.isEmpty()) terms else required + terms.filter { it.length <= 1 || !it.startsWith("+") }
-        val patterns = keywords.associateWith { term -> Regex("\\b${Regex.escape(term)}\\b") }
+        val patterns = keywords.associateWith { term -> Regex(if (term.any { it.code > 127 }) Regex.escape(term) else "(?<![a-z0-9])${Regex.escape(term)}(?![a-z0-9])") }
         return candidates.asSequence()
             .map { candidate -> candidate to tokenize(candidate) }
             .mapNotNull { (candidate, tokenized) ->
                 val description = candidate.description?.lowercase().orEmpty()
                 val hint = candidate.searchHint?.lowercase().orEmpty()
                 // 必含词不满足直接淘汰：这是模型表达「必须是这类工具」的手段。
-                val matched = required.all { term ->
+                val matched = (if (required.isEmpty()) keywords else required).all { term ->
                     tokenized.parts.any { part -> part.contains(term) } ||
                         tokenized.coarse.any { part -> part.contains(term) } ||
                         patterns[term]?.containsMatchIn(description) == true ||

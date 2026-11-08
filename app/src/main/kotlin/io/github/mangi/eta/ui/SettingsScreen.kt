@@ -1,5 +1,8 @@
 package io.github.mangi.eta.ui
 
+import io.github.mangi.eta.ui.screens.models.FeatureModelSettingsEntries
+import io.github.mangi.eta.ui.screens.models.FeaturePromptSettingsEntries
+
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -7,6 +10,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
+import androidx.compose.material.icons.rounded.Extension
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.AccessibilityNew
@@ -292,6 +296,7 @@ private fun SettingsPageContent(
                         },
                         onClick = { onNavigate(AppRoute.ModelProviders) },
                     )
+                    FeatureModelSettingsEntries(onNavigate)
 
                     EtaPreferenceDivider()
                     SwitchPref(
@@ -440,6 +445,10 @@ private fun SettingsPageContent(
                         startAction = { EtaPreferenceIcon(Icons.Rounded.Dashboard, tint = EtaPreferenceColors.Green) },
                         onClick = { onNavigate(AppRoute.Tools) },
                     )
+                    EtaPreferenceDivider()
+                    EtaArrowPreference("模型自建工具", summary = "管理配方、步骤审计与权限",
+                        startAction = { EtaPreferenceIcon(Icons.Rounded.Extension, tint = EtaPreferenceColors.Blue) },
+                        onClick = { onNavigate(AppRoute.ToolRecipes) })
 
                     EtaPreferenceDivider()
                     SwitchPref(
@@ -461,13 +470,6 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.WebToolsSettings) },
-                    )
-                    EtaPreferenceDivider()
-                    EtaArrowPreference(
-                        title = "模型与工具策略",
-                        summary = "按需加载、工具配方、标题与判断模型、分级审查",
-                        startAction = { EtaPreferenceIcon(Icons.Rounded.Psychology, tint = EtaPreferenceColors.Blue) },
-                        onClick = { onNavigate(AppRoute.AgentFeatures) },
                     )
 
                     EtaPreferenceDivider()
@@ -808,6 +810,7 @@ private fun SettingsPageContent(
                         },
                         onClick = { onNavigate(AppRoute.PromptStudio) },
                     )
+                    FeaturePromptSettingsEntries()
                 }
             }
 
@@ -1210,7 +1213,7 @@ private val SETTINGS_SEARCH_INDEX = listOf(
             R.string.ui_model_provider_e8c7f5,
             R.string.ui_deep_thinking_enabled_by_default_c032d6,
         ),
-        keywords = "llm 提供商 供应商 模型 服务商 api 密钥 key 接口 地址 baseurl 思考 深度思考 推理 reasoning 默认启用思考 温度 上下文长度",
+        keywords = "判断模型 标题模型 decision title llm 提供商 供应商 模型 服务商 api 密钥 key 接口 地址 baseurl 思考 深度思考 推理 reasoning 默认启用思考 温度 上下文长度",
     ),
     SettingsSearchEntry(
         sectionKey = "section_context_extensions",
@@ -1239,7 +1242,7 @@ private val SETTINGS_SEARCH_INDEX = listOf(
             R.string.ui_enable_terminal_file_tools_18bb43,
             R.string.ui_linux_tool_environment_314d22,
         ),
-        keywords = "工具 工具能力 工具档 精简 standard 完整 全部 mcp 网页 搜索 读取 浏览器 browser 抓取 fetch 设备 直达 敏感 设备信息 设备操作 终端 shell 命令行 命令 文件 file linux 发行版 debian 环境 apk 分析 工作区 共享文件夹",
+        keywords = "模型自建工具 配方 recipe 工具 工具能力 工具档 精简 standard 完整 全部 mcp 网页 搜索 读取 浏览器 browser 抓取 fetch 设备 直达 敏感 设备信息 设备操作 终端 shell 命令行 命令 文件 file linux 发行版 debian 环境 apk 分析 工作区 共享文件夹",
     ),
     SettingsSearchEntry(
         sectionKey = "system_enhancements",
@@ -1290,7 +1293,7 @@ private val SETTINGS_SEARCH_INDEX = listOf(
     SettingsSearchEntry(
         sectionKey = "section_prompt_studio",
         labels = listOf(R.string.prompt_studio_section, R.string.prompt_studio_title),
-        keywords = "提示词 提示词工坊 工坊 工具 边界 系统提示词 自定义提示词 版本 历史 快照 请求快照 预设 导入 导出 完整性 当前生效 注入 角色卡 对比",
+        keywords = "工具调用审查 智能审查 工具渐进加载 MCP 工具按需加载 提示词 提示词工坊 工坊 工具 边界 系统提示词 自定义提示词 版本 历史 快照 请求快照 预设 导入 导出 完整性 当前生效 注入 角色卡 对比",
     ),
     SettingsSearchEntry(
         sectionKey = "section_about",

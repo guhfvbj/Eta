@@ -16,13 +16,15 @@ import io.github.mangi.eta.testsupport.EtaRobolectricTestRunner
 class AgentFeatureSessionTest {
     private val context get() = RuntimeEnvironment.getApplication()
     @Before fun clear() {
+        io.github.mangi.eta.config.Prefs.initLocal(context)
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy())
         context.getSharedPreferences("eta_agent_features", 0).edit().clear().commit()
         context.getSharedPreferences("eta_tool_sessions", 0).edit().clear().commit()
         AgentFeaturePreferences.set("review_mode", "auto", context)
     }
     private fun session() = AgentFeatureSession(context, "test-conversation", "test", emptyList(),
         AgentModelClient.ModelConfig(baseUrl="https://example.test", apiKey="test", model="test", systemPrompt="test"),
-        AgentRunController(), { false }, mapOf("mcp_one" to "mcp:server", "mcp_two" to "mcp:server"))
+        AgentRunController(), { false }, mapOf("mcp_one" to "mcp:server", "mcp_two" to "mcp:server"), mcpLabels=mapOf("mcp:server" to "GitHub"))
     private fun catalog() = JSONArray().put(AgentFeatureSession.schema("get_current_context", "context", JSONObject()))
         .put(AgentFeatureSession.schema("mcp_one", "one", JSONObject())).put(AgentFeatureSession.schema("mcp_two", "two", JSONObject()))
     private fun names(array: JSONArray) = (0 until array.length()).map { array.getJSONObject(it).getJSONObject("function").getString("name") }.toSet()
@@ -45,7 +47,7 @@ class AgentFeatureSessionTest {
         session.project(catalog())
         session.execute(call("tools_use_group", "{\"group\":\"mcp:server\"}"), AgentModelClient.ToolExecutor { error("not executed") })
         session.project(catalog())
-        AgentFeaturePreferences.set("disabled_tools", "mcp_one", context)
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy(io.github.mangi.eta.agent.prompt.ToolPolicyMode.ALLOW_LIST,setOf("get_current_context","mcp_two")))
         var invoked = false
         val result = session.execute(call("mcp_one"), AgentModelClient.ToolExecutor { invoked=true; AgentModelClient.ToolResult("bad") })
         assertFalse(invoked); assertFalse(JSONObject(result.content).getBoolean("ok"))
@@ -58,11 +60,11 @@ class AgentFeatureSessionTest {
         AgentFeaturePreferences.set("decision_failure", "closed", context)
         val names = names(session().project(catalog()))
         assertTrue("get_current_context" in names)
-        assertFalse("mcp_one" in names)
+        // An unconfigured model is explicitly fail-open and reported, not a fake follow-current selection.
         assertTrue("tools_search" in names)
     }
     @Test fun disabledGroupCannotBeReopenedEvenInFailOpenMode() {
-        AgentFeaturePreferences.set("group_mcp:server", false, context)
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy(io.github.mangi.eta.agent.prompt.ToolPolicyMode.ALLOW_LIST,setOf("get_current_context")))
         val session = session()
         session.project(catalog())
         val response = session.execute(call("tools_use_group", "{\"tools\":[\"mcp_one\"]}"), AgentModelClient.ToolExecutor { error("never") })
@@ -71,7 +73,7 @@ class AgentFeatureSessionTest {
     @Test fun childExecutionCannotBypassDisabledGroup() {
         val session = session()
         session.project(catalog())
-        AgentFeaturePreferences.set("group_mcp:server", false, context)
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy(io.github.mangi.eta.agent.prompt.ToolPolicyMode.ALLOW_LIST,setOf("get_current_context")))
         val result = session.execute(call("mcp_one"), AgentModelClient.ToolExecutor { error("must not execute") }, requireLoaded = false)
         assertFalse(JSONObject(result.content).getBoolean("ok"))
     }
@@ -114,13 +116,14 @@ class AgentFeatureSessionTest {
         val projected = session().project(catalog())
         val loader = (0 until projected.length()).map { projected.getJSONObject(it).getJSONObject("function") }
             .single { it.getString("name") == "tools_use_group" }
-        assertTrue(loader.getString("description").contains("mcp_one"))
-        assertTrue(loader.getString("description").contains("mcp_two"))
+        assertTrue(loader.getString("description").contains("GitHub"))
+        assertFalse(loader.getString("description").contains("mcp_one"))
+        assertTrue(loader.getString("description").length < 600)
     }
     @Test fun webGroupSwitchAlsoRestrictsProviderHostedSearch() {
         val session = session()
         assertTrue(session.allowsHostedSearch())
-        AgentFeaturePreferences.set("group_web", false, context)
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy(io.github.mangi.eta.agent.prompt.ToolPolicyMode.ALLOW_LIST,setOf("get_current_context")))
         assertFalse(session.allowsHostedSearch())
     }
     @Test fun manualTitleProtectionSurvivesPreferenceReload() {
@@ -128,5 +131,116 @@ class AgentFeatureSessionTest {
         assertTrue(AgentFeaturePreferences.manualTitle("conversation", context))
         assertFalse(ConversationTitleModel.mayApplyRefresh(true, true, "manual", "manual", true))
         assertFalse(ConversationTitleModel.mayApplyRefresh(true, false, "old", "old", false))
+    }
+    @Test fun groupModeOffersOnlyWholeGroupLoadingAndOffModeOffersNoLoaders() {
+        AgentFeaturePreferences.set("loading","group",context)
+        val grouped=session()
+        val names=names(grouped.project(catalog()))
+        assertTrue("tools_use_group" in names);assertFalse("tools_search" in names)
+        val rejected=grouped.execute(call("tools_use_group","{\"tools\":[\"mcp_one\"]}"),AgentModelClient.ToolExecutor { error("never") })
+        assertEquals("GROUP_MODE",JSONObject(rejected.content).getString("code"))
+        context.getSharedPreferences("eta_tool_sessions",0).edit().clear().commit()
+        AgentFeaturePreferences.set("loading","off",context)
+        val all=names(session().project(catalog()))
+        assertTrue(all.containsAll(listOf("mcp_one","mcp_two")))
+        assertFalse("tools_use_group" in all);assertFalse("tools_search" in all)
+    }
+    @Test fun openedMcpGroupDisappearsFromLoaderIndexAndChildSchemasRespectLiveWhitelist() {
+        val session=session();session.project(catalog())
+        session.execute(call("tools_use_group","{\"group\":\"mcp:server\"}"),AgentModelClient.ToolExecutor { error("never") })
+        assertFalse("tools_use_group" in names(session.project(catalog())))
+        io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy(io.github.mangi.eta.agent.prompt.ToolPolicyMode.ALLOW_LIST,setOf("get_current_context")))
+        assertEquals(setOf("get_current_context"),names(session.filterChildTools(catalog())))
+    }
+    @Test fun ephemeralBackgroundRunNeverWritesPermanentLoadingKeys() {
+        val ephemeral=AgentFeatureSession(context,"ephemeral-run","test",emptyList(),AgentModelClient.ModelConfig(baseUrl="https://example.test",apiKey="test",model="test",systemPrompt=""),AgentRunController(),{false},mapOf("mcp_one" to "mcp:server"),persistentSession=false)
+        ephemeral.project(catalog())
+        ephemeral.execute(call("tools_use_group","{\"group\":\"mcp:server\"}"),AgentModelClient.ToolExecutor { error("never") })
+        assertTrue(context.getSharedPreferences("eta_tool_sessions",0).all.isEmpty())
+    }
+    @Test fun actualAuthorInvocationCreatesRecipeVisibleAndExecutableNextRound() {
+        val store=io.github.mangi.eta.agent.tool.AgentToolRecipeStore.get(context);store.replaceAll(emptyList())
+        val session=session()
+        fun full()=JSONArray(catalog().toString()).also { array -> val extra=session.extraSchemas();for(i in 0 until extra.length()) array.put(extra.get(i)) }
+        val delegate=AgentModelClient.ToolExecutor { error("literal recipe is executed internally") }
+        session.project(full())
+        session.execute(call("tools_use_group","{\"group\":\"extensions\"}"),delegate)
+        session.project(full())
+        val args="""{"action":"create","name":"echo_live","recipe":{"name":"echo_live","description":"回显","parameters":{"type":"object","properties":{}},"steps":[{"op":"literal","text":"hello"}]}}"""
+        io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("test-host",true)
+        try {
+            val future=java.util.concurrent.CompletableFuture.supplyAsync { session.execute(call("eta_author_tool",args),delegate) }
+            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty() && !future.isDone && System.nanoTime()<deadline) Thread.sleep(10)
+            val request=io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.single()
+            assertEquals(io.github.mangi.eta.agent.tool.AgentRiskLevel.HIGH,request.risk.level)
+            io.github.mangi.eta.agent.tool.AgentToolAuthorization.answer(request.id,true)
+            val result=JSONObject(future.get(5,java.util.concurrent.TimeUnit.SECONDS).content)
+            assertTrue(result.toString(),result.getBoolean("ok"))
+            assertTrue("recipe_echo_live" in names(session.project(full())))
+            assertEquals("hello",JSONObject(session.execute(call("recipe_echo_live"),delegate).content).getString("result"))
+        } finally {
+            io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.forEach { io.github.mangi.eta.agent.tool.AgentToolAuthorization.answer(it.id,false) }
+            io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("test-host",false)
+            store.replaceAll(emptyList())
+        }
+    }
+    @Test fun cancellingChildAuthorizationNeverCancelsParentOrExecutesTheTool() {
+        val parent=AgentRunController();val child=AgentRunController()
+        val session=AgentFeatureSession(context,"parent-conversation","write request",emptyList(),AgentModelClient.ModelConfig(baseUrl="https://example.test",apiKey="test",model="test",systemPrompt=""),parent,{false})
+        var invoked=false
+        io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("cancel-test",true)
+        try {
+            val future=java.util.concurrent.CompletableFuture.supplyAsync {
+                session.execute(call("write_file"),AgentModelClient.ToolExecutor { invoked=true;AgentModelClient.ToolResult("bad") },requireLoaded=false,executionController=child)
+            }
+            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty() && !future.isDone && System.nanoTime()<deadline) Thread.sleep(10)
+            assertFalse(future.isDone)
+            child.cancel()
+            assertThrows(java.util.concurrent.ExecutionException::class.java) { future.get(3,java.util.concurrent.TimeUnit.SECONDS) }
+            assertFalse(parent.isCancelled);assertFalse(invoked)
+            assertTrue(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty())
+        } finally {
+            child.cancel();io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("cancel-test",false)
+        }
+    }
+    @Test fun childLikeFilteredCatalogRemovesRevokedSchemasOnTheNextRound() {
+        var allowed=true;var round=0
+        val cfg=AgentModelClient.ModelConfig(baseUrl="https://example.test",apiKey="test",model="test",systemPrompt="",autoCompactionEnabled=false)
+        val provider=object:AgentProviderClient {
+            override val id="filtered-child"
+            override val capabilities=ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS,false,false,false,false,false,false)
+            override fun complete(request:ProviderRequest,runController:AgentRunController,onEvent:(ProviderEvent)->Unit):ProviderResponse {
+                val message=JSONObject().put("role","assistant")
+                if(round++==0) {
+                    assertTrue("mcp_one" in names(request.tools))
+                    message.put("content","").put("finish_reason","tool_calls").put("tool_calls",JSONArray().put(JSONObject().put("id","remote").put("type","function").put("function",JSONObject().put("name","mcp_one").put("arguments","{}"))))
+                } else {
+                    assertFalse("mcp_one" in names(request.tools))
+                    message.put("content","done").put("finish_reason","stop")
+                }
+                return ProviderResponse(message)
+            }
+        }
+        AgentModelClient.complete(cfg,"test",AgentModelClient.ToolExecutor { allowed=false;AgentModelClient.ToolResult("ok") },provider=provider,
+            additionalTools=JSONArray().put(catalog().getJSONObject(1)),toolFilter={ tools -> JSONArray().also { result ->
+                for(i in 0 until tools.length()) if(allowed || tools.getJSONObject(i).getJSONObject("function").getString("name")!="mcp_one") result.put(tools.get(i))
+            } })
+        assertEquals(2,round)
+    }
+    @Test fun localAdditionalToolDescriptionIsNotCompactedAsMcp() {
+        val longDescription="Authorized models: "+"gemini_model ".repeat(100)
+        val provider=object:AgentProviderClient {
+            override val id="local-description"
+            override val capabilities=ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS,false,false,false,false,false,false)
+            override fun complete(request:ProviderRequest,runController:AgentRunController,onEvent:(ProviderEvent)->Unit):ProviderResponse {
+                val native=(0 until request.tools.length()).map { request.tools.getJSONObject(it).getJSONObject("function") }.single { it.getString("name")=="subagent" }
+                assertEquals(longDescription,native.getString("description"))
+                return ProviderResponse(JSONObject().put("role","assistant").put("content","done").put("finish_reason","stop"))
+            }
+        }
+        AgentModelClient.complete(AgentModelClient.ModelConfig(baseUrl="https://example.test",apiKey="test",model="test",systemPrompt="",autoCompactionEnabled=false),"test",AgentModelClient.ToolExecutor { error("no call") },provider=provider,
+            additionalTools=JSONArray().put(AgentFeatureSession.schema("subagent",longDescription,JSONObject())))
     }
 }

@@ -21,69 +21,72 @@ internal class AgentFeatureSession(
     private val rootAvailable: () -> Boolean,
     private val mcpGroups: Map<String, String> = emptyMap(),
     private val writable: Boolean = true,
+    private val runId: String = conversation,
+    private val persistentSession: Boolean = true,
+    private val onDecisionFallback: (String) -> Unit = {},
+    private val mcpLabels: Map<String, String> = emptyMap(),
 ) {
-    private val store = RecipeRuntime.store(context)
+    private val store = AgentToolRecipeStore.get(context)
     private val author = AgentSelfAuthorTools(store, rootAvailable)
-    private val recipeExecutor = AgentToolRecipeExecutor(context,
-        BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable), store, rootAvailable, ::checkRecipeStep)
     private val settings = AgentFeaturePreferences.load(context)
     private val sessionPrefs = context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE)
-    private val mode = sessionPrefs.getString("mode_$conversation", null) ?: settings.optString("loading", "tool").also {
-        sessionPrefs.edit().putString("mode_$conversation", it).apply()
+    private val mode = sessionPrefs.getString("mode_$conversation", null) ?: settings.optString("loading", "search").also {
+        if (persistentSession) sessionPrefs.edit().putString("mode_$conversation", it).apply()
     }
     private val opened = sessionPrefs.getStringSet("opened_$conversation", emptySet()).orEmpty().toMutableSet()
-    private val openedGroups = mutableSetOf<String>()
-    private val sessionGrants = mutableSetOf<String>()
+    private val openedGroups = sessionPrefs.getStringSet("groups_$conversation", emptySet()).orEmpty().toMutableSet()
+    private var generation = sessionPrefs.getLong("generation",0)
     private var catalog = emptyMap<String, JSONObject>()
     private var published = emptySet<String>()
     private var decisionStarted = false
     private var allowedGroups: Set<String>? = null
+    var decisionPlan: AgentDecisionPlan? = null; private set
+    val chatOnly: Boolean get() = decisionPlan?.chatOnly == true
     private fun group(name: String) = mcpGroups[name] ?: AgentToolGroups.classify(name)
     private fun description(id: String, names: List<String>): String {
-        val summary = AgentToolGroups.groups.firstOrNull { it.id == id }?.summary ?: "MCP 工具服务器"
-        val indexed = if (id.startsWith("mcp:")) names else names.filter { it.startsWith("recipe_") }
-        return summary + indexed.take(16).joinToString(prefix = if (indexed.isEmpty()) "" else ": ", separator = "; ") { name ->
-            "$name: ${catalog[name]?.optJSONObject("function")?.optString("description").orEmpty().take(160)}"
+        return AgentToolGroups.groups.firstOrNull { it.id == id }?.summary
+            ?: ("MCP 服务器「${mcpLabels[id] ?: id.removePrefix("mcp:")}」 · ${names.size} 个工具 · " +
+                names.mapNotNull { catalog[it]?.optJSONObject("function")?.optString("description")?.take(64) }.distinct().take(3).joinToString("；"))
+    }
+    fun permitted(name: String): Boolean {
+        val prefs = AgentFeaturePreferences.load(context)
+        return io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.load().allows(name) && (!name.startsWith("recipe_") && name !in setOf("eta_author_tool", "eta_list_recipes") || writable && prefs.optBoolean("recipes_enabled", true))
+    }
+    fun filterChildTools(tools: JSONArray): JSONArray = JSONArray().also { result ->
+        for (i in 0 until tools.length()) {
+            val tool = tools.getJSONObject(i)
+            val name = tool.getJSONObject("function").getString("name")
+            if (permitted(name) && (group(name) == "basic" || allowedGroups?.contains(group(name)) != false)) result.put(tool)
         }
     }
-    private fun permitted(name: String): Boolean {
-        val prefs = AgentFeaturePreferences.load(context)
-        val disabled = prefs.optString("disabled_tools").split(',', '\n').map { it.trim() }
-        return name !in disabled && prefs.optBoolean("group_${group(name)}", true) &&
-            (!name.startsWith("recipe_") && !name.startsWith("eta_") || writable && prefs.optBoolean("recipes_enabled", true))
-    }
+
     fun extraSchemas(): JSONArray = JSONArray().also { tools ->
         if (writable && AgentFeaturePreferences.load(context).optBoolean("recipes_enabled", true)) {
             store.invalidate()
             store.schemas(rootAvailable()).forEach(tools::put)
-            tools.put(schema("eta_author_tool", "Create/update/delete/enable/disable a persistent declarative tool recipe. Step fields: http_request(url,method,headers,body); root_shell(command,timeout_ms); settings_read/write(namespace,key,value); file_read(path); file_write(path,content); content_query(uri,projection,selection,selection_args); compose(recipe,arguments); literal(text). Supported step op: http_request,root_shell,settings_read,settings_write,file_read,file_write,content_query,compose,literal. Root steps require Root; changes require authorization. Next round activation.", JSONObject()
-                .put("action", property("string").put("enum", JSONArray(listOf("create", "update", "delete", "enable", "disable"))))
-                .put("name", property("string")).put("description", property("string"))
-                .put("parameters", property("object")).put("steps", property("array").put("items", property("object"))), listOf("action", "name")))
+            tools.put(AgentRecipeToolCatalog.authorSchema())
             tools.put(schema("eta_list_recipes", "List persistent tool recipes and their current state", JSONObject().put("name", property("string"))))
         }
     }
     fun project(full: JSONArray): JSONArray {
+        val freshGeneration = sessionPrefs.getLong("generation",0)
+        if (generation != freshGeneration) { opened.clear(); openedGroups.clear(); generation = freshGeneration }
         catalog = (0 until full.length()).map { full.getJSONObject(it) }
             .associateBy { it.getJSONObject("function").getString("name") }.filterKeys(::permitted)
         if (!decisionStarted) {
             decisionStarted = true
-            val groups = catalog.keys.groupBy(::group).map { (id, names) ->
+            val groups = catalog.keys.groupBy(::group).filterKeys { it != "basic" }.map { (id, names) ->
                 AgentToolGroup(id, description(id, names), names.toSet())
             }
-            val historyText = history.takeLast(8).joinToString("\n") { "${it.role}: ${it.content}" }
             if (settings.optBoolean("decision_enabled")) {
-                if (settings.optBoolean("decision_shadow", true)) {
-                    SHADOW.execute { AgentFeatureDecision.evaluate(settings, groups, prompt, historyText, controller)?.let {
-                        AndroidAgentLogger.info("decision shadow selected=${it.selected} confidence=${it.confidence}")
-                    } }
-                } else {
-                    val decision = AgentFeatureDecision.evaluate(settings, groups, prompt, historyText, controller)
-                    if (settings.optString("decision_mode", "advise") == "control") {
-                        allowedGroups = decision?.selected ?: if (settings.optString("decision_failure", "open") == "closed") emptySet() else null
-                    }
-                    openedGroups += decision?.selected.orEmpty()
+                val request = io.github.mangi.eta.agent.runtime.AgentRuntimeWire.RunRequest(runId, prompt, config, emptyList(), history, modelSessionId = conversation)
+                decisionPlan = AgentDecisionRouter.route(request, config, DecisionTraceLogger, groups, settings, controller)
+                val plan = decisionPlan
+                if (plan != null && settings.optString("decision_mode", "control") == "control") {
+                    allowedGroups = plan.allowedGroups
+                    openedGroups += plan.openedGroups
                 }
+                plan?.failureReason?.let(onDecisionFallback)
             }
             // Restore only tool names that remain permitted. Compaction cannot create new permissions.
             for (message in history) runCatching {
@@ -95,25 +98,33 @@ internal class AgentFeatureSession(
         val result = JSONArray()
         eligible.forEach { (name, tool) ->
             if (mode == "off" || group(name) == "basic" || name in opened || group(name) in openedGroups ||
-                name.startsWith("mcp_") && !settings.optBoolean("mcp_deferred", true)) result.put(tool)
+                name.startsWith("recipe_") || name.startsWith("mcp_") && !settings.optBoolean("mcp_deferred", true)) result.put(tool)
         }
-        val groupIndex = eligible.keys.groupBy(::group).entries.joinToString("; ") { (id, names) ->
-            "$id (${names.size}): ${description(id, names)}"
+        val visible = (0 until result.length()).map { result.getJSONObject(it).getJSONObject("function").getString("name") }.toSet()
+        val rescue = decisionPlan?.let { it.mode == "control" && it.failureReason == null && it.selectedGroups.isEmpty() && it.openableGroupLimit == null && !chatOnly } == true
+        val deferred = (if (rescue) catalog else eligible).filterKeys { it !in visible }
+        if (mode != "off" && deferred.isNotEmpty()) {
+            val groupIndex = deferred.keys.groupBy(::group).entries.joinToString("; ") { (id, names) -> "$id: ${description(id, names)}" }
+            val properties = JSONObject().put("group", property("string").put("enum", JSONArray(deferred.keys.map(::group).distinct())))
+            if (mode != "group") properties.put("tools", property("array").put("items", property("string")))
+            result.put(schema("tools_use_group", "打开未加载的工具组，下一轮生效。加载不增加权限。$groupIndex", properties))
+            if (mode != "group") result.put(schema("tools_search", "搜索尚未加载的工具：关键词会解锁所属组；select:name1,name2 精确加载单个工具。下一轮生效。",
+                JSONObject().put("query", property("string")).put("max_results", property("integer")), listOf("query")))
         }
-        result.put(schema("tools_use_group", "Load a permitted group or exact tools for the NEXT round. Loading grants no device permissions. Available groups: $groupIndex",
-            JSONObject().put("group", property("string")).put("tools", property("array").put("items", property("string")))))
-        result.put(schema("tools_search", "Find permitted tools by keywords or select:name1,name2; load matches for NEXT round. Does not execute target tools.",
-            JSONObject().put("query", property("string")).put("max_results", property("integer")), listOf("query")))
         published = (0 until result.length()).map { result.getJSONObject(it).getJSONObject("function").getString("name") }.toSet()
         return result
     }
-    fun execute(call: AgentModelClient.ToolCall, delegate: AgentModelClient.ToolExecutor, requireLoaded: Boolean = true): AgentModelClient.ToolResult {
-        controller.throwIfCancelled()
+    fun execute(call: AgentModelClient.ToolCall, delegate: AgentModelClient.ToolExecutor, requireLoaded: Boolean = true, executionController: AgentRunController = controller): AgentModelClient.ToolResult {
+        executionController.throwIfCancelled()
         val args = runCatching { JSONObject(call.argumentsJson.ifBlank { "{}" }) }.getOrElse { return error("INVALID_ARGUMENT", "参数不是 JSON 对象") }
         if (call.name in setOf("tools_use_group", "tools_search")) {
-            val eligible = catalog.filterKeys { permitted(it) && (group(it) == "basic" || allowedGroups?.contains(group(it)) != false) }
+            if (call.name !in published) return error("LOADER_UNAVAILABLE", "当前加载方式或目录没有这个加载入口")
+            if (mode == "group" && (call.name == "tools_search" || args.has("tools"))) return error("GROUP_MODE", "按组模式只支持 group 整组打开")
+            val rescue = decisionPlan?.let { it.mode == "control" && it.failureReason == null && it.selectedGroups.isEmpty() && it.openableGroupLimit == null && !chatOnly } == true
+            val eligible = catalog.filterKeys { permitted(it) && (rescue || group(it) == "basic" || allowedGroups?.contains(group(it)) != false) }
+            val deferred = eligible.filterKeys { it !in published }
             val selected = if (call.name == "tools_search") {
-                val candidates = eligible.map { (name, schema) -> AgentToolSearch.Candidate(name,
+                val candidates = deferred.map { (name, schema) -> AgentToolSearch.Candidate(name,
                     schema.optJSONObject("function")?.optString("description"), null, name.startsWith("mcp_"), group(name)) }
                 AgentToolSearch.search(args.optString("query"), candidates, args.optInt("max_results", 5).coerceIn(1, 20)).map { it.name }
             } else if (args.has("tools")) {
@@ -121,9 +132,12 @@ internal class AgentFeatureSession(
             } else eligible.keys.filter { group(it) == args.optString("group") }
             if (call.name == "tools_use_group" && selected.isEmpty()) return error("GROUP_UNAVAILABLE", "该组不存在、已关闭或本轮被判断模型限制")
             if (selected.any { it !in eligible }) return error("TOOL_NOT_ALLOWED", "目标工具未获用户或判断模型允许")
-            if (mode == "group" && call.name == "tools_search") openedGroups += selected.map(::group) else opened += selected
-            sessionPrefs.edit().putStringSet("opened_$conversation", opened.toList().takeLast(512).toSet() +
-                eligible.keys.filter { group(it) in openedGroups }).apply()
+            if (selected.isEmpty()) return error("NO_MATCHING_TOOLS", "没有匹配的未加载工具；已加载工具不需要搜索，请尝试更宽泛的关键词或整组打开")
+            val exact = args.has("tools") || args.optString("query").startsWith("select:", true)
+            if (rescue) allowedGroups = allowedGroups.orEmpty() + selected.map(::group)
+            if (exact) opened += selected else openedGroups += selected.map(::group)
+            if (persistentSession) sessionPrefs.edit().putStringSet("opened_$conversation", opened.toList().takeLast(512).toSet())
+                .putStringSet("groups_$conversation", openedGroups.toSet()).apply()
             return AgentModelClient.ToolResult(JSONObject().put("ok", true).put("available_next_round", JSONArray(selected)).toString())
         }
         if (requireLoaded && call.name !in published || !permitted(call.name) ||
@@ -131,22 +145,33 @@ internal class AgentFeatureSession(
         val recipe = if (call.name.startsWith("recipe_")) store.find(call.name.removePrefix("recipe_")) else null
         if (call.name.startsWith("recipe_") && (recipe == null || !recipe.enabled)) return error("RECIPE_DISABLED", "配方未启用")
         if (recipe != null && !rootAvailable() && recipe.name in store.rootDependentRecipes(store.all())) return error("ROOT_REQUIRED", "配方或组合依赖需要 Root")
-        val risk = when {
-            recipe != null -> AgentRiskAssessment(if (recipe.name in store.rootDependentRecipes(store.all())) AgentRiskLevel.FATAL else AgentRiskLevel.HIGH, listOf("执行模型自建配方（含组合依赖），可能读取隐私或修改文件与设置"))
-            call.name == "eta_author_tool" -> AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("修改持久化工具配方与能力边界"))
-            call.name.startsWith("mcp_") -> AgentRiskAssessment(AgentRiskLevel.MEDIUM, listOf("调用外部 MCP 工具"))
-            call.name.startsWith("set_") || call.name.contains("send_") || call.name.contains("delete_") ||
-                call.name in setOf("terminal_daemon", "terminal_job", "app_state_control", "write_file", "edit_file") -> AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("修改设备状态或文件"))
-            else -> AgentRiskPolicy.assess(call.name, call.argumentsJson)
-        }
-        if (!authorize(call, risk)) return error("TOOL_AUTHORIZATION_DENIED", "工具审查或用户授权未通过，本次未执行")
-        if (recipe != null) return try { AgentModelClient.ToolResult(recipeExecutor.execute(recipe, args), sensitive = true) }
-            catch (failure: Exception) { controller.throwIfCancelled(); error("RECIPE_EXECUTION_DENIED", failure.message.orEmpty()) }
-        author.execute(call.name, args)?.let { return AgentModelClient.ToolResult(it, sensitive = true) }
-        return delegate.execute(call)
+        val plannedShells = mutableSetOf<String>()
+        val risk = if (recipe != null) recipeRisk(recipe, args, plannedShells) else AgentRiskPolicy.assess(call.name, call.argumentsJson)
+        if (AgentFeaturePreferences.load(context).optString("review_mode","standard") == "readonly" && risk.level != AgentRiskLevel.LOW)
+            return error("READ_ONLY_REVIEW_MODE", "当前为只读审查模式，本次没有执行。此模式不会请求写入授权；请只查询，需要写入时由用户在设置中切换档位。")
+        if (!authorize(call, risk, executionController)) return error("TOOL_AUTHORIZATION_DENIED", "工具审查或用户授权未通过，本次未执行。不要重试或换工具绕过；需要用户修改请求或设置。")
+        executionController.throwIfCancelled()
+        if (recipe != null) return try { finish(call,AgentModelClient.ToolResult(AgentToolRecipeExecutor(context,
+                BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable), store, rootAvailable, { step -> checkRecipeStep(step, executionController) },
+                beforeResolvedStep = { step, values ->
+                    if(step is ToolRecipeStep.RootShell) {
+                        val command = ToolRecipeTemplate.interpolateShell(step.command,values)
+                        if(command !in plannedShells) {
+                            val actual = AgentModelClient.ToolCall(call.id + "-resolved", "terminal", JSONObject().put("action","exec").put("command",command).put("identity","root").toString())
+                            check(authorize(actual,AgentRiskPolicy.assess(actual.name,actual.argumentsJson),executionController)) { "配方运行时解析出的 Root 命令未获授权" }
+                        }
+                    }
+                }).execute(recipe, args), sensitive = true)) }
+            catch (failure: Exception) { executionController.throwIfCancelled(); error("RECIPE_EXECUTION_DENIED", failure.message.orEmpty()) }
+        author.execute(call.name, args)?.let { return finish(call,AgentModelClient.ToolResult(it, sensitive = true)) }
+        return finish(call,delegate.execute(call))
     }
-    private fun checkRecipeStep(step: ToolRecipeStep) {
-        controller.throwIfCancelled()
+    private fun finish(call: AgentModelClient.ToolCall, result: AgentModelClient.ToolResult): AgentModelClient.ToolResult {
+        decisionPlan?.let { AgentDecisionMismatch.record(it, conversation, group(call.name), result.content) }
+        return result
+    }
+    private fun checkRecipeStep(step: ToolRecipeStep, executionController: AgentRunController) {
+        executionController.throwIfCancelled()
         val preferences = AgentFeaturePreferences.load(context)
         check(preferences.optBoolean("recipes_enabled", true)) { "配方权限已撤销" }
         val permission = when (step) {
@@ -158,43 +183,56 @@ internal class AgentFeatureSession(
             else -> null
         }
         if (permission != null) check(preferences.optBoolean(permission, permission in setOf("recipe_http", "recipe_files"))) { "配方步骤未获权限：$permission" }
-        if (step is ToolRecipeStep.RootShell) check(config.terminalTools && rootAvailable()) { "Root 或终端权限不可用" }
-        if (step is ToolRecipeStep.SettingsWrite) check(config.deviceSensitiveActionTools) { "设备写入权限已关闭" }
-        if (step is ToolRecipeStep.ContentQuery) check(config.deviceSensitiveReadTools) { "设备敏感读取权限已关闭" }
+        val live = io.github.mangi.eta.config.Prefs.localAgentPreferences()?.let { io.github.mangi.eta.agent.runtime.AgentRuntimePolicy.permissions(it) }
+        if (step is ToolRecipeStep.RootShell) check(config.terminalTools && live?.terminalTools != false && rootAvailable()) { "Root 或终端权限不可用" }
+        if (step is ToolRecipeStep.SettingsWrite) check(config.deviceSensitiveActionTools && live?.deviceSensitiveActionTools != false) { "设备写入权限已关闭" }
+        if (step is ToolRecipeStep.ContentQuery) check(config.deviceSensitiveReadTools && live?.deviceSensitiveReadTools != false) { "设备敏感读取权限已关闭" }
     }
-    fun allowsHostedSearch(): Boolean = AgentFeaturePreferences.load(context).optBoolean("group_web", true) &&
-        (allowedGroups == null || "web" in allowedGroups.orEmpty())
+    fun allowsHostedSearch(): Boolean = config.browserTools && io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.load().allows("web_search") && (allowedGroups == null || "web" in allowedGroups.orEmpty())
     fun configForRound(): AgentModelClient.ModelConfig = config.copy(
         hostedWebSearchEnabled = config.hostedWebSearchEnabled && allowsHostedSearch(),
     )
-    private fun isReadOnly(call: AgentModelClient.ToolCall): Boolean {
-        if (call.name.startsWith("mcp_") || call.name.startsWith("recipe_")) return false
-        if (call.name in setOf("eta_list_recipes", "observe_screen", "memory_get", "read_image", "device_status", "network_info")) return true
-        return listOf("read_", "get_", "search_", "list_", "stat_", "glob_", "grep_", "recent_", "skills_read", "skills_list").any(call.name::startsWith)
+    private fun recipeRisk(recipe: ToolRecipe, args: JSONObject, plannedShells: MutableSet<String>): AgentRiskAssessment {
+        val values = ToolRecipeArguments.flatten(args)
+        val visited = mutableSetOf<String>()
+        fun assess(current: ToolRecipe): AgentRiskAssessment {
+            if (!visited.add(current.name)) return AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("配方组合循环"))
+            val shells = current.steps.filterIsInstance<ToolRecipeStep.RootShell>().map {
+                runCatching { ToolRecipeTemplate.interpolateShell(it.command, values).also(plannedShells::add) }
+                    .getOrElse { _ -> it.command }
+            }
+            val shellRisk = AgentRiskPolicy.assessRecipe(current.modelToolName, args.toString(), shells)
+            val steps = current.steps.map { step -> when (step) {
+                is ToolRecipeStep.Compose -> store.find(step.recipe)?.let(::assess)
+                    ?: AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("组合目标不存在"))
+                is ToolRecipeStep.FileWrite -> AgentRiskPolicy.assess("write_file", "{}")
+                is ToolRecipeStep.SettingsWrite -> AgentRiskPolicy.assess("set_setting", "{}")
+                is ToolRecipeStep.ContentQuery -> AgentRiskAssessment(AgentRiskLevel.MEDIUM, listOf("读取 ContentProvider 数据"))
+                is ToolRecipeStep.HttpRequest -> AgentRiskAssessment(AgentRiskLevel.MEDIUM, listOf("向网络端点发送请求"))
+                else -> AgentRiskAssessment(AgentRiskLevel.LOW)
+            } }
+            visited.remove(current.name)
+            return (steps + shellRisk).maxByOrNull { it.level } ?: shellRisk
+        }
+        return assess(recipe)
     }
-    private fun authorize(call: AgentModelClient.ToolCall, risk: AgentRiskAssessment): Boolean {
+    private fun authorize(call: AgentModelClient.ToolCall, risk: AgentRiskAssessment, executionController: AgentRunController = controller): Boolean {
         val current = AgentFeaturePreferences.load(context)
         val mode = current.optString("review_mode", "standard")
-        if (mode == "readonly" && (risk.level != AgentRiskLevel.LOW ||
-                !isReadOnly(call))) return false
-        if (mode == "auto" && risk.level < AgentRiskLevel.FATAL) return true
-        if (mode == "smart" && risk.level != AgentRiskLevel.FATAL) {
-            val verdict = AgentFeatureReview.review(current, call, prompt, config, controller, history)
-            if (verdict == false) return false
-            if (verdict == true && risk.level < AgentRiskLevel.HIGH) return true
+        val verdict = if (mode == "smart" && risk.level in setOf(AgentRiskLevel.MEDIUM, AgentRiskLevel.HIGH))
+            AgentToolReviewCoordinator.review(current, call, prompt, config, executionController, history, conversation,
+                assessment = risk, effectDetails = call.name.takeIf { it.startsWith("recipe_") }?.let { store.find(it.removePrefix("recipe_")) }?.let(ToolRecipeShareFormat::entryOf)) else null
+        val action = AgentToolReviewPolicy.decide(mode, risk.level, verdict)
+        if (action == AgentToolReviewPolicy.Action.DENY) return false
+        if (action == AgentToolReviewPolicy.Action.ALLOW) return true
+        val repeat = risk.level == AgentRiskLevel.MEDIUM && mode != "strict"
+        if (repeat && AgentToolAuthorization.hasGrant(conversation, call.name, call.argumentsJson, current.toString())) return true
+        return AgentToolAuthorization.confirm(conversation, call.name, call.argumentsJson, risk, executionController, repeatAllowed = repeat).also { allowed ->
+            if (allowed && repeat) AgentToolAuthorization.grant(conversation, call.name, call.argumentsJson, current.toString())
         }
-        if (risk.level == AgentRiskLevel.LOW) return true
-        val grantKey = call.name + "\u0000" + call.argumentsJson
-        if (risk.level == AgentRiskLevel.MEDIUM && mode != "strict" && grantKey in sessionGrants) return true
-        val allowed = AgentToolAuthorization.confirm(conversation, call.name, call.argumentsJson, risk, controller, repeatAllowed = risk.level == AgentRiskLevel.MEDIUM && mode != "strict")
-        if (allowed && risk.level == AgentRiskLevel.MEDIUM && mode != "strict") sessionGrants += grantKey
-        return allowed
     }
     private fun error(code: String, message: String) = AgentModelClient.ToolResult(JSONObject().put("ok", false).put("code", code).put("message", message).toString())
     companion object {
-        private val SHADOW = java.util.concurrent.ThreadPoolExecutor(1, 2, 30, java.util.concurrent.TimeUnit.SECONDS,
-            java.util.concurrent.ArrayBlockingQueue(8), java.util.concurrent.ThreadFactory { r -> Thread(r, "eta-decision-shadow").apply { isDaemon = true } },
-            java.util.concurrent.ThreadPoolExecutor.DiscardPolicy())
         fun property(type: String) = JSONObject().put("type", type)
         fun schema(name: String, description: String, properties: JSONObject, required: List<String> = emptyList()): JSONObject =
             JSONObject().put("type", "function").put("function", JSONObject().put("name", name).put("description", description)

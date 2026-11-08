@@ -53,12 +53,12 @@ internal data class AgentRiskAssessment(
 internal object AgentRiskPolicy {
 
     /** 会执行任意 shell 的工具。 */
-    private val SHELL_TOOLS = setOf("terminal", "run_command")
+    private val SHELL_TOOLS = setOf("terminal", "run_command", "terminal_job", "terminal_daemon")
 
     /** `terminal` 已知的动作名；不在这里的动作一律按高风险处理（新增动作不能默认放行）。 */
     private val TERMINAL_ACTIONS = setOf(
         "open", "exec", "open_and_exec", "read_async_result", "close",
-        "daemon_start", "daemon_list", "daemon_logs", "daemon_stop",
+        "daemon_start", "daemon_list", "daemon_logs", "daemon_stop", "check_root",
     )
 
     /** 这些动作不会执行命令，不打断用户。 */
@@ -88,7 +88,7 @@ internal object AgentRiskPolicy {
      */
     fun assess(toolName: String, argumentsJson: String): AgentRiskAssessment {
         val name = toolName.trim().lowercase(Locale.ROOT)
-        if (name.isEmpty()) return AgentRiskAssessment(AgentRiskLevel.LOW)
+        if (name.isEmpty()) return high("缺少工具名称")
         val args = argsOf(argumentsJson)
             ?: return AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("参数不是合法的 JSON，无法确认实际会做什么"))
         if (name in SHELL_TOOLS) return assessShellTool(name, args)
@@ -119,14 +119,25 @@ internal object AgentRiskPolicy {
     }
 
     private fun assessShellTool(name: String, args: JSONObject): AgentRiskAssessment {
-        val action = args.optString("action").trim().lowercase(Locale.ROOT)
-        // run_command 只有执行一种形态；terminal 的 open/读取/日志/关闭都不执行命令。
-        if (name != "run_command") {
-            when {
+        val action = args.optString("action", if (name == "terminal") "exec" else "").trim().lowercase(Locale.ROOT)
+        when (name) {
+            "terminal_job" -> when (action) {
+                "list", "read", "wait" -> return low()
+                "stop" -> return medium("终止后台任务")
+                "start" -> Unit
+                else -> return high("未识别的后台命令动作")
+            }
+            "terminal_daemon" -> when (action) {
+                "list", "logs" -> return low()
+                "stop" -> return medium("终止跨运行后台服务")
+                "start" -> Unit
+                else -> return high("未识别的后台服务动作")
+            }
+            "terminal" -> when {
+                action == "check_root" -> return medium("请求并检测 Root 授权")
                 action in TERMINAL_READ_ACTIONS -> return low()
-                action == "daemon_stop" -> return medium("终止后台守护进程：依赖它的任务会被中断")
-                action !in TERMINAL_ACTIONS ->
-                    return high("未识别的终端动作，无法确认会执行什么")
+                action == "daemon_stop" -> return medium("终止后台守护进程")
+                action !in TERMINAL_ACTIONS -> return high("未识别的终端动作")
             }
         }
         val command = args.optString("command")
@@ -137,7 +148,26 @@ internal object AgentRiskPolicy {
     @Suppress("CyclomaticComplexMethod")
     private fun assessTool(name: String, args: JSONObject): AgentRiskAssessment {
         val action = args.optString("action").trim().lowercase(Locale.ROOT)
-        if (action.isNotEmpty() && action in SAFE_ACTIONS) return AgentRiskAssessment(AgentRiskLevel.LOW)
+        // Actions are interpreted only by their own tool; action="list" cannot downgrade a write tool.
+        if (name in READ_TOOLS || name in io.github.mangi.eta.agent.context.PersonalSearchTools.names) return low()
+        if (name == "subagent_profile" && action in setOf("list","get")) return low()
+        if (name == "get_logcat") return medium("读取需要 Root 的系统日志，可能包含其他应用隐私")
+        if (name in setOf("write_file", "edit_file", "skills_install_from_github", "skills_manage", "eta_author_tool"))
+            return high("修改文件或持久化工具、引入第三方能力")
+        if (name in setOf("type_text", "input_text", "replace_text", "clear_text", "paste_text", "set_clipboard",
+                "create_calendar_event", "update_calendar_event", "create_note", "update_note", "character_memory_write",
+                "tasks_create", "tasks_update", "tasks_run", "tasks_cancel", "tasks_delete", "set_alarm", "set_timer",
+                "set_volume", "set_flashlight", "set_brightness", "set_screen_timeout", "set_sound_mode", "set_do_not_disturb",
+                "subagent", "subagent_profile")) return medium("修改设备、个人数据或运行任务")
+        if (name == "app_state_control") return if (action == "freeze") high("冻结应用可能中断系统功能") else medium("变更应用运行状态")
+        io.github.mangi.eta.agent.model.AgentPhoneToolCatalog.entries.firstOrNull { it.name == name }?.let {
+            return if (it.write) medium("修改${it.title}") else low()
+        }
+        if (name == "virtual_screen") return when(action) {
+            "list", "get", "status" -> low()
+            else -> medium("更改虚拟屏或应用路由")
+        }
+        if (name.startsWith("mcp_")) return medium("调用外部 MCP 工具")
         return when (name) {
             "power_control" -> when (action) {
                 "reboot" -> fatal("重启设备：当前对话、正在运行的任务与未保存的现场都会中断")
@@ -225,7 +255,7 @@ internal object AgentRiskPolicy {
 
             "memory_write" -> when (args.optString("mode").trim().lowercase(Locale.ROOT)) {
                 "clear" -> fatal("清空全部助手记忆：MEMORY.md 的内容会被整体删除且无法恢复")
-                else -> low()
+                else -> medium("写入持久助手记忆")
             }
 
             "manage_agent_workspace" -> when (action) {
@@ -253,11 +283,27 @@ internal object AgentRiskPolicy {
                 } else if (action in DESTRUCTIVE_ACTIONS) {
                     medium("动作「$action」可能不可逆，且该工具未登记风险等级，先确认一次")
                 } else {
-                    low()
+                    medium("未登记工具的具体效果，执行前需要确认")
                 }
             }
         }
     }
+
+    private val READ_TOOLS = setOf(
+        "get_current_context", "search_apps", "observe_screen", "get_clipboard", "wait", "wait_for_text", "wait_for_package",
+        "conversation_history", "read_conversation_history", "memory_get", "character_memory_get", "eta_list_recipes",
+        "inspect_app", "device_status", "network_info", "get_setting", "get_current_location", "get_device_environment",
+        "recent_notifications", "search_notification_history", "recent_app_activity", "app_usage_summary", "top_memory_apps", "top_storage_apps",
+        "list_alarms", "list_active_timers", "get_health_summary", "read_personal_item", "summarize_bills", "read_note",
+        "search_calendar_todos", "search_calendar_events", "search_personal_orders", "search_clipboard_history",
+        "search_media", "search_audio", "search_recordings", "search_files", "search_contacts", "search_call_history", "search_messages",
+        "search_downloads", "search_notes", "search_coloros_recordings", "search_recording_summaries", "search_system_memories",
+        "search_saved_places", "search_qq_chat_images", "search_wechat_chat_images",
+        "read_file", "list_directory", "read_image", "stat_file", "glob_files", "grep_files",
+        "skills_list", "skills_read", "skills_read_resource", "skills_list_curated", "skills_inspect_github",
+        "tasks_triggers", "tasks_list", "tasks_history", "web_search", "fetch_url",
+        "tools_search", "tools_use_group"
+    )
 
     private fun argsOf(raw: String): JSONObject? =
         runCatching { JSONObject(raw.ifBlank { "{}" }) }.getOrNull()
