@@ -22,6 +22,14 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class GeminiInteractionsTest {
+    @Test fun legacyRedactedToolHistoryExplainsHowToSupplyRealArguments() {
+        val old=JSONObject().put("role","assistant").put("content","")
+            .put("tool_calls",JSONArray().put(JSONObject().put("id","old").put("type","function")
+                .put("function",JSONObject().put("name","eta_author_tool").put("arguments","{\"redacted\":true}"))))
+        val input=GeminiInteractionsRequest.build(config(),JSONArray().put(old).put(AgentConversationCodec.userTextMessage("继续")),JSONArray()).toString()
+        assertTrue(input.contains("请按工具 Schema"));assertTrue(input.contains("历史占位符"))
+    }
+
     @Test
     fun fragmentedParallelCallsKeepOriginalIdsAndSignedThoughtWithoutSummary() {
         val events = mutableListOf<ProviderEvent>()

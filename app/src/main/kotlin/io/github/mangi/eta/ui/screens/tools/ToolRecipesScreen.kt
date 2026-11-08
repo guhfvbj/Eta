@@ -73,7 +73,7 @@ import top.yukonga.miuix.kmp.basic.TextButton
                 EtaExpandPreference("配方步骤权限",permissionsExpanded,summary = "HTTP、文件、Root、系统设置与 ContentProvider",onClick = { permissionsExpanded=!permissionsExpanded })
                 if(permissionsExpanded) listOf("recipe_http" to "HTTP 请求","recipe_files" to "应用可访问的文件读写","recipe_root" to "Root Shell","recipe_settings" to "系统设置写入","recipe_content" to "ContentProvider 查询").forEach { (key,label) ->
                     EtaSwitchPreference(label,state.value.optBoolean(key,key in setOf("recipe_http","recipe_files")),{ state.set(key,it) },
-                        summary = if(key == "recipe_root") "同时需要终端能力与设备 Root 授权；危险步骤仍经过工具审查" else null)
+                        summary = if(key == "recipe_root") "同时需要终端能力与设备 Root 授权" else null)
                 }
             }
         }

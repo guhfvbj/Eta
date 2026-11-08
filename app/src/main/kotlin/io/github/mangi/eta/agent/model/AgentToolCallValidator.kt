@@ -25,6 +25,7 @@ internal class AgentToolCallValidator(tools: JSONArray) {
             ?: return "工具「${call.name}」当前未加载或未获允许；请先 tools_search / tools_use_group，下一轮再调用。加载不会放宽权限。"
         val arguments = runCatching { JSONObject(call.argumentsJson.ifBlank { "{}" }) }
             .getOrElse { return "参数不是有效的 JSON object" }
+        if (AgentConversationCodec.isHistoricalPlaceholder(arguments)) return AgentConversationCodec.HISTORICAL_ARGUMENTS_NOTICE
         return validateValue(
             value = arguments,
             schema = toolSchema.parameters,

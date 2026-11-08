@@ -11,7 +11,7 @@ internal object AgentConversationCodec {
 
     private const val IMAGE_OMITTED_TEXT = "[图片观察已在当前回合使用，未写入持久会话]"
     private const val SENSITIVE_TOOL_OMITTED_TEXT =
-        "[敏感工具参数与原始结果仅供当前回合使用，未写入持久会话]"
+        "[敏感工具原始结果仅供当前回合使用，未写入持久会话]"
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = false
@@ -202,6 +202,7 @@ internal object AgentConversationCodec {
         messages: JSONArray,
         startIndex: Int,
         sensitiveToolCallIds: Set<String> = emptySet(),
+        omitSensitiveArgumentsForSummary: Boolean = false,
     ): List<AgentModelClient.ConversationMessage> {
         val redactedIds = sensitiveToolCallIds.toMutableSet()
         for (index in startIndex until messages.length()) {
@@ -212,7 +213,7 @@ internal object AgentConversationCodec {
         return buildList {
             for (index in startIndex until messages.length()) {
                 messages.optJSONObject(index)
-                    ?.let { redactSensitiveToolData(it, redactedIds) }
+                    ?.let { redactSensitiveToolData(it, redactedIds, omitSensitiveArgumentsForSummary) }
                     ?.let(::fromJsonObject)
                     ?.let(::sanitizeMessage)
                     ?.let(::add)
@@ -223,8 +224,9 @@ internal object AgentConversationCodec {
     private fun redactSensitiveToolData(
         source: JSONObject,
         sensitiveToolCallIds: Set<String>,
+        omitSensitiveArgumentsForSummary: Boolean,
     ): JSONObject {
-        if (sensitiveToolCallIds.isEmpty()) return source
+        if (sensitiveToolCallIds.isEmpty() && !source.has("tool_calls")) return source
         val copy = JSONObject(source.toString())
         if (
             copy.optString("role") == "tool" &&
@@ -232,15 +234,63 @@ internal object AgentConversationCodec {
         ) {
             copy.put("content", SENSITIVE_TOOL_OMITTED_TEXT)
         }
-        val calls = copy.optJSONArray("tool_calls") ?: return copy
+        var calls = copy.optJSONArray("tool_calls") ?: return copy
+        if (omitSensitiveArgumentsForSummary) {
+            val kept = JSONArray()
+            val omittedNames = mutableListOf<String>()
+            for (i in 0 until calls.length()) {
+                val call = calls.optJSONObject(i) ?: continue
+                if (call.optString("id") in sensitiveToolCallIds) omittedNames += call.optJSONObject("function")?.optString("name").orEmpty()
+                else kept.put(call)
+            }
+            if (omittedNames.isNotEmpty()) {
+                copy.put("content", providerMessageText(copy.opt("content")) +
+                    "\n[历史敏感工具调用仅保留名称：${omittedNames.joinToString()}；参数已省略。新调用请按当前工具 Schema 提供真实参数。]")
+                if (kept.length() == 0) copy.remove("tool_calls") else copy.put("tool_calls", kept)
+                calls = kept
+            }
+        }
         for (index in 0 until calls.length()) {
             val call = calls.optJSONObject(index) ?: continue
-            if (call.optString("id") !in sensitiveToolCallIds) continue
-            call.optJSONObject("function")
-                ?.put("arguments", JSONObject().put("redacted", true).toString())
+            val function = call.optJSONObject("function") ?: continue
+            val raw = function.opt("arguments")
+            val arguments = when (raw) {
+                is JSONObject -> raw
+                is String -> runCatching { JSONObject(raw) }.getOrNull()
+                else -> null
+            } ?: continue
+            redactCredentialFields(arguments)
+            function.put("arguments", if (raw is String) arguments.toString() else arguments)
         }
         return copy
     }
+
+    const val HISTORICAL_ARGUMENTS_NOTICE =
+        "[历史工具参数已脱敏。redacted 是历史占位符；调用时请按工具 Schema 传入真实参数，勿传 {\"redacted\":true}。]"
+
+    fun isHistoricalPlaceholder(arguments: JSONObject): Boolean =
+        arguments.length() == 1 && arguments.opt("redacted") == true
+
+    fun containsHistoricalPlaceholder(message: JSONObject): Boolean = parseToolCalls(message).any {
+        runCatching { isHistoricalPlaceholder(JSONObject(it.argumentsJson)) }.getOrDefault(false)
+    }
+
+    // Preserve the argument contract and recipe schemas; omit common credential values only.
+    private fun redactCredentialFields(value: Any?) {
+        when (value) {
+            is JSONObject -> value.keys().asSequence().toList().forEach { name ->
+                val child = value.opt(name)
+                val key = name.lowercase(java.util.Locale.ROOT).filter(Char::isLetterOrDigit)
+                if (child is String && key in CREDENTIAL_FIELDS) value.put(name, "[凭据已省略]")
+                else redactCredentialFields(child)
+            }
+            is JSONArray -> for (i in 0 until value.length()) redactCredentialFields(value.opt(i))
+        }
+    }
+
+    private val CREDENTIAL_FIELDS = setOf("apikey", "xapikey", "xgoogapikey", "authorization", "proxyauthorization",
+        "password", "passwd", "passphrase", "clientsecret", "secret", "token", "accesstoken", "refreshtoken", "idtoken",
+        "cookie", "setcookie", "privatekey")
 
     fun durableMessage(message: JSONObject): AgentModelClient.ConversationMessage =
         sanitizeMessage(fromJsonObject(message))

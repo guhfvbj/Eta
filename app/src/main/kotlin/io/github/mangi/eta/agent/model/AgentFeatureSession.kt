@@ -145,25 +145,16 @@ internal class AgentFeatureSession(
         val recipe = if (call.name.startsWith("recipe_")) store.find(call.name.removePrefix("recipe_")) else null
         if (call.name.startsWith("recipe_") && (recipe == null || !recipe.enabled)) return error("RECIPE_DISABLED", "配方未启用")
         if (recipe != null && !rootAvailable() && recipe.name in store.rootDependentRecipes(store.all())) return error("ROOT_REQUIRED", "配方或组合依赖需要 Root")
-        val plannedShells = mutableSetOf<String>()
-        val risk = if (recipe != null) recipeRisk(recipe, args, plannedShells) else AgentRiskPolicy.assess(call.name, call.argumentsJson)
-        if (AgentFeaturePreferences.load(context).optString("review_mode","standard") == "readonly" && risk.level != AgentRiskLevel.LOW)
-            return error("READ_ONLY_REVIEW_MODE", "当前为只读审查模式，本次没有执行。此模式不会请求写入授权；请只查询，需要写入时由用户在设置中切换档位。")
-        if (!authorize(call, risk, executionController)) return error("TOOL_AUTHORIZATION_DENIED", "工具审查或用户授权未通过，本次未执行。不要重试或换工具绕过；需要用户修改请求或设置。")
         executionController.throwIfCancelled()
-        if (recipe != null) return try { finish(call,AgentModelClient.ToolResult(AgentToolRecipeExecutor(context,
-                BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable), store, rootAvailable, { step -> checkRecipeStep(step, executionController) },
-                beforeResolvedStep = { step, values ->
-                    if(step is ToolRecipeStep.RootShell) {
-                        val command = ToolRecipeTemplate.interpolateShell(step.command,values)
-                        if(command !in plannedShells) {
-                            val actual = AgentModelClient.ToolCall(call.id + "-resolved", "terminal", JSONObject().put("action","exec").put("command",command).put("identity","root").toString())
-                            check(authorize(actual,AgentRiskPolicy.assess(actual.name,actual.argumentsJson),executionController)) { "配方运行时解析出的 Root 命令未获授权" }
-                        }
-                    }
-                }).execute(recipe, args), sensitive = true)) }
-            catch (failure: Exception) { executionController.throwIfCancelled(); error("RECIPE_EXECUTION_DENIED", failure.message.orEmpty()) }
-        author.execute(call.name, args)?.let { return finish(call,AgentModelClient.ToolResult(it, sensitive = true)) }
+        if (recipe != null) return try {
+            finish(call, AgentModelClient.ToolResult(AgentToolRecipeExecutor(context,
+                BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable), store, rootAvailable,
+                { step -> checkRecipeStep(step, executionController) }).execute(recipe, args), sensitive = true))
+        } catch (failure: Exception) {
+            executionController.throwIfCancelled()
+            error("RECIPE_EXECUTION_DENIED", failure.message.orEmpty())
+        }
+        author.execute(call.name, args)?.let { return finish(call,AgentModelClient.ToolResult(it)) }
         return finish(call,delegate.execute(call))
     }
     private fun finish(call: AgentModelClient.ToolCall, result: AgentModelClient.ToolResult): AgentModelClient.ToolResult {
@@ -192,45 +183,6 @@ internal class AgentFeatureSession(
     fun configForRound(): AgentModelClient.ModelConfig = config.copy(
         hostedWebSearchEnabled = config.hostedWebSearchEnabled && allowsHostedSearch(),
     )
-    private fun recipeRisk(recipe: ToolRecipe, args: JSONObject, plannedShells: MutableSet<String>): AgentRiskAssessment {
-        val values = ToolRecipeArguments.flatten(args)
-        val visited = mutableSetOf<String>()
-        fun assess(current: ToolRecipe): AgentRiskAssessment {
-            if (!visited.add(current.name)) return AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("配方组合循环"))
-            val shells = current.steps.filterIsInstance<ToolRecipeStep.RootShell>().map {
-                runCatching { ToolRecipeTemplate.interpolateShell(it.command, values).also(plannedShells::add) }
-                    .getOrElse { _ -> it.command }
-            }
-            val shellRisk = AgentRiskPolicy.assessRecipe(current.modelToolName, args.toString(), shells)
-            val steps = current.steps.map { step -> when (step) {
-                is ToolRecipeStep.Compose -> store.find(step.recipe)?.let(::assess)
-                    ?: AgentRiskAssessment(AgentRiskLevel.HIGH, listOf("组合目标不存在"))
-                is ToolRecipeStep.FileWrite -> AgentRiskPolicy.assess("write_file", "{}")
-                is ToolRecipeStep.SettingsWrite -> AgentRiskPolicy.assess("set_setting", "{}")
-                is ToolRecipeStep.ContentQuery -> AgentRiskAssessment(AgentRiskLevel.MEDIUM, listOf("读取 ContentProvider 数据"))
-                is ToolRecipeStep.HttpRequest -> AgentRiskAssessment(AgentRiskLevel.MEDIUM, listOf("向网络端点发送请求"))
-                else -> AgentRiskAssessment(AgentRiskLevel.LOW)
-            } }
-            visited.remove(current.name)
-            return (steps + shellRisk).maxByOrNull { it.level } ?: shellRisk
-        }
-        return assess(recipe)
-    }
-    private fun authorize(call: AgentModelClient.ToolCall, risk: AgentRiskAssessment, executionController: AgentRunController = controller): Boolean {
-        val current = AgentFeaturePreferences.load(context)
-        val mode = current.optString("review_mode", "standard")
-        val verdict = if (mode == "smart" && risk.level in setOf(AgentRiskLevel.MEDIUM, AgentRiskLevel.HIGH))
-            AgentToolReviewCoordinator.review(current, call, prompt, config, executionController, history, conversation,
-                assessment = risk, effectDetails = call.name.takeIf { it.startsWith("recipe_") }?.let { store.find(it.removePrefix("recipe_")) }?.let(ToolRecipeShareFormat::entryOf)) else null
-        val action = AgentToolReviewPolicy.decide(mode, risk.level, verdict)
-        if (action == AgentToolReviewPolicy.Action.DENY) return false
-        if (action == AgentToolReviewPolicy.Action.ALLOW) return true
-        val repeat = risk.level == AgentRiskLevel.MEDIUM && mode != "strict"
-        if (repeat && AgentToolAuthorization.hasGrant(conversation, call.name, call.argumentsJson, current.toString())) return true
-        return AgentToolAuthorization.confirm(conversation, call.name, call.argumentsJson, risk, executionController, repeatAllowed = repeat).also { allowed ->
-            if (allowed && repeat) AgentToolAuthorization.grant(conversation, call.name, call.argumentsJson, current.toString())
-        }
-    }
     private fun error(code: String, message: String) = AgentModelClient.ToolResult(JSONObject().put("ok", false).put("code", code).put("message", message).toString())
     companion object {
         fun property(type: String) = JSONObject().put("type", type)

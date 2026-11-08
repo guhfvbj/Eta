@@ -34,7 +34,7 @@ internal class AgentContextCompactor(
         })
         // 防套娃：已存在的摘要不再进摘要器，原样保留，只压它之后的新历史。
         val priorSummaries = history.take(end).filter { it.optBoolean("_eta_context_summary") }
-        val durable = AgentConversationCodec.transcript(source, 0, sensitiveIds)
+        val durable = AgentConversationCodec.transcript(source, 0, sensitiveIds, omitSensitiveArgumentsForSummary = true)
         if (durable.isEmpty()) throw failure("CONTEXT_NOT_COMPACTABLE", "没有可压缩的历史内容。")
         val safe = durable.map { message ->
             val content = AgentConversationCodec.toJsonObject(message).opt("content")

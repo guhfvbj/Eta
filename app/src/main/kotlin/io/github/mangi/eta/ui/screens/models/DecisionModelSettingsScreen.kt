@@ -9,9 +9,7 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.decision.*
 import io.github.mangi.eta.agent.model.AgentFeaturePreferences
-import io.github.mangi.eta.agent.tool.AgentToolReviewCoordinator
 import io.github.mangi.eta.agent.runtime.AgentRunController
-import io.github.mangi.eta.agent.tool.AgentToolAuthorization
 import io.github.mangi.eta.ui.components.*
 import kotlinx.coroutines.*
 import top.yukonga.miuix.kmp.basic.Text
@@ -159,6 +157,6 @@ import top.yukonga.miuix.kmp.basic.TextButton
     }
     if(confirmClear) EtaWindowDialog(show = true,title = "清理缓存与遥测？",summary = "设置保持不变；判断缓存、粘性、遥测与工具会话缓存将被清空。",onDismissRequest = { confirmClear=false }) {
         TextButton("取消",onClick = { confirmClear=false })
-        TextButton(stringResource(R.string.decision_model_group_cleanup),onClick = { AgentDecisionRouter.clear(); AgentFeaturePreferences.clearToolSessions(context); AgentToolReviewCoordinator.clearCache(); AgentToolAuthorization.clearGrants(); confirmClear=false })
+        TextButton(stringResource(R.string.decision_model_group_cleanup),onClick = { AgentDecisionRouter.clear(); AgentFeaturePreferences.clearToolSessions(context); confirmClear=false })
     }
 }

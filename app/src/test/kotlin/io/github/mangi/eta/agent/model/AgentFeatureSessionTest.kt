@@ -20,7 +20,6 @@ class AgentFeatureSessionTest {
         io.github.mangi.eta.agent.prompt.AgentToolPolicyStore.save(io.github.mangi.eta.agent.prompt.AgentToolPolicy())
         context.getSharedPreferences("eta_agent_features", 0).edit().clear().commit()
         context.getSharedPreferences("eta_tool_sessions", 0).edit().clear().commit()
-        AgentFeaturePreferences.set("review_mode", "auto", context)
     }
     private fun session() = AgentFeatureSession(context, "test-conversation", "test", emptyList(),
         AgentModelClient.ModelConfig(baseUrl="https://example.test", apiKey="test", model="test", systemPrompt="test"),
@@ -167,43 +166,45 @@ class AgentFeatureSessionTest {
         session.execute(call("tools_use_group","{\"group\":\"extensions\"}"),delegate)
         session.project(full())
         val args="""{"action":"create","name":"echo_live","recipe":{"name":"echo_live","description":"回显","parameters":{"type":"object","properties":{}},"steps":[{"op":"literal","text":"hello"}]}}"""
-        io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("test-host",true)
         try {
-            val future=java.util.concurrent.CompletableFuture.supplyAsync { session.execute(call("eta_author_tool",args),delegate) }
-            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            while(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty() && !future.isDone && System.nanoTime()<deadline) Thread.sleep(10)
-            val request=io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.single()
-            assertEquals(io.github.mangi.eta.agent.tool.AgentRiskLevel.HIGH,request.risk.level)
-            io.github.mangi.eta.agent.tool.AgentToolAuthorization.answer(request.id,true)
-            val result=JSONObject(future.get(5,java.util.concurrent.TimeUnit.SECONDS).content)
+            val created = session.execute(call("eta_author_tool",args),delegate)
+            assertFalse(created.sensitive)
+            val result=JSONObject(created.content)
             assertTrue(result.toString(),result.getBoolean("ok"))
+            assertFalse(session.execute(call("eta_list_recipes"),delegate).sensitive)
             assertTrue("recipe_echo_live" in names(session.project(full())))
             assertEquals("hello",JSONObject(session.execute(call("recipe_echo_live"),delegate).content).getString("result"))
-        } finally {
-            io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.forEach { io.github.mangi.eta.agent.tool.AgentToolAuthorization.answer(it.id,false) }
-            io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("test-host",false)
-            store.replaceAll(emptyList())
-        }
+        } finally { store.replaceAll(emptyList()) }
     }
-    @Test fun cancellingChildAuthorizationNeverCancelsParentOrExecutesTheTool() {
+    @Test fun cancellingChildExecutionNeverCancelsParentOrExecutesTheTool() {
         val parent=AgentRunController();val child=AgentRunController()
         val session=AgentFeatureSession(context,"parent-conversation","write request",emptyList(),AgentModelClient.ModelConfig(baseUrl="https://example.test",apiKey="test",model="test",systemPrompt=""),parent,{false})
         var invoked=false
-        io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("cancel-test",true)
-        try {
-            val future=java.util.concurrent.CompletableFuture.supplyAsync {
-                session.execute(call("write_file"),AgentModelClient.ToolExecutor { invoked=true;AgentModelClient.ToolResult("bad") },requireLoaded=false,executionController=child)
-            }
-            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            while(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty() && !future.isDone && System.nanoTime()<deadline) Thread.sleep(10)
-            assertFalse(future.isDone)
-            child.cancel()
-            assertThrows(java.util.concurrent.ExecutionException::class.java) { future.get(3,java.util.concurrent.TimeUnit.SECONDS) }
-            assertFalse(parent.isCancelled);assertFalse(invoked)
-            assertTrue(io.github.mangi.eta.agent.tool.AgentToolAuthorization.pending.value.isEmpty())
-        } finally {
-            child.cancel();io.github.mangi.eta.agent.tool.AgentToolAuthorization.setHostVisible("cancel-test",false)
+        child.cancel()
+        assertThrows(io.github.mangi.eta.agent.runtime.AgentRunCancelledException::class.java) {
+            session.execute(call("write_file"),AgentModelClient.ToolExecutor { invoked=true;AgentModelClient.ToolResult("bad") },requireLoaded=false,executionController=child)
         }
+        assertFalse(parent.isCancelled);assertFalse(invoked)
+    }
+    @Test fun oldReviewModesCannotBlockNativeOrChildTools() {
+        val legacy=JSONObject().put("migration",2).put("loading","off").put("review_mode","readonly")
+            .put("review_engine","decision").put("review_model","old-model").put("review_timeout",20000)
+        context.getSharedPreferences("eta_agent_features",0).edit().putString("settings",legacy.toString()).commit()
+        val manager=context.getSystemService(android.app.NotificationManager::class.java)
+        manager.createNotificationChannel(android.app.NotificationChannel("eta_tool_authorization","legacy",3))
+        val session=session()
+        assertNull(manager.getNotificationChannel("eta_tool_authorization"))
+        val cfg=JSONArray().put(AgentFeatureSession.schema("terminal","command",JSONObject()))
+        assertTrue("terminal" in names(session.project(cfg)))
+        val command="{\"command\":\"rm -rf /data\"}"
+        val invoked=mutableListOf<String>()
+        val delegate=AgentModelClient.ToolExecutor { invoked+=it.argumentsJson;AgentModelClient.ToolResult("simulated; no shell executed") }
+        assertEquals("simulated; no shell executed",session.execute(call("terminal",command),delegate).content)
+        assertEquals("simulated; no shell executed",session.execute(call("terminal",command),delegate,requireLoaded=false).content)
+        assertEquals(listOf(command,command),invoked)
+        val migrated=AgentFeaturePreferences.load(context)
+        assertEquals(3,migrated.getInt("migration"))
+        assertFalse(migrated.keys().asSequence().any { it.startsWith("review_") })
     }
     @Test fun childLikeFilteredCatalogRemovesRevokedSchemasOnTheNextRound() {
         var allowed=true;var round=0

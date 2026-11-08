@@ -1293,7 +1293,7 @@ private val SETTINGS_SEARCH_INDEX = listOf(
     SettingsSearchEntry(
         sectionKey = "section_prompt_studio",
         labels = listOf(R.string.prompt_studio_section, R.string.prompt_studio_title),
-        keywords = "工具调用审查 智能审查 工具渐进加载 MCP 工具按需加载 提示词 提示词工坊 工坊 工具 边界 系统提示词 自定义提示词 版本 历史 快照 请求快照 预设 导入 导出 完整性 当前生效 注入 角色卡 对比",
+        keywords = "工具渐进加载 MCP 工具按需加载 提示词 提示词工坊 工坊 工具 边界 系统提示词 自定义提示词 版本 历史 快照 请求快照 预设 导入 导出 完整性 当前生效 注入 角色卡 对比",
     ),
     SettingsSearchEntry(
         sectionKey = "section_about",

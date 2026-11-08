@@ -127,7 +127,10 @@ internal object GeminiInteractionHistory {
         append('[').append(message.optString("role")).append("] ")
         append(providerMessageText(message.opt("content")))
         val calls = message.optJSONArray("tool_calls")
-        if (calls != null) append("\n工具调用记录：").append(calls)
+        if (calls != null) {
+            if (AgentConversationCodec.containsHistoricalPlaceholder(message)) append('\n').append(AgentConversationCodec.HISTORICAL_ARGUMENTS_NOTICE)
+            append("\n工具调用记录：").append(calls)
+        }
         if (message.optString("role") == "tool") append("\n调用标识：").append(message.optString("tool_call_id"))
     }
 

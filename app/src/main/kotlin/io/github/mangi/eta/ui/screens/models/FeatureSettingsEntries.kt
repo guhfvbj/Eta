@@ -27,27 +27,6 @@ import io.github.mangi.eta.ui.navigation.AppRoute
 @Composable internal fun FeaturePromptSettingsEntries() {
     val state = rememberFeatureSettings()
     val settings = state.value
-    val models = rememberFeatureModels()
-    val modes = listOf("readonly","strict","standard","auto","smart")
-    val labels = listOf("只读","严格","标准","自动","智能审查")
-    val hints = listOf("仅允许读取","中风险逐个确认","每个会话确认一次","中风险不再询问","逐次模型裁决")
-    val summaries = listOf("仅允许读取，其他调用会被拒绝","中风险逐个确认","每个会话确认一次，高风险仍会确认","中风险不再询问，高风险仍会确认","由模型逐次判定中风险以上调用；失败回退标准审查")
-    val mode = settings.optString("review_mode","standard")
-    EtaPreferenceDivider()
-    FeatureChoice("工具调用审查",labels.zip(modes),mode,summary = summaries[modes.indexOf(mode).coerceAtLeast(0)],hints = hints,icon = Icons.Rounded.Security) { state.set("review_mode",it) }
-    if(mode == "smart") {
-        EtaPreferenceDivider()
-        FeatureChoice("审查引擎",listOf("LLM 审查" to "llm","决策模型判断" to "decision"),settings.optString("review_engine","llm"),icon = Icons.Rounded.Psychology,
-            summary = "LLM 审查：对话模型逐次判定并输出 allow/deny 结构化结果；决策模型：复用已配置的判断模型（/v1/systemone）。仅智能审查档生效") { state.set("review_engine",it) }
-        if(settings.optString("review_engine","llm")=="llm") {
-            EtaPreferenceDivider()
-            FeatureModelRow("审查模型",models,settings.optString("review_model"),empty = "跟随当前对话模型",clearLabel = "跟随当前对话模型") {
-                state.set("review_model",it?.id.orEmpty());state.set("review_provider",it?.providerId.orEmpty())
-            }
-        }
-        EtaPreferenceDivider()
-        FeatureChoice("审查超时",listOf(3000,6000,10000,15000,20000).map { "${it/1000} 秒" to it.toString() },settings.optInt("review_timeout",6000).toString(),icon = Icons.Rounded.Timer) { state.set("review_timeout",it.toInt()) }
-    }
     EtaPreferenceDivider()
     val loading = settings.optString("loading","search").let { if(it=="tool") "search" else it }
     FeatureChoice("工具渐进加载",listOf("按工具" to "search","按组" to "group","关闭" to "off"),loading,icon = Icons.Rounded.Layers,

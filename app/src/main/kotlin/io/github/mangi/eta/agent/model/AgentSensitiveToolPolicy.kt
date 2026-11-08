@@ -1,6 +1,6 @@
 package io.github.mangi.eta.agent.model
 
-/** 标记原始参数或结果不得进入持久会话的工具。 */
+/** 标记原始结果不得进入持久会话的工具；调用参数保留结构，常见凭据字段单独脱敏。 */
 internal object AgentSensitiveToolPolicy {
     fun isSensitive(toolName: String): Boolean =
         toolName.startsWith("mcp_") || toolName in sensitiveTools || toolName in io.github.mangi.eta.agent.context.PersonalSearchTools.names || toolName in AgentPhoneToolCatalog.names

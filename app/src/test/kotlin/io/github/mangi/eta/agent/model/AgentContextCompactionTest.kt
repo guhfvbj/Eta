@@ -144,7 +144,7 @@ class AgentContextCompactionTest {
         val assistant = JSONObject().put("role", "assistant").put("content", "读取结果")
             .put("reasoning_content", "PRIVATE_THINKING")
             .put("tool_calls", JSONArray().put(JSONObject().put("id", "sensitive").put("type", "function")
-                .put("function", JSONObject().put("name", "read_secret").put("arguments", "SECRET_ARGUMENT"))))
+                .put("function", JSONObject().put("name", "read_secret").put("arguments", """{"query":"SECRET_ARGUMENT"}"""))))
         ResponsesEphemeralState.attachOutputItems(assistant, JSONArray().put(JSONObject().put("encrypted", "OPAQUE_SECRET")))
         messages.put(assistant)
         messages.put(JSONObject().put("role", "tool").put("tool_call_id", "sensitive").put("content", "SECRET_RESULT"))
@@ -158,6 +158,9 @@ class AgentContextCompactionTest {
             listOf("SECRET_ARGUMENT", "SECRET_RESULT", "PRIVATE_THINKING", "OPAQUE_SECRET", "PRIVATE_IMAGE").forEach {
                 assertFalse("摘要包含敏感数据 $it", text.contains(it))
             }
+            assertTrue(text.contains("read_secret"))
+            assertTrue(text.contains("历史敏感工具调用仅保留名称"))
+            assertFalse(text.contains("redacted"))
             response("已读取过信息，原始敏感结果未保留。")
         }, AgentRunController()).compact(messages, 1, setOf("sensitive"))
         assertSame(pending, compacted.getJSONObject(compacted.length() - 1))

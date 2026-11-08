@@ -46,6 +46,9 @@ internal object OpenAiRequestMessages {
                     .takeIf(String::isNotEmpty)
                     ?.let(::add)
             }
+            if ((0 until source.length()).any { index ->
+                source.optJSONObject(index)?.let(AgentConversationCodec::containsHistoricalPlaceholder) == true
+            }) add(AgentConversationCodec.HISTORICAL_ARGUMENTS_NOTICE)
         }.joinToString("\n\n")
 
     private val SYSTEM_ROLES = setOf("system")

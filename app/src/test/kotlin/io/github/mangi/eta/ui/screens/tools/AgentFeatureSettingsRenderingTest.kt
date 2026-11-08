@@ -48,6 +48,14 @@ class AgentFeatureSettingsRenderingTest {
     @Test fun recipesRenderPermissionsAndAuditableEmptyState() = withContent({ ToolRecipesScreen {} }) { view ->
         assertRendered(view,listOf("模型自建工具","配方步骤权限"))
     }
+    @Test fun promptSettingsExposeLoadingControlsWithoutTheRemovedReviewFeature() = withContent({
+        io.github.mangi.eta.ui.components.EtaPreferenceGroup { io.github.mangi.eta.ui.screens.models.FeaturePromptSettingsEntries() }
+    }) { view ->
+        assertRendered(view,listOf("工具渐进加载","MCP 工具按需加载"))
+        val owner=view.getChildAt(0).javaClass.getMethod("getSemanticsOwner").invoke(view.getChildAt(0)) as SemanticsOwner
+        val texts=descendants(owner.unmergedRootSemanticsNode).flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }.map { it.text }
+        assertTrue(texts.none { it in setOf("工具调用审查","审查引擎","审查模型","审查超时") })
+    }
     private fun assertRendered(view: ComposeView,texts: List<String>) {
         val ownerView=view.getChildAt(0)
         val owner=ownerView.javaClass.getMethod("getSemanticsOwner").invoke(ownerView) as SemanticsOwner

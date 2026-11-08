@@ -57,7 +57,8 @@ class AgentDecisionCoordinatorRegressionTest {
         val request=request().copy(history=listOf(AgentModelClient.ConversationMessage("user","original human"),AgentModelClient.ConversationMessage("tool","untrusted raw output"),AgentModelClient.ConversationMessage("assistant","final reply")))
         val result=AgentDecisionEvaluator.evaluate(request,"primary-id",config.baseUrl,config.apiKey,3000,3,"",groups,emptySet(),
             escalation=AgentDecisionEscalation.Config("strong-id",config.baseUrl,"test",60,modelName="strong"),modelName="primary",runtimeConfig=config,protocol="llm",
-            requestOverride={state,questions,model ->
+            requestOverride={state,questions,model,timeout ->
+                assertEquals(if(model=="strong") 6000 else 3000,timeout)
                 assertFalse(state.toString().contains("untrusted raw output"))
                 assertTrue(state.toString().contains("original human"))
                 assertEquals(listOf("needs_tools","tool_groups"),questions.map { it.id })
@@ -77,11 +78,48 @@ class AgentDecisionCoordinatorRegressionTest {
         assertNull(AgentDecisionEndpoint.requestUrl(local,"http://127.0.0.1:8080/v1","llm"))
         assertNull(AgentDecisionEndpoint.requestUrl(local,"","systemone"))
         var called=false
-        val result=AgentDecisionEvaluator.evaluate(request(),"local",local.baseUrl,"test",3000,0,"",groups,emptySet(),runtimeConfig=local,protocol="llm",requestOverride={_,_,_->
+        val result=AgentDecisionEvaluator.evaluate(request(),"local",local.baseUrl,"test",3000,0,"",groups,emptySet(),runtimeConfig=local,protocol="llm",requestOverride={_,_,_,_->
             called=true
             AgentDecisionOutcome.Success(AgentDecisionResponse(mapOf("needs_tools" to AgentDecisionAnswer.Noul(0.0),"tool_groups" to AgentDecisionAnswer.MultiChoice(emptySet(),emptyMap(),.9)),emptyList(),null,200,1))
         })
         assertTrue(called);assertTrue(result.succeeded)
         assertEquals("http://127.0.0.1:8080/v1/chat/completions",result.endpoint)
     }
+    @Test fun realLlmNormalizesContinuationAndReportsHttpErrorsWithoutProviderPrompt() {
+        val server=com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1",0),0)
+        val requestBody=java.util.concurrent.atomic.AtomicReference<String>()
+        val key="test-only-credential"
+        val calls=java.util.concurrent.atomic.AtomicInteger()
+        server.createContext("/v1/chat/completions") { exchange ->
+            requestBody.set(exchange.requestBody.bufferedReader().use { it.readText() })
+            val first=calls.incrementAndGet()==1
+            val body=if(first) {
+                val decision=JSONObject().put("needs_tools",false).put("groups",org.json.JSONArray(listOf("basic","calendar","typo"))).put("confidence",0.9)
+                val chunk=JSONObject().put("choices",org.json.JSONArray().put(JSONObject().put("index",0)
+                    .put("delta",JSONObject().put("content",decision.toString())).put("finish_reason","stop")))
+                "data: $chunk\n\ndata: [DONE]\n\n"
+            } else JSONObject().put("error",JSONObject().put("message","probe-rejected $key")).toString()
+            val bytes=body.toByteArray()
+            exchange.responseHeaders.add("Content-Type",if(first) "text/event-stream" else "application/json")
+            exchange.sendResponseHeaders(if(first) 200 else 400,bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            val local=config.copy(baseUrl="http://127.0.0.1:${server.address.port}/v1",apiKey=key,systemPrompt="provider-specific prose")
+            val routed=AgentDecisionEvaluator.evaluate(request(),"primary-id",local.baseUrl,key,3000,0,"",groups,emptySet(),
+                modelName="primary",runtimeConfig=local,protocol="llm")
+            assertTrue(routed.detail,routed.succeeded)
+            assertEquals(setOf("calendar"),routed.selectedGroups)
+            assertEquals(1.0,routed.needsTools,0.0)
+            val result=AgentDecisionEvaluator.evaluate(request(),"primary-id",local.baseUrl,key,3000,0,"",groups,emptySet(),
+                modelName="primary",runtimeConfig=local,protocol="llm")
+            assertFalse(result.succeeded)
+            assertEquals(400,result.httpStatus)
+            assertTrue(result.detail,result.detail.contains("HTTP 400"))
+            assertFalse(result.detail.contains(key))
+            assertFalse(requestBody.get().contains("provider-specific prose"))
+        } finally { server.stop(0) }
+    }
+
 }

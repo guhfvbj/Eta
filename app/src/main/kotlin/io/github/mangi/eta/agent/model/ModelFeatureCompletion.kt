@@ -16,7 +16,7 @@ internal object ModelFeatureCompletion {
         try {
             controller.throwIfCancelled()
             val bounded = io.github.mangi.eta.agent.runtime.AgentRuntimePolicy.withoutOptionalThinking(config).copy(hostedWebSearchEnabled = false,
-                extraBodyJson = "", customBody = emptyList())
+                systemPrompt = "", extraBodyJson = "", customBody = emptyList())
             val response = AgentModelRetry().complete(
                 1, ProviderRequest(bounded, messages, JSONArray(), sessionId, ProviderRequestPurpose.COMPACTION, outputLimit),
                 providerOverride ?: ProviderClientFactory.getClient(bounded), child, {}, { _, _ -> }, {},
@@ -27,6 +27,10 @@ internal object ModelFeatureCompletion {
             check((response.assistantMessage.optJSONArray("tool_calls")?.length() ?: 0) == 0)
             onUsage(response.assistantMessage.optJSONObject("usage"))
             return ModelFeatureJson.withoutThinking(response.assistantMessage.optString("content")).also { require(it.isNotEmpty() && it.length <= outputLimit * 16) }
+        } catch (failure: Exception) {
+            controller.throwIfCancelled()
+            if (child.isCancelled) throw IllegalStateException("辅助模型超时（${timeoutMs}ms）", failure)
+            throw failure
         } finally { deadline.interrupt(); child.cancel(); binding.close() }
     }
 }

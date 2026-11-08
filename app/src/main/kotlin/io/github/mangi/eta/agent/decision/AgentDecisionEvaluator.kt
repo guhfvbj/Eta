@@ -90,7 +90,7 @@ internal object AgentDecisionEvaluator {
         runtimeConfig: AgentModelClient.ModelConfig? = null,
         protocol: String = "systemone",
         controller: AgentRunController = AgentRunController(),
-        requestOverride: ((JSONObject, List<AgentDecisionQuestion>, String) -> AgentDecisionOutcome)? = null,
+        requestOverride: ((JSONObject, List<AgentDecisionQuestion>, String, Int) -> AgentDecisionOutcome)? = null,
     ): AgentDecisionEvaluation {
         val requestModel = modelName.ifBlank { modelId }
         val resolution = if(protocol == "llm" && runtimeConfig != null) {
@@ -163,7 +163,7 @@ internal object AgentDecisionEvaluator {
 
         fun call(endpoint: String, key: String, model: String, timeout: Int, state: JSONObject, questions: List<AgentDecisionQuestion>): AgentDecisionOutcome {
             controller.throwIfCancelled()
-            requestOverride?.let { return it(state, questions, model) }
+            requestOverride?.let { return it(state, questions, model, timeout) }
             if (protocol == "systemone") return callSystemOne(endpoint, key, model, timeout, state, questions, controller).also { controller.throwIfCancelled() }
             val started = System.currentTimeMillis()
             return try {
@@ -187,7 +187,10 @@ internal object AgentDecisionEvaluator {
                 controller.throwIfCancelled()
                 AgentDecisionOutcome.Failure("llm_${(failure as? AgentModelFailure)?.code ?: failure.javaClass.simpleName}",
                     httpStatus = (failure as? AgentModelFailure)?.code?.removePrefix("HTTP_")?.toIntOrNull(), latencyMs = System.currentTimeMillis() - started,
-                    detail = "LLM 判断请求或 JSON 解析失败")
+                    detail = "LLM 判断请求或 JSON 解析失败：" + failure.message.orEmpty()
+                        .let { if (key.isBlank()) it else it.replace(key, "[已隐藏凭据]") }
+                        .replace("\r", " ").replace("\n", " ").take(500)
+                        .ifBlank { failure.javaClass.simpleName })
             }
         }
         var outcome: AgentDecisionOutcome = call(endpoint, apiKey, requestModel, timeoutMs, state, questions)
@@ -232,7 +235,7 @@ internal object AgentDecisionEvaluator {
                         escalationEndpoint,
                         escalation.apiKey,
                         escalation.modelName.ifBlank { escalation.modelId },
-                        timeoutMs,
+                        if (protocol == "llm") maxOf(timeoutMs, 6000) else timeoutMs,
                         state,
                         questions,
                     )

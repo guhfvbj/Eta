@@ -28,7 +28,6 @@ internal class AgentToolRecipeExecutor(
     private val store: AgentToolRecipeStore,
     private val rootAvailable: () -> Boolean = { false },
     private val beforeStep: (ToolRecipeStep) -> Unit = {},
-    private val beforeResolvedStep: (ToolRecipeStep, Map<String, String>) -> Unit = { _, _ -> },
 ) {
 
     /**
@@ -82,7 +81,6 @@ internal class AgentToolRecipeExecutor(
         var executed = 0
         for (step in recipe.steps) {
             beforeStep(step)
-            beforeResolvedStep(step, values)
             when (val outcome = runStep(step, values, lastOutput, depth)) {
                 is StepOutcome.Failed -> return outcome
                 is StepOutcome.Ok -> {

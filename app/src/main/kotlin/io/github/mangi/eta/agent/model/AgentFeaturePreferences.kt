@@ -1,7 +1,5 @@
 package io.github.mangi.eta.agent.model
 
-import io.github.mangi.eta.agent.tool.AgentToolReviewCoordinator
-
 import android.content.Context
 import io.github.mangi.eta.agent.runtime.AgentAppContext
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -19,22 +17,28 @@ internal object AgentFeaturePreferences {
             if (!settings.has("title_custom")) settings.put("title_custom", settings.optString("title_model").isNotBlank())
             if (!settings.has("title_custom_model_id")) settings.put("title_custom_model_id", settings.optString("title_model"))
             if (!settings.has("decision_escalation_enabled")) settings.put("decision_escalation_enabled", settings.optString("decision_upgrade_model").isNotBlank())
-            if (settings.optString("review_engine") == "systemone") settings.put("review_engine", "decision")
             settings.put("migration", 2)
             check(prefs(context).edit().putString("settings", settings.toString()).commit())
             context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE).edit().clear().apply()
         }
         var normalized = false
+        settings.keys().asSequence().toList().filter { it.startsWith("review_") }.forEach {
+            settings.remove(it)
+            normalized = true
+        }
+        if (settings.optInt("migration") < 3) {
+            runCatching { context.getSystemService(android.app.NotificationManager::class.java)
+                ?.deleteNotificationChannel("eta_tool_authorization") }
+            settings.put("migration", 3)
+            normalized = true
+        }
         fun choice(key: String, allowed: Set<String>, fallback: String) {
             if(settings.has(key) && settings.optString(key) !in allowed) { settings.put(key,fallback); normalized = true }
         }
         choice("loading",setOf("search","group","off"),"search")
-        choice("review_mode",setOf("readonly","strict","standard","auto","smart"),"standard")
-        choice("review_engine",setOf("llm","decision"),"llm")
         choice("decision_protocol",setOf("llm","systemone"),"llm")
         choice("decision_mode",setOf("control","advise"),"control")
         if(settings.has("decision_timeout") && settings.optInt("decision_timeout") !in 1000..10000) { settings.put("decision_timeout",settings.optInt("decision_timeout",3000).coerceIn(1000,10000)); normalized = true }
-        if(settings.has("review_timeout") && settings.optInt("review_timeout") !in 1000..20000) { settings.put("review_timeout",settings.optInt("review_timeout",6000).coerceIn(1000,20000)); normalized = true }
         if(!settings.has("decision_confidence_pct") && settings.has("decision_confidence")) {
             settings.put("decision_confidence_pct", (settings.optDouble("decision_confidence",.6)*100).toInt().coerceIn(0,100)); normalized = true
         }
@@ -51,7 +55,10 @@ internal object AgentFeaturePreferences {
         val model = provider.models.firstOrNull { it.id == id && it.isEnabled && isTextModel(it) } ?: return null
         return RuntimeConfigRepository.buildRuntimeConfig(provider, model)
     }
-    fun exportAll(context: Context): String = JSONObject(prefs(context).all).toString()
+    fun exportAll(context: Context): String {
+        load(context)
+        return JSONObject(prefs(context).all).toString()
+    }
     fun validateImport(raw: String) {
         require(raw.length <= 1024 * 1024) { "功能配置过大" }
         val json = JSONObject(raw)
@@ -70,8 +77,6 @@ internal object AgentFeaturePreferences {
         }
         check(editor.commit()) { "功能配置恢复失败" }
         clearToolSessions(context)
-        io.github.mangi.eta.agent.tool.AgentToolAuthorization.clearGrants()
-        AgentToolReviewCoordinator.clearCache()
     }
     fun isTextModel(model: io.github.mangi.eta.data.model.Model): Boolean = model.outputModalities.all { it.equals("text", true) } &&
         !Regex("(?i)(?:^|[-_/])(tts|speech|whisper|dall-e|imagen|image|imagine|imagegen|video|audio|sora|veo|flux|cosyvoice|sensevoice)(?:$|[-_./])").containsMatchIn(model.modelId)
@@ -81,7 +86,6 @@ internal object AgentFeaturePreferences {
         editor.apply()
         val sessions = context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE)
         sessions.edit().remove("mode_$id").remove("opened_$id").remove("groups_$id").apply()
-        io.github.mangi.eta.agent.tool.AgentToolAuthorization.clearConversation(id)
         io.github.mangi.eta.agent.decision.AgentDecisionRouter.forget(id)
     }
     fun clearToolSessions(context: Context) = context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE).edit().clear().putLong("generation",System.currentTimeMillis()).apply()
