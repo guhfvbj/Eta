@@ -10,6 +10,7 @@
 - 3.3.9 的“模型与工具策略”包装接入已经删除。设置拆成判断/标题/模型自建工具三页，审查/加载/MCP 归位主设置。判断现使用完整 Router/Evaluator、缓存/粘性/续跑、升级、EtaTrace 与遥测。空主模型不再伪装跟随当前会话。
 - 审查真实语义：auto 只跳过 MEDIUM，HIGH 仍确认；smart 可模型放行 HIGH，FATAL 始终人工确认；LOW 不联网。terminal 缺省 exec、job/daemon 执行与动态配方 Root 步骤都经过命令分析。标准授权限同会话同操作、有效 60 分钟；后台无确认入口立即拒绝。
 - 加载改为精确分类，search/group/off 边界明确，中文 AND 搜索、MCP 简短未打开索引，子代理 Schema 和执行复用父边界。配方统一 Store、标准嵌套 Schema、下一轮刷新、结构化审计与单配方导出；JSON 备份 schema 5 增加功能配置及配方。
+- 本地最终 130 项定向测试全通过；全量 2143 项有 48 个原有失败、1 跳过，无新增失败；Lint/Debug/R8 Release 构建通过。源码和 v3.3.11 标签已推送，正式签名上传因仓库 Actions 禁用而阻塞，本地 Release 未签名。
 - [完整问题映射、修改文件、验证与发布记录](validation/3.3.11-remediation.md)。本次环境为 linux-x86_64，Robolectric 实际运行；后文 linux-aarch64 跳过说明仅适用于当时设备环境。无连接的 Android/ColorOS 真机，未宣称真机验收完成。
 
 ## 1. 代码基线（2026-10-28 历史快照）
