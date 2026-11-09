@@ -155,7 +155,9 @@ internal class SubagentExecutor(
         val requestedModel = args.optString("model").trim().takeIf {
             it.isNotBlank() && it.lowercase() !in setOf("default", "primary", "inherit", "auto")
         }
-        val requestedEffort = args.optString("reasoning_effort").trim().takeIf { it.isNotBlank() }
+        val requestedEffort = args.optString("reasoning_effort").trim().takeIf {
+            it.isNotBlank() && it.lowercase() !in setOf("default", "auto", "inherit")
+        }
         val subagentSettings = runCatching {
             kotlinx.coroutines.runBlocking {
                 io.github.mangi.eta.data.datastore.SettingsDataStore.subagentSettings()
@@ -172,62 +174,61 @@ internal class SubagentExecutor(
                 io.github.mangi.eta.data.repository.ProviderRepository.allProviders()
             }
         }.getOrDefault(emptyList())
+        fun toGrantedModel(
+            resolved: io.github.mangi.eta.data.model.ProviderModel,
+            allowedFilter: List<String> = emptyList(),
+        ): GrantedModel {
+            val selectable = io.github.mangi.eta.data.repository.RuntimeConfigRepository
+                .subagentSelectableEfforts(resolved.provider, resolved.model)
+            return GrantedModel(
+                // 内部调用仍需要真实 UUID；对外一律用 apiId。
+                uuid = resolved.model.id,
+                apiId = resolved.model.modelId,
+                displayName = resolved.model.displayName.ifBlank { resolved.model.modelId },
+                allowedEfforts = if (allowedFilter.isEmpty()) {
+                    selectable
+                } else {
+                    selectable.filter { it in allowedFilter }
+                },
+            )
+        }
         val granted = grants.mapNotNull { grant ->
             // 优先按对外 id 解析（新数据），回退按内部 UUID（旧数据）。
             val resolved = providerModels.enabledModelByApiId(grant.modelId)
                 ?: providerModels.enabledModel(grant.modelId)
                 ?: return@mapNotNull null
-            val selectable = resolved.model.reasoningCapabilities
-                ?.selectableEfforts?.map { it.wireValue }.orEmpty()
-            GrantedModel(
-                // 内部调用仍需要真实 UUID；对外一律用 apiId。
-                uuid = resolved.model.id,
-                apiId = resolved.model.modelId,
-                displayName = resolved.model.displayName.ifBlank { resolved.model.modelId },
-                allowedEfforts = if (grant.allowedEfforts.isEmpty()) {
-                    selectable
-                } else {
-                    selectable.filter { it in grant.allowedEfforts }
-                },
-            )
+            toGrantedModel(resolved, grant.allowedEfforts)
         }
 
         val requestedGrant = requestedModel?.let { raw ->
             val target = normalizeModelId(raw)
             granted.firstOrNull { normalizeModelId(it.apiId) == target || it.uuid == raw }
+                ?: if (allowModelPick && granted.isEmpty()) {
+                    val resolved = providerModels.enabledModelByApiId(raw)
+                        ?: providerModels.enabledModel(raw)
+                        ?: providerModels.asSequence()
+                            .filter { it.isEnabled }
+                            .flatMap { p ->
+                                p.models.asSequence()
+                                    .filter { it.isEnabled }
+                                    .map { m -> io.github.mangi.eta.data.model.ProviderModel(p, m) }
+                            }
+                            .firstOrNull { normalizeModelId(it.model.modelId) == target }
+                    resolved?.let(::toGrantedModel)
+                } else {
+                    null
+                }
         }
-        if (allowModelPick && requestedModel != null) {
-            if (granted.isNotEmpty() && requestedGrant == null) {
-                SubagentSessionStore.releaseRunning(conversationKey, subagentId)
-                controllerBinding.close()
-                return errorResult(
-                    "MODEL_NOT_AUTHORIZED",
-                    "模型 $requestedModel 没有在子智能体设置里授权；只能从这些里挑：" +
-                        granted.joinToString(", ") { it.apiId } + "。",
-                )
+        if (allowModelPick && requestedModel != null && requestedGrant == null) {
+            SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+            controllerBinding.close()
+            val message = if (granted.isNotEmpty()) {
+                "模型 $requestedModel 没有在子智能体设置里授权；只能从这些里挑：" +
+                    granted.joinToString(", ") { it.apiId } + "。"
+            } else {
+                "未找到已启用的模型 $requestedModel。"
             }
-            // 思考强度必须落在「该模型支持的档位 ∩ 用户授权给它的档位」里；否则明确报错。
-            if (requestedEffort != null) {
-                val options = requestedGrant?.allowedEfforts.orEmpty()
-                val wire = ReasoningEffort.fromWireValue(requestedEffort)?.wireValue ?: requestedEffort
-                val label = requestedGrant?.apiId ?: requestedModel
-                if (options.isEmpty()) {
-                    SubagentSessionStore.releaseRunning(conversationKey, subagentId)
-                    controllerBinding.close()
-                    return errorResult(
-                        "SUBAGENT_EFFORT_UNSUPPORTED",
-                        "模型 $label 没有可用的思考强度档位；本次请省略 reasoning_effort，或换一个支持思考强度的模型。",
-                    )
-                }
-                if (wire !in options) {
-                    SubagentSessionStore.releaseRunning(conversationKey, subagentId)
-                    controllerBinding.close()
-                    return errorResult(
-                        "SUBAGENT_EFFORT_UNSUPPORTED",
-                        "模型 $label 不支持思考强度 $requestedEffort；可选：${options.joinToString(", ")}。",
-                    )
-                }
-            }
+            return errorResult("MODEL_NOT_AUTHORIZED", message)
         }
         // 未指定模型时不报错，按「该类型的默认模型 → 授权列表第一个」兜底。
         // 「按类型默认模型」已移除：不再读取 profileDefaults，未指定时统一用授权列表第一个。
@@ -236,7 +237,30 @@ internal class SubagentExecutor(
         } else {
             null
         }
-        val effectiveModelId = requestedGrant?.uuid ?: autoGrant?.uuid
+        val targetGrant = requestedGrant ?: autoGrant
+        // 思考强度必须落在「该模型支持的档位 ∩ 用户授权给它的档位」里；否则明确报错。
+        if (allowModelPick && requestedEffort != null && targetGrant != null) {
+            val options = targetGrant.allowedEfforts
+            val wire = ReasoningEffort.fromWireValue(requestedEffort)?.wireValue ?: requestedEffort.lowercase()
+            val label = targetGrant.apiId
+            if (options.isEmpty()) {
+                SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+                controllerBinding.close()
+                return errorResult(
+                    "SUBAGENT_EFFORT_UNSUPPORTED",
+                    "模型 $label 没有可用的思考强度档位；本次请省略 reasoning_effort，或换一个支持思考强度的模型。",
+                )
+            }
+            if (wire !in options) {
+                SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+                controllerBinding.close()
+                return errorResult(
+                    "SUBAGENT_EFFORT_UNSUPPORTED",
+                    "模型 $label 不支持思考强度 $requestedEffort；可选：${options.joinToString(", ")}。",
+                )
+            }
+        }
+        val effectiveModelId = targetGrant?.uuid
         val effectiveEffort = requestedEffort
         val useOverride = allowModelPick && configForOverride != null &&
             (effectiveModelId != null || effectiveEffort != null)

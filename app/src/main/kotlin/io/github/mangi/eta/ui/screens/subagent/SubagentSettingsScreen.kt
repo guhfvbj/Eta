@@ -66,6 +66,7 @@ import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.SubagentSettings
 import io.github.mangi.eta.data.model.enabledModel
+import io.github.mangi.eta.data.model.enabledModelByApiId
 import io.github.mangi.eta.data.repository.ProviderRepository
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.components.EtaArrowPreference
@@ -242,8 +243,13 @@ internal fun SubagentSettingsScreen(
                                     io.github.mangi.eta.data.repository.ProviderRepository.ensureBuiltInsMerged()
                                     val all = io.github.mangi.eta.data.repository.ProviderRepository.allProviders()
                                     ids.associateWith { id ->
-                                        all.enabledModel(id)?.model?.reasoningCapabilities
-                                            ?.selectableEfforts?.map { it.wireValue }.orEmpty()
+                                        val resolved = all.enabledModelByApiId(id) ?: all.enabledModel(id)
+                                        resolved?.let {
+                                            RuntimeConfigRepository.subagentSelectableEfforts(
+                                                it.provider,
+                                                it.model,
+                                            )
+                                        }.orEmpty()
                                     }
                                 }.getOrDefault(emptyMap())
                             }

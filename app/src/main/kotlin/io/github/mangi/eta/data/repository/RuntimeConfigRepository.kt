@@ -248,6 +248,18 @@ internal object RuntimeConfigRepository {
         )
     }
 
+    /**
+     * 子智能体可显式选择的思考强度档位（排除始终隐式可用的 `default`）。
+     *
+     * 若模型仅支持固定思考（无档位且不可关闭），返回空列表，由工具描述标注「思考固定，无档位」。
+     */
+    fun subagentSelectableEfforts(provider: ProviderSetting, model: Model): List<String> =
+        reasoningCapabilities(provider, model)
+            ?.selectableEfforts
+            ?.filter { it != ReasoningEffort.DEFAULT }
+            ?.map { it.wireValue }
+            .orEmpty()
+
     private fun ProviderSetting.endpointMode(): String = when (this) {
         is OpenAiCompatibleProviderSetting -> endpointMode
         is CustomProviderSetting -> endpointMode

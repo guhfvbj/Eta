@@ -343,16 +343,24 @@ internal class AgentRuntimeRunExecutor(
                         runBlocking { io.github.mangi.eta.data.datastore.SettingsDataStore.subagentSettings() }
                     }.getOrNull()
                     val authorized = if (subagentCfg?.allowModelSelection == true) {
+                        val allProviders = runCatching {
+                            runBlocking {
+                                io.github.mangi.eta.data.repository.ProviderRepository.ensureBuiltInsMerged()
+                                io.github.mangi.eta.data.repository.ProviderRepository.allProviders()
+                            }
+                        }.getOrDefault(emptyList())
                         subagentCfg.effectiveGrants.mapNotNull { grant ->
-                            val resolved = runCatching {
-                                runBlocking {
-                                    io.github.mangi.eta.data.repository.ProviderRepository.ensureBuiltInsMerged()
-                                    val all = io.github.mangi.eta.data.repository.ProviderRepository.allProviders()
-                                    all.enabledModelByApiId(grant.modelId) ?: all.enabledModel(grant.modelId)
-                                }
-                            }.getOrNull() ?: return@mapNotNull null
-                            val selectable = resolved.model.reasoningCapabilities
-                                ?.selectableEfforts?.map { it.wireValue }.orEmpty()
+                            val resolved = allProviders.enabledModelByApiId(grant.modelId)
+                                ?: allProviders.enabledModel(grant.modelId)
+                                ?: return@mapNotNull null
+                            val caps = RuntimeConfigRepository.reasoningCapabilities(
+                                resolved.provider,
+                                resolved.model,
+                            )
+                            val selectable = RuntimeConfigRepository.subagentSelectableEfforts(
+                                resolved.provider,
+                                resolved.model,
+                            )
                             val efforts = if (grant.allowedEfforts.isEmpty()) {
                                 selectable
                             } else {
@@ -364,7 +372,7 @@ internal class AgentRuntimeRunExecutor(
                                 efforts = efforts,
                                 contextWindow = resolved.model.contextWindowOverride
                                     ?: resolved.model.contextWindow,
-                                supportsThinking = resolved.model.reasoning == true,
+                                supportsThinking = resolved.model.effectiveReasoning == true || caps != null,
                             )
                         }
                     } else {

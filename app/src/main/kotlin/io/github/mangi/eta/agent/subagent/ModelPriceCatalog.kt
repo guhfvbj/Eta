@@ -49,8 +49,10 @@ internal object ModelPriceCatalog {
     )
 
     /** 查询价格；未收录返回 null（界面显示「价格未知」，不做估算）。 */
-    fun priceOf(modelApiId: String): Price? =
-        PRICES[modelApiId.trim().lowercase()]
+    fun priceOf(modelApiId: String): Price? {
+        val key = modelApiId.trim().lowercase()
+        return PRICES[key] ?: PRICES["cn:${key.substringAfterLast(':')}"]
+    }
 
     /** 未知价格的模型清单（便于后续补齐）。 */
     val known: Set<String> get() = PRICES.keys
