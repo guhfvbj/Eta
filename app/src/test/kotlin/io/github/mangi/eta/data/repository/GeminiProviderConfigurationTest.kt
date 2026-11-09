@@ -86,7 +86,7 @@ class GeminiProviderConfigurationTest {
         assertEquals(ReasoningEffort.DEFAULT, config.reasoningEffort)
         assertEquals(ReasoningEffort.DEFAULT, config.effectiveReasoningEffort)
         val capabilities = requireNotNull(config.reasoningCapabilities)
-        assertEquals(listOf(ReasoningEffort.DEFAULT), capabilities.selectableEfforts)
+        assertEquals(emptyList<ReasoningEffort>(), capabilities.selectableEfforts)
         assertNull(capabilities.defaultEnabled)
         assertFalse(capabilities.mandatory)
     }

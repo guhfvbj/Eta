@@ -85,12 +85,11 @@ class RuntimeConfigRepositoryTest {
         assertEquals("gpt-5.5", root.getValue("model").jsonPrimitive.content)
         assertEquals(256_000, config.contextWindow)
         assertEquals(listOf("x-provider", "x-model"), config.customHeaders.map { it.name })
-        assertEquals(ReasoningEffort.DEFAULT, config.reasoningEffort)
+        assertEquals(ReasoningEffort.MINIMAL, config.reasoningEffort)
         assertEquals(true, config.thinkingEnabled)
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.MINIMAL,
             ),
             config.reasoningCapabilities?.selectableEfforts,

@@ -77,7 +77,7 @@ class RemoteModelFetcherTest {
         assertTrue(explicit.canDisable)
         assertFalse(explicit.mandatory)
         assertEquals(null, models.getValue("unknown-default").reasoningCapabilities!!.defaultEffort)
-        assertEquals(listOf(ReasoningEffort.DEFAULT), models.getValue("legacy-flag").reasoningCapabilities!!.selectableEfforts)
+        assertEquals(emptyList<ReasoningEffort>(), models.getValue("legacy-flag").reasoningCapabilities!!.selectableEfforts)
         assertEquals(null, models.getValue("plain").reasoningCapabilities)
     }
 
@@ -343,7 +343,6 @@ class RemoteModelFetcherTest {
         assertTrue(model.supportsReasoning)
         assertEquals(
             listOf(
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.MINIMAL,
                 ReasoningEffort.LOW,
                 ReasoningEffort.MEDIUM,
@@ -375,7 +374,6 @@ class RemoteModelFetcherTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.MEDIUM,
                 ReasoningEffort.HIGH,
@@ -423,7 +421,6 @@ class RemoteModelFetcherTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.MEDIUM,
                 ReasoningEffort.HIGH,

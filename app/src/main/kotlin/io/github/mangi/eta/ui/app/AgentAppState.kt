@@ -302,6 +302,15 @@ internal class AgentAppState(
      * 会话绑定的模型仍可用时用它，否则用默认模型。回落只影响显示与发送，不改写会话绑定，
      * 模型重新启用后会话自动回到原模型；真正发送后才把实际模型写入绑定。
      */
+    private fun currentEffectiveProviderModel(
+        state: AgentChatHomeUiState = homeState,
+    ): io.github.mangi.eta.data.model.ProviderModel? {
+        val bound = providers.enabledModel(state.modelId)
+        if (bound != null) return bound
+        val pickerState = AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
+        return providers.enabledModel(pickerState.selectedModel?.id)
+    }
+
     private fun refreshConversationModel() {
         val bound = providers.enabledModel(homeState.modelId)
         val pickerState = if (bound != null) {
@@ -314,14 +323,24 @@ internal class AgentAppState(
         currentReasoningCapabilities = effective?.let { (provider, model) ->
             RuntimeConfigRepository.reasoningCapabilities(provider, model)
         }
-        val resolved = homeState.withCurrentReasoningCapabilities()
+        val resolved = homeState.withCurrentReasoningCapabilities(effective)
         val conversationId = selectedConversationId
         if (conversationId == null) homeState = resolved
         else updateConversation(conversationId, resolved, updateTimestamp = false)
     }
 
-    private fun AgentChatHomeUiState.withCurrentReasoningCapabilities(): AgentChatHomeUiState {
-        val normalized = currentReasoningCapabilities?.normalize(reasoningEffort) ?: ReasoningEffort.OFF
+    private fun AgentChatHomeUiState.withCurrentReasoningCapabilities(
+        effective: io.github.mangi.eta.data.model.ProviderModel? = currentEffectiveProviderModel(this),
+    ): AgentChatHomeUiState {
+        val remembered = effective?.let { (provider, model) ->
+            SettingsDataStore.rememberedReasoningEffortForModel(
+                modelUuid = model.id,
+                providerId = provider.id,
+                modelApiId = model.modelId,
+            )
+        }
+        val baseEffort = remembered ?: reasoningEffort
+        val normalized = currentReasoningCapabilities?.normalize(baseEffort) ?: ReasoningEffort.OFF
         return copy(
             thinkingEnabled = normalized.enablesReasoning,
             reasoningEffort = normalized,
@@ -820,6 +839,14 @@ internal class AgentAppState(
 
     fun updateReasoningEffort(effort: ReasoningEffort) {
         val normalized = currentReasoningCapabilities?.normalize(effort) ?: ReasoningEffort.OFF
+        currentEffectiveProviderModel()?.let { (provider, model) ->
+            SettingsDataStore.rememberReasoningEffortForModel(
+                modelUuid = model.id,
+                providerId = provider.id,
+                modelApiId = model.modelId,
+                effort = normalized,
+            )
+        }
         updateCurrentConversation(
             homeState.copy(
                 thinkingEnabled = normalized.enablesReasoning,
@@ -827,6 +854,9 @@ internal class AgentAppState(
             )
         )
         if (selectedConversationId != null) persistConversations()
+        scope.launch(Dispatchers.IO) {
+            RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+        }
     }
 
     /** 聊天内切换同时改当前会话绑定与默认模型；默认模型供新会话和系统助手入口使用。 */
@@ -838,7 +868,12 @@ internal class AgentAppState(
         ) {
             return
         }
-        updateCurrentConversation(homeState.copy(modelId = modelId))
+        updateCurrentConversation(
+            homeState.copy(
+                modelId = modelId,
+                reasoningEffort = ReasoningEffort.DEFAULT,
+            )
+        )
         refreshConversationModel()
         if (selectedConversationId != null) persistConversations()
         modelPickerState = modelPickerState.copy(isChanging = true)
@@ -1317,18 +1352,21 @@ internal class AgentAppState(
     private fun resolveEffortCommand(args: String) {
         val value = args.trim().lowercase()
         val current = homeState.reasoningEffort
+        val options = currentReasoningCapabilities?.selectableEfforts
+            ?.takeIf { it.isNotEmpty() }
+            ?: ReasoningEffort.entries.filter { it != ReasoningEffort.DEFAULT }
         if (value.isBlank()) {
             showCommandResult(
                 CommandResultUi(
                     title = appContext.getString(R.string.agent_command_effort_title),
-                    lines = ReasoningEffort.entries.map { effort ->
+                    lines = options.map { effort ->
                         (if (effort == current) "· " else "  ") + effort.wireValue
                     },
                 ),
             )
             return
         }
-        val effort = ReasoningEffort.entries.firstOrNull {
+        val effort = options.firstOrNull {
             it.wireValue.equals(value, ignoreCase = true) || it.displayName.equals(value, ignoreCase = true)
         }
         if (effort == null) {

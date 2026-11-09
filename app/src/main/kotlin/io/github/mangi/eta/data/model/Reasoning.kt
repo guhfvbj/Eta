@@ -85,7 +85,6 @@ data class ModelReasoningCapabilities(
     val selectableEfforts: List<ReasoningEffort>
         get() = buildList {
             if (canDisable && !mandatory) add(ReasoningEffort.OFF)
-            add(ReasoningEffort.DEFAULT)
             supportedEfforts
                 .asSequence()
                 .filter { it != ReasoningEffort.OFF && it != ReasoningEffort.DEFAULT }
@@ -94,15 +93,32 @@ data class ModelReasoningCapabilities(
                 .forEach(::add)
         }
 
+    val preferredEffort: ReasoningEffort
+        get() {
+            val nonOff = selectableEfforts.filter { it != ReasoningEffort.OFF }
+            if (nonOff.isEmpty()) return ReasoningEffort.DEFAULT
+            defaultEffort?.takeIf { it in nonOff }?.let { return it }
+            if (ReasoningEffort.HIGH in nonOff) return ReasoningEffort.HIGH
+            return nonOff.maxByOrNull(ReasoningEffort::rank) ?: nonOff.first()
+        }
+
     fun normalize(requested: ReasoningEffort): ReasoningEffort {
         val selectable = selectableEfforts
+        if (selectable.isEmpty()) {
+            return if (requested == ReasoningEffort.OFF && canDisable && !mandatory) {
+                ReasoningEffort.OFF
+            } else {
+                ReasoningEffort.DEFAULT
+            }
+        }
         if (requested in selectable) return requested
         if (requested == ReasoningEffort.OFF || requested == ReasoningEffort.DEFAULT) {
-            return ReasoningEffort.DEFAULT
+            return preferredEffort
         }
         return selectable
             .filter { it != ReasoningEffort.OFF && it.rank <= requested.rank }
             .maxByOrNull(ReasoningEffort::rank)
-            ?: ReasoningEffort.DEFAULT
+            ?: selectable.firstOrNull { it != ReasoningEffort.OFF }
+            ?: preferredEffort
     }
 }

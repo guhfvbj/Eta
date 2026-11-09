@@ -143,43 +143,7 @@ internal fun SubagentSettingsScreen(
     val pickerState = remember(providers, primaryProviderId, primaryModelId) {
         AgentModelPickerProjector.project(providers, primaryProviderId, primaryModelId)
     }
-    val resolvedSecondary = remember(providers, subagentSettings.modelId) {
-        subagentSettings.modelId?.takeIf { it.isNotBlank() }?.let { id ->
-            providers.enabledModel(id)
-        }
-    }
-    val primaryModelName = pickerState.selectedModel?.displayName
-    val secondarySummary = when {
-        resolvedSecondary != null -> "${resolvedSecondary.provider.name} / ${resolvedSecondary.model.displayName}"
-        !primaryModelName.isNullOrBlank() -> "跟随主模型 ($primaryModelName)"
-        else -> "跟随主模型"
-    }
 
-    val effectiveCapabilities = remember(providers, resolvedSecondary, primaryProviderId, primaryModelId) {
-        val target = resolvedSecondary ?: providers.enabledModel(primaryModelId)
-        target?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)
-        }
-    }
-    val effortOptions = remember(effectiveCapabilities) {
-        val efforts = effectiveCapabilities?.selectableEfforts.orEmpty()
-        listOf<ReasoningEffort?>(null) + efforts
-    }
-    val effortLabels = remember(effortOptions) {
-        effortOptions.map { effort ->
-            when (effort) {
-                null -> "跟随模型默认"
-                ReasoningEffort.DEFAULT -> "Auto"
-                else -> effort.displayName
-            }
-        }
-    }
-    val selectedEffortIndex = remember(effortOptions, subagentSettings.reasoningEffort) {
-        val current = subagentSettings.resolvedReasoningEffort
-        effortOptions.indexOf(current).takeIf { it >= 0 } ?: 0
-    }
-
-    var showModelSheet by remember { mutableStateOf(false) }
     var showParallelDialog by remember { mutableStateOf(false) }
     var showAuthorizedSheet by remember { mutableStateOf(false) }
     var authorizedDraft by remember { mutableStateOf<Set<String>>(emptySet()) }

@@ -26,7 +26,6 @@ class ReasoningCapabilityResolverTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.HIGH,
                 ReasoningEffort.MAX,
@@ -37,7 +36,6 @@ class ReasoningCapabilityResolverTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.HIGH,
                 ReasoningEffort.MAX,
             ),
@@ -60,8 +58,8 @@ class ReasoningCapabilityResolverTest {
             ReasoningEffort.MAX,
         )
 
-        assertEquals(listOf(ReasoningEffort.DEFAULT) + named, astra.selectableEfforts)
-        assertEquals(listOf(ReasoningEffort.OFF, ReasoningEffort.DEFAULT) + named, sol.selectableEfforts)
+        assertEquals(named, astra.selectableEfforts)
+        assertEquals(listOf(ReasoningEffort.OFF) + named, sol.selectableEfforts)
         assertEquals(sol.selectableEfforts, luna.selectableEfforts)
         assertEquals(astra.selectableEfforts, sol61.selectableEfforts)
         assertEquals(ReasoningEffort.MEDIUM, sol61.defaultEffort)
@@ -75,7 +73,6 @@ class ReasoningCapabilityResolverTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.MEDIUM,
                 ReasoningEffort.HIGH,
@@ -97,8 +94,7 @@ class ReasoningCapabilityResolverTest {
             val capabilities = resolve(ProviderSourceTypes.ANTHROPIC, model)
             assertEquals(
                 listOf(
-                    ReasoningEffort.DEFAULT,
-                    ReasoningEffort.LOW,
+                        ReasoningEffort.LOW,
                     ReasoningEffort.MEDIUM,
                     ReasoningEffort.HIGH,
                     ReasoningEffort.XHIGH,
@@ -122,7 +118,6 @@ class ReasoningCapabilityResolverTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.MEDIUM,
                 ReasoningEffort.XHIGH,
@@ -132,7 +127,6 @@ class ReasoningCapabilityResolverTest {
         assertEquals(
             listOf(
                 ReasoningEffort.OFF,
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.HIGH,
                 ReasoningEffort.MAX,
@@ -141,7 +135,6 @@ class ReasoningCapabilityResolverTest {
         )
         assertEquals(
             listOf(
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.HIGH,
                 ReasoningEffort.MAX,
@@ -153,11 +146,10 @@ class ReasoningCapabilityResolverTest {
     @Test
     fun mimoV26OffersToggleAndCurrentStepModelsOfferThreeLevels() {
         assertEquals(
-            listOf(ReasoningEffort.OFF, ReasoningEffort.DEFAULT),
+            listOf(ReasoningEffort.OFF),
             resolve(ProviderSourceTypes.MIMO, "mimo-v2.6-pro").selectableEfforts,
         )
         val expected = listOf(
-            ReasoningEffort.DEFAULT,
             ReasoningEffort.LOW,
             ReasoningEffort.MEDIUM,
             ReasoningEffort.HIGH,
@@ -170,7 +162,6 @@ class ReasoningCapabilityResolverTest {
     fun mandatoryKimiModelsNeverExposeOff() {
         assertEquals(
             listOf(
-                ReasoningEffort.DEFAULT,
                 ReasoningEffort.LOW,
                 ReasoningEffort.HIGH,
                 ReasoningEffort.MAX,
@@ -178,7 +169,7 @@ class ReasoningCapabilityResolverTest {
             resolve(ProviderSourceTypes.MOONSHOT, "kimi-k3").selectableEfforts,
         )
         assertEquals(
-            listOf(ReasoningEffort.DEFAULT),
+            emptyList<ReasoningEffort>(),
             resolve(ProviderSourceTypes.MOONSHOT, "kimi-k2.7-code").selectableEfforts,
         )
     }
@@ -186,11 +177,11 @@ class ReasoningCapabilityResolverTest {
     @Test
     fun unverifiedModelsDegradeToSafeDefault() {
         assertEquals(
-            listOf(ReasoningEffort.DEFAULT),
+            emptyList<ReasoningEffort>(),
             resolve(ProviderSourceTypes.MINIMAX, "MiniMax-M3").selectableEfforts,
         )
         assertEquals(
-            listOf(ReasoningEffort.DEFAULT),
+            emptyList<ReasoningEffort>(),
             resolve(ProviderSourceTypes.CUSTOM, "unknown-thinking-model").selectableEfforts,
         )
     }
@@ -215,7 +206,7 @@ class ReasoningCapabilityResolverTest {
 
         assertEquals(remote, resolved)
         assertEquals(
-            listOf(ReasoningEffort.DEFAULT, ReasoningEffort.MEDIUM),
+            listOf(ReasoningEffort.MEDIUM),
             resolved?.selectableEfforts,
         )
     }

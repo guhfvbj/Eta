@@ -74,7 +74,7 @@ internal object AgentSubagentToolCatalog {
                 "③ 一次派多个子代理时，主动分散到不同模型，别全部堆在同一个上；" +
                 "④ 想省成本就复用同一个模型 + 低档位，而不是每个子任务换一个。" +
                 "Pick model + reasoning_effort for each subagent based on these constraints. " +
-                "Omit reasoning_effort to use the model default; an unsupported value is rejected with the allowed list."
+                "Omit reasoning_effort to default to high; an unsupported value is rejected with the allowed list."
         }
         val profileLines = profiles.joinToString("\n") { profile ->
             val tag = if (profile.builtin) "" else " [custom]"
@@ -160,8 +160,8 @@ internal object AgentSubagentToolCatalog {
                     .put("type", "string")
                     .put(
                         "description",
-                        "Optional reasoning effort for THIS subagent (off / low / medium / high …). " +
-                            "Only honored when the user enabled \"allow main agent to pick subagent models\" in Subagent settings.",
+                        "Optional reasoning effort for THIS subagent (off / low / medium / high / max …). " +
+                            "Defaults to high when omitted.",
                     ),
             )
             .put(

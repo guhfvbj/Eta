@@ -18,16 +18,23 @@ import io.github.mangi.eta.data.model.AppearancePaletteStyle
 import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.model.AppearanceThemeMode
 import io.github.mangi.eta.data.model.AppearanceTopBarBlurStyle
+import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.SpeechSettings
 import io.github.mangi.eta.data.model.SubagentSettings
 import io.github.mangi.eta.data.model.WebToolsSettings
 import kotlinx.serialization.json.Json
 import io.github.mangi.eta.data.model.Settings
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 internal object SettingsDataStore {
     private val SPEECH_SETTINGS = stringPreferencesKey("speech_settings_v1")
@@ -155,11 +162,17 @@ internal object SettingsDataStore {
         booleanPreferencesKey("appearance_predictive_back_enabled")
     private val APPEARANCE_INTERFACE_SCALE = floatPreferencesKey("appearance_interface_scale")
     private const val SELECTED_MODEL_BY_PROVIDER_PREFIX = "selected_model_id_by_provider."
+    private const val REASONING_EFFORT_BY_MODEL_PREFIX = "reasoning_effort_by_model."
 
     private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = STORE_NAME)
 
     @Volatile
     private lateinit var dataStore: DataStore<Preferences>
+
+    private val modelReasoningEffortCache = ConcurrentHashMap<String, ReasoningEffort>()
+    @Volatile
+    private var modelReasoningEffortCacheLoaded = false
+    private val cachePersistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** 自动备份目录的进程内缓存：供非挂起调用（目录解析、界面展示）读取。 */
     @Volatile
@@ -170,6 +183,80 @@ internal object SettingsDataStore {
     fun init(context: Context) {
         if (!::dataStore.isInitialized) {
             dataStore = context.applicationContext.dataStore
+        }
+        ensureModelReasoningEffortCacheLoaded()
+    }
+
+    private fun ensureModelReasoningEffortCacheLoaded() {
+        if (modelReasoningEffortCacheLoaded || !::dataStore.isInitialized) return
+        synchronized(modelReasoningEffortCache) {
+            if (modelReasoningEffortCacheLoaded || !::dataStore.isInitialized) return
+            runCatching {
+                runBlocking(Dispatchers.IO) {
+                    val prefs = dataStore.data.catch { emit(emptyPreferences()) }.first()
+                    prefs.asMap().forEach { (key, value) ->
+                        if (key.name.startsWith(REASONING_EFFORT_BY_MODEL_PREFIX) && value is String) {
+                            val modelKey = key.name.removePrefix(REASONING_EFFORT_BY_MODEL_PREFIX)
+                            ReasoningEffort.fromWireValue(value)
+                                ?.takeIf { it != ReasoningEffort.DEFAULT }
+                                ?.let { modelReasoningEffortCache[modelKey] = it }
+                        }
+                    }
+                }
+            }
+            modelReasoningEffortCacheLoaded = true
+        }
+    }
+
+    fun rememberedReasoningEffortForModel(
+        modelUuid: String?,
+        providerId: String? = null,
+        modelApiId: String? = null,
+    ): ReasoningEffort? {
+        ensureModelReasoningEffortCacheLoaded()
+        val uuidKey = modelUuid?.trim()?.takeIf { it.isNotEmpty() }
+        if (uuidKey != null) {
+            modelReasoningEffortCache[uuidKey]?.let { return it }
+        }
+        val compositeKey = if (!providerId.isNullOrBlank() && !modelApiId.isNullOrBlank()) {
+            "${providerId.trim()}:${modelApiId.trim().lowercase()}"
+        } else {
+            null
+        }
+        if (compositeKey != null) {
+            modelReasoningEffortCache[compositeKey]?.let { return it }
+        }
+        return null
+    }
+
+    fun rememberReasoningEffortForModel(
+        modelUuid: String?,
+        providerId: String? = null,
+        modelApiId: String? = null,
+        effort: ReasoningEffort,
+    ) {
+        if (effort == ReasoningEffort.DEFAULT) return
+        ensureModelReasoningEffortCacheLoaded()
+        val uuidKey = modelUuid?.trim()?.takeIf { it.isNotEmpty() }
+        val compositeKey = if (!providerId.isNullOrBlank() && !modelApiId.isNullOrBlank()) {
+            "${providerId.trim()}:${modelApiId.trim().lowercase()}"
+        } else {
+            null
+        }
+        if (uuidKey != null) modelReasoningEffortCache[uuidKey] = effort
+        if (compositeKey != null) modelReasoningEffortCache[compositeKey] = effort
+        if (!::dataStore.isInitialized) return
+        cachePersistenceScope.launch {
+            runCatching {
+                dataStore.edit { prefs ->
+                    if (uuidKey != null) {
+                        prefs[stringPreferencesKey("$REASONING_EFFORT_BY_MODEL_PREFIX$uuidKey")] = effort.wireValue
+                    }
+                    if (compositeKey != null) {
+                        prefs[stringPreferencesKey("$REASONING_EFFORT_BY_MODEL_PREFIX$compositeKey")] = effort.wireValue
+                    }
+                }
+            }
         }
     }
 

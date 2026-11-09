@@ -66,17 +66,13 @@ internal object RuntimeConfigRepository {
             buildRuntimeConfig(provider, model)
         } ?: primaryConfig
         val explicitEffort = overrideEffortWire?.let { ReasoningEffort.fromWireValue(it) }
+            ?.takeIf { it != ReasoningEffort.DEFAULT }
+        val targetEffort = explicitEffort ?: ReasoningEffort.HIGH
+        val capabilities = base.reasoningCapabilities
         val effort = when {
-            explicitEffort != null -> {
-                val capabilities = base.reasoningCapabilities
-                when {
-                    capabilities != null -> capabilities.normalize(explicitEffort)
-                    explicitEffort == ReasoningEffort.OFF -> ReasoningEffort.OFF
-                    else -> base.effectiveReasoningEffort
-                }
-            }
-            resolvedSecondary != null -> base.effectiveReasoningEffort
-            else -> primaryConfig.effectiveReasoningEffort
+            capabilities != null -> capabilities.normalize(targetEffort)
+            explicitEffort == ReasoningEffort.OFF -> ReasoningEffort.OFF
+            else -> ReasoningEffort.OFF
         }
         return base.copy(
             terminalTools = primaryConfig.terminalTools,
@@ -203,6 +199,14 @@ internal object RuntimeConfigRepository {
         val profile = ProviderConnectionProfile.forAuthMode(provider.authMode)
         val endpointMode = profile?.endpointMode ?: provider.endpointMode()
         val reasoningCapabilities = reasoningCapabilities(provider, model)
+        val rememberedEffort = SettingsDataStore.rememberedReasoningEffortForModel(
+            modelUuid = model.id,
+            providerId = provider.id,
+            modelApiId = model.modelId,
+        )
+        val resolvedEffort = reasoningCapabilities?.let { caps ->
+            caps.normalize(rememberedEffort ?: caps.preferredEffort)
+        } ?: ReasoningEffort.OFF
         return AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
@@ -221,9 +225,8 @@ internal object RuntimeConfigRepository {
                 ?: AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION,
             openAiEndpointMode = endpointMode,
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
-            thinkingEnabled = reasoningCapabilities != null,
-            reasoningEffort = reasoningCapabilities?.let { ReasoningEffort.DEFAULT }
-                ?: ReasoningEffort.OFF,
+            thinkingEnabled = resolvedEffort.enablesReasoning,
+            reasoningEffort = resolvedEffort,
             reasoningCapabilities = reasoningCapabilities,
             customHeaders = provider.customHeaders + model.customHeaders,
             customBody = provider.customBody + model.customBody,
@@ -249,16 +252,17 @@ internal object RuntimeConfigRepository {
     }
 
     /**
-     * 子智能体可显式选择的思考强度档位（排除始终隐式可用的 `default`）。
+     * 子智能体可显式选择的思考强度档位。
      *
      * 若模型仅支持固定思考（无档位且不可关闭），返回空列表，由工具描述标注「思考固定，无档位」。
      */
-    fun subagentSelectableEfforts(provider: ProviderSetting, model: Model): List<String> =
-        reasoningCapabilities(provider, model)
-            ?.selectableEfforts
-            ?.filter { it != ReasoningEffort.DEFAULT }
-            ?.map { it.wireValue }
-            .orEmpty()
+    fun subagentSelectableEfforts(provider: ProviderSetting, model: Model): List<String> {
+        val caps = reasoningCapabilities(provider, model) ?: return emptyList()
+        if (caps.supportedEfforts.isEmpty()) return emptyList()
+        return caps.selectableEfforts
+            .filter { it != ReasoningEffort.DEFAULT }
+            .map { it.wireValue }
+    }
 
     private fun ProviderSetting.endpointMode(): String = when (this) {
         is OpenAiCompatibleProviderSetting -> endpointMode

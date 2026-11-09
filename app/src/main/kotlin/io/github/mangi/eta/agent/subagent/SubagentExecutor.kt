@@ -261,9 +261,9 @@ internal class SubagentExecutor(
             }
         }
         val effectiveModelId = targetGrant?.uuid
-        val effectiveEffort = requestedEffort
-        val useOverride = allowModelPick && configForOverride != null &&
-            (effectiveModelId != null || effectiveEffort != null)
+        val effectiveEffort = requestedEffort ?: ReasoningEffort.HIGH.wireValue
+        val useOverride = configForOverride != null &&
+            (allowModelPick && effectiveModelId != null || effectiveEffort != null)
         val resolvedConfig = runCatching {
             if (useOverride) {
                 kotlinx.coroutines.runBlocking { configForOverride!!.invoke(effectiveModelId, effectiveEffort) }

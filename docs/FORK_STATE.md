@@ -1,12 +1,14 @@
 # 本地分叉状态（给后续会话看的交接文档）
 
-> 最后更新：2026-11-09（3.3.13 子智能体思考强度修复）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
+> 最后更新：2026-11-09（3.3.14 移除 Default 思考档位与按模型记忆思考强度）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
 > 目的：任何会话接手前先读这一页，避免把「本地自研」当成上游行为，或把「上游已有」重复实现。
 
-## 当前交付线（2026-11-09，3.3.13）
+## 当前交付线（2026-11-09，3.3.14）
 
-- 分支 `oo0520-version`，版本 `3.3.13` / `2026110901`；桌面名 Eta、包名 `io.github.mangi.eta.oo0520`，沿用原发布证书。
-- 修复子智能体思考强度档位解析：统一经 `RuntimeConfigRepository.subagentSelectableEfforts` 读取模型 `effectiveReasoning` 与 `effectiveReasoningCapabilities`，修复自定义提供商模型（仅写 `reasoningOverride` / `reasoningCapabilitiesOverride`）在子智能体工具描述中丢失档位及传入 `reasoning_effort` 误报 `SUBAGENT_EFFORT_UNSUPPORTED` 的问题；同时补齐 `default`/`auto`/`inherit` 默认档位识别、未勾选授权子集时的全量启用模型回退及 `ModelPriceCatalog` 无 `cn:` 前缀匹配。
+- 分支 `oo0520-version`，版本 `3.3.14` / `2026110902`；桌面名 Eta、包名 `io.github.mangi.eta.oo0520`，沿用原发布证书。
+- 移除 `Default` 可选思考配置：`ModelReasoningCapabilities.selectableEfforts` 不再向界面与工具暴露 `Default`，仅展示实际档位（及可关闭模型的 `Off`）。
+- 子智能体思考强度：由主智能体派发时指定，未指定时统一默认使用 `high`（经目标模型能力归一化）。
+- 主聊天界面按模型持久化缓存思考强度：在 `SettingsDataStore` 按模型 UUID 及 `providerId:modelId` 持久化记住用户在聊天界面选择的思考强度；新建对话、切换会话、切换模型再切回或重启应用均保持该模型上次选定的思考强度，直至下次在聊天界面修改。
 
 ## 3.3.12 交付记录（2026-11-08）
 

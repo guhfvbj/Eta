@@ -912,7 +912,7 @@ private fun ModelEditDialog(
     var selectedReasoningEfforts by remember(model.id, isNew) {
         val base = model.effectiveReasoningCapabilities ?: inferredCapabilities
         mutableStateOf(
-            base?.selectableEfforts?.toSet().orEmpty() + ReasoningEffort.DEFAULT
+            base?.selectableEfforts?.toSet().orEmpty()
         )
     }
     val contextError = contextWindowInputError(contextWindowOverrideText)
@@ -924,7 +924,7 @@ private fun ModelEditDialog(
         selectedReasoningEfforts = model.reasoningCapabilities
             ?.selectableEfforts
             ?.toSet()
-            .orEmpty() + ReasoningEffort.DEFAULT
+            .orEmpty()
     }
 
     fun updated(): Model = model.copy(
@@ -1045,15 +1045,14 @@ private fun ModelEditDialog(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (geminiCapabilities != null && !geminiCapabilities.mandatory) "思考档位使用 Default"
-                                else stringResource(R.string.ui_support_thinking_5b9e4c),
+                            text = stringResource(R.string.ui_support_thinking_5b9e4c),
                             style = MiuixTheme.textStyles.body1,
                             color = MiuixTheme.colorScheme.onSurface,
                         )
                         Text(
                             text = if (geminiCapabilities != null) {
-                                if (geminiCapabilities.mandatory) "该模型必须思考，不支持 Off；Default 使用模型默认档位。"
-                                else "尚未确认该模型的思考档位；仅使用 Default，不发送自定义思考档位。"
+                                if (geminiCapabilities.mandatory) "该模型必须思考，不支持 Off。"
+                                else "尚未确认该模型的思考档位，不发送自定义思考档位。"
                             } else if (reasoningOverrideActive) {
                                 if (inferredCapabilities != null) {
                                     "档位按模型名推断（非官方元数据）；请按网关实际能力核对后再保存。"
