@@ -10,12 +10,18 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.MainActivity
 
 internal object BackgroundCommandNotification {
-    private const val CHANNEL = "eta_background_commands"
+    private const val LEGACY_CHANNEL = "eta_background_commands"
+    private const val CHANNEL = "eta_background_commands_v2"
     private const val NOTIFICATION_ID = 1124
 
     fun show(context: Context, task: DetachedTask) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "后台命令结果", NotificationManager.IMPORTANCE_DEFAULT))
+        runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL) }
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL, "后台命令结果", NotificationManager.IMPORTANCE_HIGH).apply {
+                enableVibration(true)
+            },
+        )
         val open = PendingIntent.getActivity(context, 0,
             Intent(context, MainActivity::class.java).setAction(MainActivity.ACTION_OPEN_TERMINAL),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
