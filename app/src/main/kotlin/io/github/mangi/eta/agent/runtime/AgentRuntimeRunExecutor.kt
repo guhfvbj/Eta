@@ -526,9 +526,10 @@ internal class AgentRuntimeRunExecutor(
             runCatching { toolExecutor?.close() }
         }
 
+        val completedEvents = synchronized(archivedEvents) { archivedEvents.toList() }
         if (cancelled && session.isTerminal) {
             runCatching {
-                persistArtifacts(snapshotRequest(request), result, archivedEvents)
+                persistArtifacts(snapshotRequest(request), result, completedEvents)
             }.onFailure { throwable ->
                 AndroidAgentLogger.error(
                     "Agent runtime cancelled result persistence failed: " +
@@ -556,7 +557,7 @@ internal class AgentRuntimeRunExecutor(
                         "Agent runtime checkpoint seal failed: type=${throwable.safeLogType()}"
                     )
                 }
-            runCatching { persistArtifacts(completedRequest, result, archivedEvents) }
+            runCatching { persistArtifacts(completedRequest, result, completedEvents) }
                 .onFailure { throwable ->
                     AndroidAgentLogger.error(
                         "Agent runtime artifact persistence failed: type=${throwable.safeLogType()}"
@@ -566,7 +567,7 @@ internal class AgentRuntimeRunExecutor(
         val reviewEpoch = reviewGeneration
         if (committed && result.ok && !cancelled && !roleplayRun && reviewEpoch != null) {
             response?.let { completed ->
-                runCatching { AgentExperienceReview.submit(appContext, reviewEpoch, completedRequest, completed, archivedEvents.toList()) }
+                runCatching { AgentExperienceReview.submit(appContext, reviewEpoch, completedRequest, completed, completedEvents) }
                     .onFailure { error -> AndroidAgentLogger.warn("Experience review submission failed: type=${error.safeLogType()}") }
             }
         }

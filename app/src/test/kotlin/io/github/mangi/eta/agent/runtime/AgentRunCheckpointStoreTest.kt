@@ -26,6 +26,55 @@ class AgentRunCheckpointStoreTest {
     }
 
     @Test
+    fun cancelledRunKeepsCompletedSubagentSnapshotsAndResultsAfterDatabaseReopen() {
+        val request = request("cancelled-subagent-results")
+        val recorder = AgentRunCheckpointRecorder.create(context, request)!!
+        val snapshots = (1..2).map { index ->
+            io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot(
+                subagentId = "sub_$index",
+                status = io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot.STATUS_COMPLETED,
+                output = "结果😀".repeat(5_000),
+            ).encode()
+        }
+        val calls = org.json.JSONArray()
+        snapshots.forEachIndexed { index, snapshot ->
+            val id = "call-$index"
+            calls.put(org.json.JSONObject().put("id", id).put("type", "function")
+                .put("function", org.json.JSONObject().put("name", "subagent").put("arguments", "{}")))
+            recorder.accept(AgentEvent.SubagentProgress(
+                round = 1, toolCallId = id, subagentId = "sub_${index + 1}",
+                subagentType = "explore", snapshotJson = snapshot,
+            ))
+            recorder.accept(AgentEvent.ToolFinished(
+                round = 1, toolCallId = id, name = "subagent", resultSummary = "真实结果-$index",
+                imageCount = 0, imageBytes = 0, success = true, command = snapshot,
+            ))
+        }
+        val transcript = listOf(AgentModelClient.ConversationMessage(
+            role = "assistant", content = "", toolCallsJson = calls.toString(),
+        )) + snapshots.indices.map { index -> AgentModelClient.ConversationMessage(
+            role = "tool", toolCallId = "call-$index", content = "真实结果-$index",
+        ) }
+        AgentRunCheckpointStore.saveTranscript(context, request.runId, transcript)
+        recorder.seal()
+        val result = AgentRuntimeWire.RunResult(
+            runId = request.runId, ok = false, content = "", error = "已停止", transcript = transcript,
+        )
+        AgentRuntimeResultStore.add(context, AgentRuntimeWire.CompletedRun(
+            handoff = requireNotNull(request.handoff), result = result, createdAt = System.currentTimeMillis(),
+        ))
+        EtaDatabase.closeForTests()
+
+        val restored = AgentRunCheckpointStore.list(context).single()
+        assertEquals(snapshots, restored.events.filterIsInstance<AgentEvent.ToolFinished>().map { it.command })
+        assertFalse(restored.events.any { it is AgentEvent.SubagentProgress })
+        assertEquals(transcript, restored.transcript)
+        val completed = AgentRuntimeResultStore.readOwned(context, request.runId, request.handoff!!.payload)!!
+        assertEquals("已停止", completed.result.error)
+        assertEquals(transcript, completed.result.transcript)
+    }
+
+    @Test
     fun searchSuggestionsNeverReachCheckpointEvenThroughDirectAppend() {
         val request = request("search-transient")
         val recorder = AgentRunCheckpointRecorder.create(context, request)!!

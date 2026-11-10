@@ -52,18 +52,46 @@ internal data class SubagentActivitySnapshot(
     fun encode(): String {
         val full = json.encodeToString(this)
         if (full.length <= MAX_ENCODED_SNAPSHOT_CHARS) return full
-        val trimmedSteps = steps.map { step ->
-            if (step.detail.length <= 400) step else step.copy(detail = step.detail.take(400) + "…")
-        }
-        val compact = json.encodeToString(copy(steps = trimmedSteps, prompt = prompt.take(2_000)))
-        if (compact.length <= MAX_ENCODED_SNAPSHOT_CHARS) return compact
-        return json.encodeToString(
-            copy(
-                prompt = prompt.take(1_000),
-                steps = trimmedSteps.takeLast(24),
-                output = output.take(8_000),
-            ),
+        // 限制字段后重新序列化，不能直接截断 JSON；转义后的长度仍须复核。
+        var compact = copy(
+            subagentId = subagentId.clip(128),
+            subagentType = subagentType.clip(80),
+            description = description.clip(120),
+            prompt = prompt.clip(2_000),
+            model = model.clip(160),
+            effort = effort.clip(32),
+            status = status.clip(32),
+            currentAction = currentAction.clip(160),
+            steps = steps.takeLast(48).map { step ->
+                step.copy(
+                    id = step.id.clip(128),
+                    kind = step.kind.clip(32),
+                    title = step.title.clip(240),
+                    detail = step.detail.clip(400),
+                    status = step.status.clip(32),
+                    toolName = step.toolName.clip(128),
+                )
+            },
+            output = output.clip(12_000),
+            error = error?.clip(1_000),
         )
+        var encoded = json.encodeToString(compact)
+        while (encoded.length > MAX_ENCODED_SNAPSHOT_CHARS) {
+            compact = compact.copy(
+                prompt = compact.prompt.clip(compact.prompt.length / 2),
+                steps = compact.steps.takeLast((compact.steps.size / 2).coerceAtLeast(1)),
+                output = compact.output.clip(compact.output.length / 2),
+                error = compact.error?.let { it.clip(it.length / 2) },
+            )
+            encoded = json.encodeToString(compact)
+        }
+        return encoded
+    }
+
+    private fun String.clip(maxChars: Int): String {
+        var end = length.coerceAtMost(maxChars)
+        if (end in 1 until length && this[end - 1].isHighSurrogate() && this[end].isLowSurrogate()) end--
+        return substring(0, end)
     }
 
     companion object {

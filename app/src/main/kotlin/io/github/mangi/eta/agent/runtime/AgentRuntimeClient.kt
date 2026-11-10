@@ -89,8 +89,13 @@ internal class AgentRuntimeClient(
             return resultRef.get()?.let(AgentRuntimeWire::runResultFromBundle) ?: AgentRuntimeWire.RunResult("", false, "", "Agent Runtime 未返回结果")
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
-            // UI 会话的协程取消来自界面销毁/切后台（用户主动停止走显式 cancelRun），不能误杀后台仍在跑的会话。
-            if (request.handoff?.source != AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE) {
+            // 解除 UI 等待不等于用户停止运行；真正的停止走显式 cancelRun。
+            val uiHandoff = request.handoff?.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE
+            io.github.mangi.eta.core.EtaTrace.log(
+                "run.wait_interrupted",
+                "runId=${request.runId} uiHandoff=$uiHandoff cancelRequested=${!uiHandoff}",
+            )
+            if (!uiHandoff) {
                 runCatching {
                     val cancelMessage = Message.obtain(null, AgentRuntimeWire.MSG_CANCEL)
                     cancelMessage.data = AgentRuntimeWire.ackBundle(request.runId)
@@ -121,6 +126,10 @@ internal class AgentRuntimeClient(
 
     fun cancelRun(runId: String) {
         if (runId.isBlank()) return
+        io.github.mangi.eta.core.EtaTrace.log(
+            "run.cancel_request",
+            "runId=$runId caller=${io.github.mangi.eta.core.EtaTrace.callerHint()}",
+        )
         withRuntimeMessenger(Unit) { serviceMessenger ->
             val msg = Message.obtain(null, AgentRuntimeWire.MSG_CANCEL)
             msg.data = AgentRuntimeWire.ackBundle(runId)

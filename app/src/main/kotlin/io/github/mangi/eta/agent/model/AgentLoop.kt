@@ -318,6 +318,8 @@ internal class AgentLoop(
         val outcomes = mutableListOf<ToolOutcome>()
         var index = 0
         while (index < toolCalls.size) {
+            // 已返回的结果先交给 transcript，取消后不再开始下一项工具。
+            if (runController.isCancelled) break
             val current = toolCalls[index]
             if (current.name == AgentSubagentToolCatalog.TOOL_NAME && current.name in availableToolNames) {
                 val parallelBatch = mutableListOf<AgentModelClient.ToolCall>()
@@ -396,7 +398,6 @@ internal class AgentLoop(
                 }.awaitAll()
             }
         }
-        runController.throwIfCancelled()
         return outcomes
 
     }
@@ -456,9 +457,6 @@ internal class AgentLoop(
         }
 
         emitToolFinished(round, roundCall, result)
-        if (roundCall.name == AgentSubagentToolCatalog.TOOL_NAME) {
-            runController.throwIfCancelled()
-        }
         return ToolOutcome(roundCall, result)
     }
 

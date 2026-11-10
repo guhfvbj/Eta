@@ -297,6 +297,77 @@ class SubagentTest {
         assertEquals(snapshot, SubagentActivitySnapshot.decode(decoded?.snapshotJson))
     }
 
+    @Test(timeout = 15_000)
+    fun completedSubagentResultsEnterTranscriptBeforeCancellationIsRaised() {
+        for (count in listOf(1, 2)) {
+            val controller = AgentRunController()
+            val session = io.github.mangi.eta.agent.runtime.AgentRuntimeSession(
+                runId = "subagent-cancel-$count", controller = controller,
+            )
+            val completed = java.util.concurrent.atomic.AtomicInteger()
+            val requests = java.util.concurrent.atomic.AtomicInteger()
+            val events = java.util.Collections.synchronizedList(mutableListOf<AgentEvent>())
+            val messages = JSONArray().put(JSONObject().put("role", "user").put("content", "开始"))
+            val provider = object : AgentProviderClient {
+                override val id = "fake-cancel-provider"
+                override val capabilities = ProviderCapabilities(
+                    endpoint = EndpointKind.CHAT_COMPLETIONS,
+                    streamingText = true, streamingToolCalls = true, imageInput = false,
+                    toolResultImages = false, strictTools = false, parallelToolCalls = true,
+                )
+                override fun complete(
+                    request: ProviderRequest, runController: AgentRunController,
+                    onEvent: (ProviderEvent) -> Unit,
+                ): ProviderResponse {
+                    check(requests.incrementAndGet() == 1)
+                    val calls = JSONArray()
+                    repeat(count) { index ->
+                        calls.put(JSONObject().put("id", "call_$index").put("type", "function").put(
+                            "function", JSONObject().put("name", "subagent").put("arguments", JSONObject()
+                                .put("description", "测试子任务").put("prompt", "仅返回测试结果").toString()),
+                        ))
+                    }
+                    return ProviderResponse(JSONObject().put("role", "assistant").put("content", "")
+                        .put("finish_reason", "tool_calls").put("tool_calls", calls))
+                }
+            }
+            val loop = AgentLoop(
+                config = AgentModelClient.ModelConfig(
+                    baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "",
+                ),
+                messages = messages, tools = JSONArray().put(AgentSubagentToolCatalog.schema()),
+                provider = provider,
+                toolExecutor = AgentModelClient.ToolExecutor { call ->
+                    val result = AgentModelClient.ToolResult(
+                        content = JSONObject().put("ok", true).put("summary", "result-${call.id}").toString(),
+                        command = SubagentActivitySnapshot(
+                            subagentId = call.id, status = SubagentActivitySnapshot.STATUS_COMPLETED,
+                            output = "result-${call.id}",
+                        ).encode(),
+                    )
+                    if (completed.incrementAndGet() == count) controller.cancel()
+                    result
+                },
+                runController = controller, traceFormatter = AgentTraceFormatter(),
+                onEvent = { events += it },
+                onTranscript = session::updateTranscript,
+            )
+            org.junit.Assert.assertThrows(io.github.mangi.eta.agent.runtime.AgentRunCancelledException::class.java) {
+                loop.run()
+            }
+            val results = (0 until messages.length()).map { messages.getJSONObject(it) }
+                .filter { it.optString("role") == "tool" }
+            assertEquals(count, results.size)
+            assertEquals((0 until count).map { "call_$it" }, results.map { it.optString("tool_call_id") })
+            assertTrue(results.all { it.optString("content").contains("result-") })
+            assertEquals(count, events.filterIsInstance<AgentEvent.ToolFinished>().size)
+            val published = session.transcript.filter { it.role == "tool" }
+            assertEquals(results.map { it.optString("tool_call_id") }, published.map { it.toolCallId })
+            assertTrue(published.all { it.content.contains("result-") })
+            assertEquals(1, requests.get())
+        }
+    }
+
     private fun JSONArray.toolNames(): Set<String> =
         (0 until length()).mapTo(linkedSetOf()) { index ->
             getJSONObject(index).getJSONObject("function").getString("name")

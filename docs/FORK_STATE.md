@@ -1,16 +1,17 @@
 # 本地分叉状态（给后续会话看的交接文档）
 
-> 最后更新：2026-11-10（3.3.15 修复子智能体长任务后台误取消、快照截断、UTF-8 跨块编辑与文件工具耗时）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
+> 最后更新：2026-11-10（3.3.15 子智能体取消、快照与恢复修复，仍在定向验收）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
 > 目的：任何会话接手前先读这一页，避免把「本地自研」当成上游行为，或把「上游已有」重复实现。
 
 ## 当前交付线（2026-11-10，3.3.15）
 
 - 分支 `oo0520-version`，版本 `3.3.15` / `2026111001`；桌面名 Eta、包名 `io.github.mangi.eta.oo0520`，沿用原发布证书。
-- 修复 UI 脱离（Activity 后台回收或返回退出触发 `viewModelScope` 取消）时 `AgentRuntimeClient.run` 在 `InterruptedException` 分支向 `AgentRuntimeService` 发送 `MSG_CANCEL` 误杀后台运行中的长任务与子智能体的问题；UI 会话仅在显式调用 `cancelRun` 时取消后台运行。
-- 修复 `AgentRuntimeWire` 对 `SubagentProgress.snapshotJson` 及 `ToolFinished.command`（`subagent`）按 `MAX_DRAIN_CONTENT_CHARS`（16,000 字）拼接截断后缀导致 JSON 损坏、恢复后子智能体步骤与输出丢失的问题；在 `SubagentActivitySnapshot.encode()` 内保证序列化结果始终为合法且不超过 48,000 字符的 JSON。
-- 修复并行子智能体完成或取消时的事件竞争与检查点落盘：`AgentRuntimeRunExecutor.archivedEvents` 改为线程安全列表，`AgentRunCheckpointRecorder` 同步化；取消或异常路径同样向父循环返回带最新快照的 `ToolResult` 并记录 `ToolFinished`，避免恢复后退回「正在启动…」。
-- 修复 `AgentPendingResultRecovery` 将 `"已停止"` 恢复为 `SystemNoticeCode.RuntimeFailed`（显示「运行失败：已停止」）的问题，对齐为 `SystemNoticeCode.Stopped`；`recoverRuntimeRuns` 对账时纳入全部本地观察中的并发 `runConversationIds`。
-- 修复 Android `CharsetDecoderICU` 在 `FileToolTextReader` 分块解码末尾不完整多字节 UTF-8 字符时预吞前导字节导致 `bytesConsumed` 偏大，进而令大文件 `edit_file` / `grep_files` 报 `NOT_UTF8_TEXT` 的问题；优化 `ShellProcessSupervisor` 进程组清理优先走 `pgrep -s "$$"`，消除单次 Shell 文件操作约 310ms 的 `/proc` 轮询开销；修复 `DiagnosticsAutoExport` 导出失败后每 60 秒无限重排唤醒闹钟的问题。
+- 已确认旧 `AgentRuntimeClient.run` 等待线程中断时会发送 `MSG_CANCEL`。UI handoff 现仅解除等待，不再自动取消 Runtime；非 UI 入口保留原行为。Activity 配置变更通常保留 ViewModel，不能把切到后台等同于 scope 取消。原故障 trace 只有 `run.cancel`，具体触发来源仍待真机复现，新日志记录调用来源。
+- 已确认 IPC 将 `SubagentProgress.snapshotJson` 及子智能体 `ToolFinished.command` 当普通字符串截至 16,000 字会破坏 JSON；这两处改为传递完整结构化快照，在 `SubagentActivitySnapshot.encode()` 内按序列化后的实际长度收缩至 48,000 字符以内，并避免拆开 emoji 代理对。中间进度仅参与活跃运行重连，不落检查点；最终 `ToolFinished.command` 才参与检查点与归档恢复。
+- 检查点记录器的写入与收尾已同步化，归档事件在同一锁内取得稳定副本后才交给持久化或复查。原首版补丁仍会在父循环写入 transcript 前抛取消异常，后续修正让已取得的单个或并行子任务结果先进入 transcript，取消后不再启动后续工具。普通停止入口只取消 controller，session 仍接受最终 transcript；Service 销毁时的立即终态路径另有保留边界，未宣称已完成设备级竞态验收。
+- `AgentPendingResultRecovery` 将已停止及 `eta_status:stopped` 恢复为 `SystemNoticeCode.Stopped`，避免显示运行失败；对账纳入全部本地观察中的并发 `runConversationIds`。恢复类此前定向测试通过。终态消息在进程重启后没有注册表快照时不再无限轮询，也不沿用已过期的实时快照。
+- `FileToolTextReader` 改用已解码文本重新编码后的字节数计算消费量，保留原读取上限；中文与补充平面字符跨块测试在 Windows 通过。Android ICU 预吞字节的具体解释尚无设备级验证，不作为已证实根因。无关的 `pgrep` 清理优化已撤回。`DiagnosticsAutoExport` 仅增加进程内按周节流，进程重启后仍会重新尝试，未宣称持久退避。
+- `ce66ee38` 首版在 Windows 构建出正式签名 APK 并通过验签，但不包含后续修正，未安装、未发布。跟进补丁仍在定向验收。此前 Robolectric 测试受依赖下载阻塞，正在使用构建机代理重跑；不宣称全量测试或真机验收完成。
 
 ## 3.3.14 交付记录（2026-11-09）
 

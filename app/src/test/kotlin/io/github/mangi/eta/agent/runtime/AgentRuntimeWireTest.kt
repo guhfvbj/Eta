@@ -287,11 +287,23 @@ class AgentRuntimeWireTest {
     }
 
     @Test
-    fun subagentProgressSnapshotIsNotTruncatedAcrossIpcAndCheckpoint() {
+    fun subagentProgressSnapshotRoundTripsAcrossIpcButRemainsEphemeral() {
         val snapshot = """{"subagentId":"sub_1","steps":[{"detail":"${"x".repeat(20_000)}"}]}"""
         val event = AgentEvent.SubagentProgress(1, "call-1", "sub_1", "explore", snapshot)
         val bundle = AgentRuntimeWire.eventToBundle(event)
         assertEquals(snapshot, bundle.getString("snapshot_json"))
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(bundle))
+        assertEquals(event, event.replayProjection())
+        assertNull(event.recoveryProjection())
+        assertNull(AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+    }
+
+    @Test
+    fun subagentFinishedSnapshotSurvivesIpcAndCheckpointWithoutTruncation() {
+        val snapshot = """{"subagentId":"sub_1","steps":[{"detail":"${"中".repeat(20_000)}"}]}"""
+        val event = AgentEvent.ToolFinished(1, "call-1", "subagent", "完成", 0, 0, true, snapshot)
+        val bundle = AgentRuntimeWire.eventToBundle(event)
+        assertEquals(snapshot, bundle.getString("command"))
         assertEquals(event, AgentRuntimeWire.eventFromBundle(bundle))
         assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
     }

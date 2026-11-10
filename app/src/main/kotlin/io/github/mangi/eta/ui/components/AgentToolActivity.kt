@@ -128,7 +128,7 @@ internal fun ToolActivityRow(
             Regex("^.*-tool-\\d+-(.+)$").find(message.id)?.groupValues?.getOrNull(1).orEmpty()
         }
         var liveJson by remember(message.id) { mutableStateOf<String?>(null) }
-        LaunchedEffect(message.id, toolCallId, snapshot.subagentId, snapshot.status) {
+        LaunchedEffect(message.id, toolCallId, snapshot.subagentId, snapshot.status, message.status) {
             if (toolCallId.isBlank() && snapshot.subagentId.isBlank()) {
                 liveJson = null
                 return@LaunchedEffect
@@ -139,12 +139,10 @@ internal fun ToolActivityRow(
                 } else {
                     SubagentRunRegistry.latestSnapshot(snapshot.subagentId)
                 }
-                if (live != null) liveJson = live
+                liveJson = live
                 val liveStatus = SubagentActivitySnapshot.decode(liveJson)?.status
-                val messageDone = snapshot.status != SubagentActivitySnapshot.STATUS_RUNNING
-                if (messageDone && liveJson != null &&
-                    liveStatus != SubagentActivitySnapshot.STATUS_RUNNING
-                ) {
+                val messageDone = message.status != ToolActivityStatusUi.Running
+                if (messageDone && liveStatus != SubagentActivitySnapshot.STATUS_RUNNING) {
                     return@LaunchedEffect
                 }
                 delay(1000)
