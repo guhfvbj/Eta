@@ -287,6 +287,16 @@ class AgentRuntimeWireTest {
     }
 
     @Test
+    fun subagentProgressSnapshotIsNotTruncatedAcrossIpcAndCheckpoint() {
+        val snapshot = """{"subagentId":"sub_1","steps":[{"detail":"${"x".repeat(20_000)}"}]}"""
+        val event = AgentEvent.SubagentProgress(1, "call-1", "sub_1", "explore", snapshot)
+        val bundle = AgentRuntimeWire.eventToBundle(event)
+        assertEquals(snapshot, bundle.getString("snapshot_json"))
+        assertEquals(event, AgentRuntimeWire.eventFromBundle(bundle))
+        assertEquals(event, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(event)))
+    }
+
+    @Test
     fun attachResponsePreservesRunIdentityAndDecision() {
         val accepted = AgentRuntimeWire.attachRunResponseBundle("run-1", attached = true)
         val rejected = AgentRuntimeWire.attachRunResponseBundle("run-2", attached = false)

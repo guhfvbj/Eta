@@ -56,8 +56,8 @@ android {
         // 跨零点必须换成当天日期、序号归 01，不能接着前一天的号往下加——
         // 之前从 2026102020 起就一直在沿用 10-20 的日期，日期不再反映实际构建日。
         // 两条线各自计号：正式线沿用主干号段，测试线独立递增（beta.8）。
-        versionCode = if (isBetaBuild) 2026110409 else 2026110902
-        versionName = if (isBetaBuild) "3.4.0-beta.28" else "3.3.14"
+        versionCode = if (isBetaBuild) 2026110409 else 2026111001
+        versionName = if (isBetaBuild) "3.4.0-beta.28" else "3.3.15"
         // 桌面显示 Eta；通过独立 applicationId 与其他分支版本共存。
         manifestPlaceholders["applicationLabel"] =
             if (isBetaBuild) "Eta β" else "@string/app_name"

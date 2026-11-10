@@ -12,6 +12,9 @@ import io.github.mangi.eta.ui.model.UserMessageUi
 
 /** 将 Runtime outbox 的结果幂等折叠回 App 会话。 */
 internal object AgentPendingResultRecovery {
+    private const val STOPPED_ERROR = "已停止"
+    private const val SYNTHETIC_STOPPED = "eta_status:stopped"
+
     data class Outcome(
         val state: AgentChatHomeUiState,
         val alreadyApplied: Boolean,
@@ -91,7 +94,11 @@ internal object AgentPendingResultRecovery {
                 )
                 else -> SystemNoticeMessageUi(
                     id = resultId,
-                    code = SystemNoticeCode.RuntimeFailed,
+                    code = if (result.error == STOPPED_ERROR || result.error == SYNTHETIC_STOPPED) {
+                        SystemNoticeCode.Stopped
+                    } else {
+                        SystemNoticeCode.RuntimeFailed
+                    },
                     detail = result.error,
                 )
             }

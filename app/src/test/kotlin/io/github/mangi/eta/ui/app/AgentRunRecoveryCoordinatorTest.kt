@@ -46,16 +46,51 @@ class AgentRunRecoveryCoordinatorTest {
     @Test
     fun inactiveCheckpointIsInterruptedButLocallyObservedRunIsIgnored() {
         val plan = AgentRunRecoveryCoordinator.plan(
-            checkpoints = listOf(checkpoint("run-stale"), checkpoint("run-local")),
+            checkpoints = listOf(checkpoint("run-stale"), checkpoint("run-local"), checkpoint("run-local-2")),
             completedRuns = emptyList(),
             activeStateKnown = true,
             terminalStateKnown = true,
-            activeRunId = null,
+            activeRunId = "run-local-2",
             locallyObservedRunId = "run-local",
+            activeRunIds = setOf("run-local", "run-local-2"),
+            locallyObservedRunIds = setOf("run-local", "run-local-2"),
         )
 
         assertEquals(listOf("run-stale"), plan.interrupted.map { it.runId })
         assertNull(plan.reattach)
+    }
+
+    @Test
+    fun largeSubagentActivitySnapshotStaysValidDecodableJson() {
+        val steps = (1..48).map { i ->
+            io.github.mangi.eta.agent.subagent.SubagentStepSnapshot(
+                id = "tool-$i",
+                kind = io.github.mangi.eta.agent.subagent.SubagentStepSnapshot.KIND_TOOL,
+                title = "读取文件 $i",
+                detail = "详".repeat(2_000),
+                status = io.github.mangi.eta.agent.subagent.SubagentStepSnapshot.STATUS_SUCCESS,
+                toolName = "read_file",
+            )
+        }
+        val snapshot = io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot(
+            subagentId = "sub_3",
+            subagentType = "explore",
+            description = "调研架构",
+            prompt = "请".repeat(4_000),
+            model = "deepseek-v4.1-flash",
+            effort = "high",
+            status = io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot.STATUS_COMPLETED,
+            currentAction = "完成 · 48 次工具调用",
+            steps = steps,
+            output = "总".repeat(12_000),
+        )
+        val encoded = snapshot.encode()
+        assertTrue(encoded.length <= 48_000)
+        val decoded = io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot.decode(encoded)
+        org.junit.Assert.assertNotNull(decoded)
+        assertEquals("sub_3", decoded?.subagentId)
+        assertEquals(io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot.STATUS_COMPLETED, decoded?.status)
+        assertTrue(decoded!!.output.isNotBlank())
     }
 
     @Test

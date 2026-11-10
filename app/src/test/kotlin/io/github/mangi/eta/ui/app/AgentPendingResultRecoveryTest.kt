@@ -139,6 +139,30 @@ class AgentPendingResultRecoveryTest {
     }
 
     @Test
+    fun recoveryUsesStoppedNoticeForCancelledRun() {
+        val recovered = AgentPendingResultRecovery.apply(
+            state = AgentChatUiState(
+                messages = emptyList(),
+                input = "",
+                isStreaming = true,
+                thinkingEnabled = false,
+            ),
+            runId = "run-stopped",
+            result = AgentRuntimeWire.RunResult(
+                runId = "run-stopped",
+                ok = false,
+                content = "",
+                error = "已停止",
+            ),
+            supplements = emptyList(),
+        )
+
+        val message = recovered.state.messages.single() as SystemNoticeMessageUi
+        assertEquals(SystemNoticeCode.Stopped, message.code)
+        assertEquals("已停止", message.detail)
+    }
+
+    @Test
     fun recoveryDoesNotMergeEarlierTextBlockIntoSameRoundFinalBlock() {
         val state = AgentChatUiState(
             messages = listOf(

@@ -129,6 +129,14 @@ class AgentFileOperationsTest {
         assertEquals("二 二", file.readText())
     }
 
+    @Test fun editSucceedsWhenMultibyteCharactersStraddleChunkBoundaries() {
+        val prefix = "a".repeat(15_999) + "中".repeat(16_000) + "\ntarget = 1\n"
+        val file = temporary.newFile("multibyte-edit.kt").apply { writeText(prefix) }
+        val result = JSONObject(operations().editFile(file.name, "target = 1", "target = 2"))
+        assertTrue(result.toString(), result.getBoolean("ok"))
+        assertTrue(file.readText().endsWith("\ntarget = 2\n"))
+    }
+
     @Test fun staleRevisionAndOldContentDigestPreventOverwrite() {
         val file = temporary.newFile("edit.txt").apply { writeText("original") }
         val backend = LocalFileToolBackend(temporary.root)

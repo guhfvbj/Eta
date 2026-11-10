@@ -1026,7 +1026,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     private fun cancelRun(runId: String) {
         if (runId.isBlank()) return
-        io.github.mangi.eta.core.EtaTrace.log("run.cancel", "runId=$runId")
+        io.github.mangi.eta.core.EtaTrace.log("run.cancel", "runId=$runId 调用方=${io.github.mangi.eta.core.EtaTrace.callerHint()}")
         pendingStartRequests.remove(runId)?.let { pending ->
             pending.incoming.close()
             sendRequestIngestedTo(pending.replyTo, runId)

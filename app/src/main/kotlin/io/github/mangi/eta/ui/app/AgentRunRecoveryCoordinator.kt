@@ -24,8 +24,12 @@ internal object AgentRunRecoveryCoordinator {
         activeRunId: String?,
         locallyObservedRunId: String?,
         activeRunIds: Set<String> = emptySet(),
+        locallyObservedRunIds: Set<String> = emptySet(),
     ): Plan {
         val activeIds = (activeRunIds + listOfNotNull(activeRunId))
+            .filter { runId -> runId.isNotBlank() }
+            .toSet()
+        val observedIds = (locallyObservedRunIds + listOfNotNull(locallyObservedRunId))
             .filter { runId -> runId.isNotBlank() }
             .toSet()
         val uiCheckpoints = checkpoints
@@ -34,13 +38,13 @@ internal object AgentRunRecoveryCoordinator {
         val completed = completedRuns
             .asSequence()
             .filter { it.handoff.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
-            .filterNot { it.stableRunId == locallyObservedRunId }
+            .filterNot { it.stableRunId in observedIds }
             .sortedBy { it.createdAt }
             .map { run -> Completed(run, uiCheckpoints[run.stableRunId]) }
             .toList()
         val completedRunIds = completed.mapTo(mutableSetOf()) { it.result.stableRunId }
         val unresolved = uiCheckpoints.values
-            .filterNot { it.runId == locallyObservedRunId || it.runId in completedRunIds }
+            .filterNot { it.runId in observedIds || it.runId in completedRunIds }
             .sortedBy { it.createdAt }
         // 多开时活跃会话不止一个：集合里的每一个都还在跑，都不能当"中断"处理。
         val active = unresolved

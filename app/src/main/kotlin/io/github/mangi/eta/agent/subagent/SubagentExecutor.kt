@@ -221,6 +221,7 @@ internal class SubagentExecutor(
         }
         if (allowModelPick && requestedModel != null && requestedGrant == null) {
             SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+            SubagentRunRegistry.unregister(subagentId)
             controllerBinding.close()
             val message = if (granted.isNotEmpty()) {
                 "模型 $requestedModel 没有在子智能体设置里授权；只能从这些里挑：" +
@@ -245,6 +246,7 @@ internal class SubagentExecutor(
             val label = targetGrant.apiId
             if (options.isEmpty()) {
                 SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+                SubagentRunRegistry.unregister(subagentId)
                 controllerBinding.close()
                 return errorResult(
                     "SUBAGENT_EFFORT_UNSUPPORTED",
@@ -253,6 +255,7 @@ internal class SubagentExecutor(
             }
             if (wire !in options) {
                 SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+                SubagentRunRegistry.unregister(subagentId)
                 controllerBinding.close()
                 return errorResult(
                     "SUBAGENT_EFFORT_UNSUPPORTED",
@@ -272,6 +275,7 @@ internal class SubagentExecutor(
             }
         }.getOrElse { throwable ->
             SubagentSessionStore.releaseRunning(conversationKey, subagentId)
+            SubagentRunRegistry.unregister(subagentId)
             controllerBinding.close()
             return errorResult("SUBAGENT_CONFIG_ERROR", throwable.message ?: "无法加载 Subagent 模型配置")
         }
@@ -455,10 +459,6 @@ internal class SubagentExecutor(
                 tracker.markFailed(errorMessage, partial)
             }
             publishSnapshot(force = true)
-
-            if (parentController.isCancelled) {
-                throw AgentRunCancelledException()
-            }
 
             AgentModelClient.ToolResult(
                 content = JSONObject()

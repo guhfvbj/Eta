@@ -215,6 +215,10 @@ internal class ShellProcessSupervisor(
         }
         val cleanupGroup =
                 "eta_cleanup_proc_group() { " +
+                "if pids=${'$'}(pgrep -s \"${'$'}${'$'}\" 2>/dev/null); then " +
+                "for pid in ${'$'}pids; do " +
+                "[ \"${'$'}pid\" = \"${'$'}${'$'}\" ] || kill -9 \"${'$'}pid\" 2>/dev/null; " +
+                "done; return 0; fi; " +
                 "for stat_file in /proc/[0-9]*/stat; do " +
                 "[ -r \"${'$'}stat_file\" ] || continue; " +
                 "IFS= read -r stat < \"${'$'}stat_file\" || continue; " +

@@ -24,11 +24,14 @@ internal object DiagnosticsAutoExport {
     /** 自动导出单独放一个子目录：只在这里滚动保留，绝不碰你手动存下的诊断包。 */
     private const val BACKUP_DIR = "/storage/emulated/0/ai共享文件夹/诊断包备份/自动"
 
+    @Volatile
+    private var lastAttemptTime: Long = 0L
+
     /** 按上次导出时间排下一次；从没导出过就先在 1 分钟后补一次。 */
     fun refresh(context: Context) {
         val app = context.applicationContext
         val now = System.currentTimeMillis()
-        val last = latestExportTime()
+        val last = maxOf(latestExportTime(), lastAttemptTime)
         val due = if (last > 0L) last + INTERVAL_MS else now + MIN_DELAY_MS
         runCatching {
             app.getSystemService(AlarmManager::class.java)
@@ -44,6 +47,7 @@ internal object DiagnosticsAutoExport {
     /** 导出一次并重排下一次；失败只留一条日志，不弹通知。 */
     suspend fun runOnce(context: Context) {
         val app = context.applicationContext
+        lastAttemptTime = System.currentTimeMillis()
         runCatching {
             val bytes = DiagnosticsBundle.collect(app)
             val dir = File(BACKUP_DIR).apply { mkdirs() }

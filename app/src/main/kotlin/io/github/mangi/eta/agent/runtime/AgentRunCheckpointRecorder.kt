@@ -13,6 +13,7 @@ internal class AgentRunCheckpointRecorder private constructor(
     private var pendingDelta: AgentEvent.AssistantBlockDelta? = null
     private var lastFlushNanos = nanoTime()
 
+    @Synchronized
     fun accept(event: AgentEvent) {
         val checkpointEvent = event.recoveryProjection() ?: return
         if (checkpointEvent is AgentEvent.AssistantBlockDelta) {
@@ -46,11 +47,13 @@ internal class AgentRunCheckpointRecorder private constructor(
     }
 
     /** 把最后一段增量提交到日志；日志由结果 ACK 或中断恢复负责删除。 */
+    @Synchronized
     fun seal() {
         flushPendingDelta()
         active.remove(runId)
     }
 
+    @Synchronized
     fun discard() {
         pendingDelta = null
         active.remove(runId)

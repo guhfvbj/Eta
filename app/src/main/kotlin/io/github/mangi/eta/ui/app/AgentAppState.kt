@@ -494,6 +494,9 @@ internal class AgentAppState(
         val activeRunIds =
             (activeRunQuery as? AgentRuntimeClient.ActiveRunQuery.Known)?.runIds.orEmpty()
         val locallyObservedRunId = withContext(Dispatchers.Main) { currentRunId }
+        val locallyObservedRunIds = withContext(Dispatchers.Main) {
+            runConversationIds.keys.toSet() + listOfNotNull(currentRunId)
+        }
         val plan = AgentRunRecoveryCoordinator.plan(
             checkpoints = checkpoints,
             completedRuns = completedRuns,
@@ -502,6 +505,7 @@ internal class AgentAppState(
             activeRunId = activeRunId,
             locallyObservedRunId = locallyObservedRunId,
             activeRunIds = activeRunIds,
+            locallyObservedRunIds = locallyObservedRunIds,
         )
         val orphanRewrites = if (activeStateKnown && terminalStateKnown) withContext(Dispatchers.Main) {
             val observed = checkpoints.mapTo(mutableSetOf()) { it.runId }.apply {

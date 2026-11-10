@@ -803,7 +803,12 @@ internal object AgentRuntimeWire {
                 putInt("image_count", event.imageCount)
                 putInt("image_bytes", event.imageBytes)
                 event.success?.let { putBoolean("success", it) }
-                event.command?.let { putString("command", it.boundedText(MAX_DRAIN_CONTENT_CHARS)) }
+                event.command?.let { command ->
+                    putString(
+                        "command",
+                        if (event.name == "subagent") command else command.boundedText(MAX_DRAIN_CONTENT_CHARS),
+                    )
+                }
             }
 
             is AgentEvent.SubagentProgress -> {
@@ -812,7 +817,7 @@ internal object AgentRuntimeWire {
                 putString("tool_call_id", event.toolCallId)
                 putString("subagent_id", event.subagentId)
                 putString("subagent_type", event.subagentType)
-                putString("snapshot_json", event.snapshotJson.boundedText(MAX_DRAIN_CONTENT_CHARS))
+                putString("snapshot_json", event.snapshotJson)
             }
 
             is AgentEvent.HostedToolStarted -> {

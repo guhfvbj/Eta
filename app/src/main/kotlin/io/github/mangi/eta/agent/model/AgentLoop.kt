@@ -389,9 +389,7 @@ internal class AgentLoop(
                             if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
                                 sensitiveToolCallIds += toolCall.id
                             }
-                            if (!runController.isCancelled) {
-                                emitToolFinished(round, toolCall, result)
-                            }
+                            emitToolFinished(round, toolCall, result)
                         }
                         ToolOutcome(toolCall, result)
                     }
@@ -458,6 +456,9 @@ internal class AgentLoop(
         }
 
         emitToolFinished(round, roundCall, result)
+        if (roundCall.name == AgentSubagentToolCatalog.TOOL_NAME) {
+            runController.throwIfCancelled()
+        }
         return ToolOutcome(roundCall, result)
     }
 

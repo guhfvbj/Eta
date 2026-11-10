@@ -142,7 +142,7 @@ internal fun ToolActivityRow(
                 if (live != null) liveJson = live
                 val liveStatus = SubagentActivitySnapshot.decode(liveJson)?.status
                 val messageDone = snapshot.status != SubagentActivitySnapshot.STATUS_RUNNING
-                if (messageDone && liveStatus != null &&
+                if (messageDone && liveJson != null &&
                     liveStatus != SubagentActivitySnapshot.STATUS_RUNNING
                 ) {
                     return@LaunchedEffect

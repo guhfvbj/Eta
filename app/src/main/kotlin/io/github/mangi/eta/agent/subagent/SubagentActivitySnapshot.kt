@@ -49,9 +49,25 @@ internal data class SubagentActivitySnapshot(
     val toolStepCount: Int
         get() = steps.count { it.kind == SubagentStepSnapshot.KIND_TOOL }
 
-    fun encode(): String = json.encodeToString(this)
+    fun encode(): String {
+        val full = json.encodeToString(this)
+        if (full.length <= MAX_ENCODED_SNAPSHOT_CHARS) return full
+        val trimmedSteps = steps.map { step ->
+            if (step.detail.length <= 400) step else step.copy(detail = step.detail.take(400) + "…")
+        }
+        val compact = json.encodeToString(copy(steps = trimmedSteps, prompt = prompt.take(2_000)))
+        if (compact.length <= MAX_ENCODED_SNAPSHOT_CHARS) return compact
+        return json.encodeToString(
+            copy(
+                prompt = prompt.take(1_000),
+                steps = trimmedSteps.takeLast(24),
+                output = output.take(8_000),
+            ),
+        )
+    }
 
     companion object {
+        private const val MAX_ENCODED_SNAPSHOT_CHARS = 48_000
         const val STATUS_RUNNING = "running"
         const val STATUS_COMPLETED = "completed"
         const val STATUS_FAILED = "failed"

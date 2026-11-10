@@ -1,9 +1,18 @@
 # 本地分叉状态（给后续会话看的交接文档）
 
-> 最后更新：2026-11-09（3.3.14 移除 Default 思考档位与按模型记忆思考强度）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
+> 最后更新：2026-11-10（3.3.15 修复子智能体长任务后台误取消、快照截断、UTF-8 跨块编辑与文件工具耗时）。只写实测结论；不确定的地方标「待核实」。下列 10 月工作区信息为历史记录，当前线以本次追加为准。
 > 目的：任何会话接手前先读这一页，避免把「本地自研」当成上游行为，或把「上游已有」重复实现。
 
-## 当前交付线（2026-11-09，3.3.14）
+## 当前交付线（2026-11-10，3.3.15）
+
+- 分支 `oo0520-version`，版本 `3.3.15` / `2026111001`；桌面名 Eta、包名 `io.github.mangi.eta.oo0520`，沿用原发布证书。
+- 修复 UI 脱离（Activity 后台回收或返回退出触发 `viewModelScope` 取消）时 `AgentRuntimeClient.run` 在 `InterruptedException` 分支向 `AgentRuntimeService` 发送 `MSG_CANCEL` 误杀后台运行中的长任务与子智能体的问题；UI 会话仅在显式调用 `cancelRun` 时取消后台运行。
+- 修复 `AgentRuntimeWire` 对 `SubagentProgress.snapshotJson` 及 `ToolFinished.command`（`subagent`）按 `MAX_DRAIN_CONTENT_CHARS`（16,000 字）拼接截断后缀导致 JSON 损坏、恢复后子智能体步骤与输出丢失的问题；在 `SubagentActivitySnapshot.encode()` 内保证序列化结果始终为合法且不超过 48,000 字符的 JSON。
+- 修复并行子智能体完成或取消时的事件竞争与检查点落盘：`AgentRuntimeRunExecutor.archivedEvents` 改为线程安全列表，`AgentRunCheckpointRecorder` 同步化；取消或异常路径同样向父循环返回带最新快照的 `ToolResult` 并记录 `ToolFinished`，避免恢复后退回「正在启动…」。
+- 修复 `AgentPendingResultRecovery` 将 `"已停止"` 恢复为 `SystemNoticeCode.RuntimeFailed`（显示「运行失败：已停止」）的问题，对齐为 `SystemNoticeCode.Stopped`；`recoverRuntimeRuns` 对账时纳入全部本地观察中的并发 `runConversationIds`。
+- 修复 Android `CharsetDecoderICU` 在 `FileToolTextReader` 分块解码末尾不完整多字节 UTF-8 字符时预吞前导字节导致 `bytesConsumed` 偏大，进而令大文件 `edit_file` / `grep_files` 报 `NOT_UTF8_TEXT` 的问题；优化 `ShellProcessSupervisor` 进程组清理优先走 `pgrep -s "$$"`，消除单次 Shell 文件操作约 310ms 的 `/proc` 轮询开销；修复 `DiagnosticsAutoExport` 导出失败后每 60 秒无限重排唤醒闹钟的问题。
+
+## 3.3.14 交付记录（2026-11-09）
 
 - 分支 `oo0520-version`，版本 `3.3.14` / `2026110902`；桌面名 Eta、包名 `io.github.mangi.eta.oo0520`，沿用原发布证书。
 - 移除 `Default` 可选思考配置：`ModelReasoningCapabilities.selectableEfforts` 不再向界面与工具暴露 `Default`，仅展示实际档位（及可关闭模型的 `Off`）。

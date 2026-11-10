@@ -75,7 +75,7 @@ internal class AgentRuntimeRunExecutor(
         request: AgentRuntimeWire.RunRequest,
     ): Outcome {
         val runController = session.controller
-        val archivedEvents = mutableListOf<AgentEvent>()
+        val archivedEvents = java.util.Collections.synchronizedList(mutableListOf<AgentEvent>())
         var entrySurfaceGuard: EntrySurfaceGuard? = null
         var toolExecutor: AutoCloseable? = null
         var toolsBinding: AgentRunController.ResourceBinding? = null

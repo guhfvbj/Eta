@@ -28,6 +28,15 @@ internal class FileToolTextReader(private val backend: FileToolBackend) {
         }
         if (bytes.isEmpty() && offset < stat.sizeBytes) throw FileToolException("FILE_CHANGED", "文件在读取期间已变化")
         output.flip()
-        return FileToolTextChunk(output.toString(), input.position(), eof && input.position() == bytes.size)
+        val text = output.toString()
+        val consumedBytes = if (eof && input.position() == bytes.size) {
+            bytes.size
+        } else {
+            text.toByteArray(Charsets.UTF_8).size
+        }
+        if (bytes.isNotEmpty() && consumedBytes == 0) {
+            throw FileToolException("READ_LIMIT_TOO_SMALL", "字节上限不足以读取一个完整字符，请使用至少 4 字节")
+        }
+        return FileToolTextChunk(text, consumedBytes, eof && consumedBytes == bytes.size)
     }
 }

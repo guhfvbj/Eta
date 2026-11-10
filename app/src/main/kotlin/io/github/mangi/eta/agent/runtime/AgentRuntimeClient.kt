@@ -89,10 +89,13 @@ internal class AgentRuntimeClient(
             return resultRef.get()?.let(AgentRuntimeWire::runResultFromBundle) ?: AgentRuntimeWire.RunResult("", false, "", "Agent Runtime 未返回结果")
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
-            runCatching {
-                val cancelMessage = Message.obtain(null, AgentRuntimeWire.MSG_CANCEL)
-                cancelMessage.data = AgentRuntimeWire.ackBundle(request.runId)
-                serviceMessenger.send(cancelMessage)
+            // UI 会话的协程取消来自界面销毁/切后台（用户主动停止走显式 cancelRun），不能误杀后台仍在跑的会话。
+            if (request.handoff?.source != AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE) {
+                runCatching {
+                    val cancelMessage = Message.obtain(null, AgentRuntimeWire.MSG_CANCEL)
+                    cancelMessage.data = AgentRuntimeWire.ackBundle(request.runId)
+                    serviceMessenger.send(cancelMessage)
+                }
             }
             return AgentRuntimeWire.RunResult(request.runId, false, "", "Agent Runtime 等待被中断", contextSnapshotRef = request.runId)
         } catch (throwable: Throwable) {
