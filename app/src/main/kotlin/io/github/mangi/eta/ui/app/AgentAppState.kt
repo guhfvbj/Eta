@@ -2949,7 +2949,7 @@ internal class AgentAppState(
         }
         updateRunTrace(runId) { messages ->
             runMessageProjector.finishContextCompaction(runId,
-                runMessageProjector.finalizeRun(runId, messages),
+                runMessageProjector.finalizeRun(runId, messages, trimTrailingWhitespace = result.ok),
                 if (result.ok) "上下文压缩完成" else result.error ?: "上下文压缩已停止")
         }
         if (result.contextSnapshotRef.isBlank()) {

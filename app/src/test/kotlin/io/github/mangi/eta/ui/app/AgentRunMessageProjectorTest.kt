@@ -72,7 +72,7 @@ class AgentRunMessageProjectorTest {
     }
 
     @Test
-    fun applyResultFillsSingleBlockKeepsMultiBlockAndReplacesWithNotice() {
+    fun applyResultFillsSingleBlockKeepsMultiBlockAndSeparatesFailureNotice() {
         val projector = AgentRunMessageProjector { 1_000L }
         val single = projector.appendTextDelta("run", 1, 0, "流式半截", emptyList())
         assertEquals("完整回答", AgentRunMessageProjector.applyResult("run", single, "完整回答", null)
@@ -83,12 +83,111 @@ class AgentRunMessageProjectorTest {
             .filterIsInstance<AgentMessageUi>().map { it.content })
 
         val failed = AgentRunMessageProjector.applyResult("run", single, "", SystemNoticeCode.RuntimeFailed, "错误")
-        val notice = failed.single() as SystemNoticeMessageUi
-        assertEquals(single.single().id, notice.id)
+        val kept = failed.first() as AgentMessageUi
+        assertEquals(single.single().id, kept.id)
+        assertEquals("流式半截", kept.content)
+        assertFalse(kept.isStreaming)
+        assertTrue(kept.renderMarkdown)
+        val notice = failed.last() as SystemNoticeMessageUi
+        assertEquals("failure-run", notice.id)
+        assertEquals(SystemNoticeCode.RuntimeFailed, notice.code)
         assertEquals("错误", notice.detail)
+
+        val blank = listOf(AgentMessageUi(id = "assistant-run-blank-1-0", content = "", isStreaming = true))
+        val blankFailed = AgentRunMessageProjector.applyResult(
+            "run-blank", blank, "", SystemNoticeCode.RuntimeFailed, "错误",
+        )
+        val blankNotice = blankFailed.single() as SystemNoticeMessageUi
+        assertEquals("assistant-run-blank-1-0", blankNotice.id)
 
         val empty = AgentRunMessageProjector.applyResult("other", emptyList(), "回答", null)
         assertEquals("assistant-other-1", empty.single().id)
+    }
+
+    @Test
+    fun failurePreservesEveryTextBlockAndCompletedToolAndIsIdempotent() {
+        val first = AgentMessageUi(
+            id = "assistant-failure-run-1-0", content = "第一段  " + '\n', isStreaming = true,
+        )
+        val last = AgentMessageUi(
+            id = "assistant-failure-run-1-2", content = "第二段尚未完成  " + '\n', isStreaming = true,
+        )
+        val tool = ToolActivityMessageUi(
+            id = "failure-run-tool-1-read", toolName = "read_file",
+            status = ToolActivityStatusUi.Success, argumentsSummary = "{}", resultSummary = "已读取",
+        )
+        val other = AgentMessageUi(id = "assistant-other-1-0", content = "其他会话", isStreaming = true)
+        val messages = listOf(first, tool, last, other)
+        val failed = AgentRunMessageProjector.applyResult(
+            "failure-run", messages, "", SystemNoticeCode.RuntimeFailed, "上游限流",
+        )
+        assertEquals(first.content, (failed[0] as AgentMessageUi).content)
+        assertEquals(last.content, (failed[2] as AgentMessageUi).content)
+        assertFalse((failed[0] as AgentMessageUi).isStreaming)
+        assertFalse((failed[2] as AgentMessageUi).isStreaming)
+        assertEquals(tool, failed[1])
+        assertEquals(other, failed[3])
+        assertEquals("failure-failure-run", failed.last().id)
+        assertEquals(failed, AgentRunMessageProjector.applyResult(
+            "failure-run", failed, "", SystemNoticeCode.RuntimeFailed, "上游限流",
+        ))
+        val withStalePlaceholder = failed + AgentMessageUi(
+            id = "assistant-failure-run-2-0", content = "", isStreaming = true,
+        )
+        val reapplied = AgentRunMessageProjector.applyResult(
+            "failure-run", withStalePlaceholder, "", SystemNoticeCode.RuntimeFailed, "上游限流",
+        )
+        assertEquals(failed, reapplied)
+        assertEquals(reapplied.size, reapplied.map { it.id }.distinct().size)
+        assertEquals(listOf(other), AgentRunMessageProjector { 0L }.resetForReplay("failure-run", failed))
+    }
+
+    @Test
+    fun runFailureAndFinalizationDoNotTrimPartialMarkdown() {
+        val projector = AgentRunMessageProjector { 0L }
+        val text = "尚未完成的 Markdown  " + '\n'
+        val messages = listOf(AgentMessageUi(
+            id = "assistant-run-1-0", content = text, isStreaming = true,
+        ))
+        val failed = projector.applyEvent("run", AgentEvent.RunFailed("上游限流"), messages)
+        val finalized = projector.finalizeRun("run", failed, trimTrailingWhitespace = false)
+        val applied = AgentRunMessageProjector.applyResult(
+            "run", finalized, "", SystemNoticeCode.RuntimeFailed, "上游限流",
+        )
+        assertEquals(text, (applied.first() as AgentMessageUi).content)
+        assertFalse((applied.first() as AgentMessageUi).isStreaming)
+    }
+
+    @Test
+    fun failureWithoutTextDoesNotDuplicateNoticeOrReplaceEarlierRetryAttempt() {
+        val projector = AgentRunMessageProjector { 0L }
+        val old = projector.appendTextDelta("run", 1, 0, "首次尝试的部分正文", emptyList())
+        val retrying = projector.scheduleModelRetry(
+            "run", AgentEvent.ModelRetryScheduled(1, 1, 3, 2_000, "PROVIDER_STREAM_ERROR"), old,
+        )
+        val failed = AgentRunMessageProjector.applyResult(
+            "run", retrying, "", SystemNoticeCode.RuntimeFailed, "重试耗尽",
+        )
+        assertEquals(retrying, failed.take(2))
+        assertEquals("assistant-run-2-result", failed.last().id)
+        assertEquals(failed, AgentRunMessageProjector.applyResult(
+            "run", failed, "", SystemNoticeCode.RuntimeFailed, "重试耗尽",
+        ))
+        val emptyFailure = AgentRunMessageProjector.applyResult(
+            "empty", emptyList(), "", SystemNoticeCode.RuntimeFailed, "错误",
+        )
+        assertEquals(emptyFailure, AgentRunMessageProjector.applyResult(
+            "empty", emptyFailure, "", SystemNoticeCode.RuntimeFailed, "错误",
+        ))
+    }
+
+    @Test
+    fun successfulEmptyResponseStillUsesEmptyResultNotice() {
+        val messages = listOf(AgentMessageUi(id = "assistant-empty-1-0", content = "占位正文"))
+        val result = AgentRunMessageProjector.applyResult(
+            "empty", messages, "", SystemNoticeCode.EmptyResult,
+        )
+        assertEquals(SystemNoticeCode.EmptyResult, (result.single() as SystemNoticeMessageUi).code)
     }
 
     @Test

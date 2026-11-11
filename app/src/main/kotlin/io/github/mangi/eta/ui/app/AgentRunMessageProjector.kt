@@ -64,7 +64,7 @@ internal class AgentRunMessageProjector(
             )
         }
         is AgentEvent.ModelRetryScheduled -> scheduleModelRetry(runId, event, messages)
-        is AgentEvent.RunFailed -> failRunningTools(event.reason, finalizeText(runId, finalizeThinking(runId, messages)))
+        is AgentEvent.RunFailed -> failRunningTools(event.reason, finalizeText(runId, finalizeThinking(runId, messages), trimTrailingWhitespace = false))
         is AgentEvent.AssistantReceived -> if (event.reasoningContent.isBlank()) messages else {
             ensureCompletedThinking(runId, event.round, event.reasoningContent, messages)
         }
@@ -135,7 +135,9 @@ internal class AgentRunMessageProjector(
                 is ThinkingMessageUi -> message.id.startsWith("$runId-thinking-")
                 is ToolActivityMessageUi -> message.id.startsWith("$runId-tool-")
                 is SystemNoticeMessageUi ->
-                    isAssistantMessageForRun(message.id, runId) || message.id == "interrupted-$runId"
+                    isAssistantMessageForRun(message.id, runId) ||
+                        message.id == "interrupted-$runId" ||
+                        message.id == failureNoticeId(runId)
                 is UserMessageUi -> message.id in replaySupplementIds
                 else -> false
             }
@@ -303,8 +305,12 @@ internal class AgentRunMessageProjector(
         }
 
     /** 终态不依赖各块结束事件全部到齐；缺少工具结果时只能标为未知，不能推断执行成功。 */
-    fun finalizeRun(runId: String, messages: List<AgentChatMessageUi>): List<AgentChatMessageUi> =
-        finalizeText(runId, finalizeThinking(runId, messages)).map { message ->
+    fun finalizeRun(
+        runId: String,
+        messages: List<AgentChatMessageUi>,
+        trimTrailingWhitespace: Boolean = true,
+    ): List<AgentChatMessageUi> =
+        finalizeText(runId, finalizeThinking(runId, messages), trimTrailingWhitespace).map { message ->
             if (
                 message is ToolActivityMessageUi &&
                 message.id.startsWith("$runId-tool-") &&
@@ -350,11 +356,12 @@ internal class AgentRunMessageProjector(
     fun finalizeText(
         runId: String,
         messages: List<AgentChatMessageUi>,
+        trimTrailingWhitespace: Boolean = true,
     ): List<AgentChatMessageUi> =
         messages.map { message ->
             if (message is AgentMessageUi && isAssistantMessageForRun(message.id, runId)) {
                 message.copy(
-                    content = message.content.trimEnd(),
+                    content = if (trimTrailingWhitespace) message.content.trimEnd() else message.content,
                     isStreaming = false,
                     renderMarkdown = true,
                 )
@@ -685,8 +692,43 @@ internal class AgentRunMessageProjector(
             return "assistant-$runId-$round-result"
         }
 
+        /** 失败提示独立于助手正文命名，避免被当成可回填的回答目标。 */
+        fun failureNoticeId(runId: String): String = "failure-$runId"
+
         /**
-         * 用终态补全最后一条回答：notice 为 null 时写入正文，否则替换为系统提示。
+         * 失败终态：已收到的正文保留为非流式正文，错误另起一条提示；没有正文时
+         * 才沿用旧的占位提示。提示 id 固定按 run 派生，重复应用不会叠加。
+         */
+        fun applyFailureNotice(
+            runId: String,
+            messages: List<AgentChatMessageUi>,
+            targetIndex: Int,
+            code: SystemNoticeCode,
+            detail: String?,
+        ): List<AgentChatMessageUi> {
+            val target = messages.getOrNull(targetIndex)
+            val keepTarget = target is AgentMessageUi && target.content.isNotBlank()
+            val noticeId = if (keepTarget || messages.any { it.id == failureNoticeId(runId) }) {
+                failureNoticeId(runId)
+            } else {
+                target?.id ?: resultFallbackId(runId, messages)
+            }
+            val notice = SystemNoticeMessageUi(noticeId, code, detail)
+            val updated = messages.mapIndexedNotNull { index, message ->
+                when {
+                    index == targetIndex && !keepTarget && message.id != noticeId -> null
+                    message.id == noticeId -> notice
+                    message is AgentMessageUi && isAssistantMessageForRun(message.id, runId) ->
+                        message.copy(isStreaming = false, renderMarkdown = true)
+                    else -> message
+                }
+            }
+            return if (updated.any { it.id == noticeId }) updated else updated + notice
+        }
+
+        /**
+         * 用终态补全最后一条回答：notice 为 null 时写入正文；失败且已有正文时
+         * 保留正文并另加提示，空正文失败仍替换为提示。
          * 同一轮已有多个文本块时，流式内容已完整，终态正文只在当前块为空时补写。
          */
         fun applyResult(
@@ -696,7 +738,10 @@ internal class AgentRunMessageProjector(
             notice: SystemNoticeCode?,
             detail: String? = null,
         ): List<AgentChatMessageUi> {
-            val targetIndex = resultTargetIndex(runId, messages)
+            val targetIndex = resultTargetIndex(runId, messages, includeNotices = notice != null)
+            if (notice == SystemNoticeCode.RuntimeFailed || notice == SystemNoticeCode.Stopped) {
+                return applyFailureNotice(runId, messages, targetIndex, notice, detail)
+            }
             if (targetIndex < 0) {
                 val id = resultFallbackId(runId, messages)
                 return messages + if (notice == null) {
@@ -705,8 +750,9 @@ internal class AgentRunMessageProjector(
                     SystemNoticeMessageUi(id, notice, detail)
                 }
             }
-            val target = messages[targetIndex] as AgentMessageUi
+            val target = messages[targetIndex]
             val replacement = if (notice != null) SystemNoticeMessageUi(target.id, notice, detail) else {
+                target as AgentMessageUi
                 val round = target.id.assistantRound(runId)
                 val sameRoundBlocks = round?.let {
                     messages.count { message -> message is AgentMessageUi && message.id.assistantRound(runId) == it }

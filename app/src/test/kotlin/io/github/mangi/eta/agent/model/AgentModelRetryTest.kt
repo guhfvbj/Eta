@@ -113,6 +113,119 @@ class AgentModelRetryTest {
         assertEquals(80, usage.usage.outputTokens)
     }
 
+    @Test
+    fun messageOnlyRateLimitIsRetriedWithinBudgetAndRecovers() {
+        // Responses response.failed 只给 error.message，没有结构错误码。
+        val rateLimit = AgentModelFailure.stream(
+            JSONObject().put("message", "Upstream rate limit exceeded, please retry later"),
+            "模型接口 Responses 请求失败：Upstream rate limit exceeded, please retry later",
+        )
+        assertTrue(rateLimit.retryable)
+
+        val delays = mutableListOf<Long>()
+        val retry = AgentModelRetry { _, delay -> delays += delay }
+        var calls = 0
+        val recovered = complete(retry, provider { _, _ ->
+            if (calls++ == 0) throw rateLimit
+            response()
+        })
+        assertEquals(2, recovered.round)
+        assertEquals(listOf(2_000L), delays)
+
+        delays.clear()
+        calls = 0
+        val exhausted = assertThrows(AgentModelFailure::class.java) {
+            complete(retry, provider { _, _ ->
+                calls++
+                throw rateLimit
+            })
+        }
+        assertEquals(4, calls)
+        assertEquals(listOf(2_000L, 4_000L, 8_000L), delays)
+        assertFalse(exhausted.retryable)
+    }
+
+    @Test
+    fun structuredSignalsOutrankRateLimitText() {
+        assertTrue(AgentModelFailure.stream(
+            JSONObject().put("type", "rate_limit_exceeded").put("message", "slow down"),
+            "限流",
+        ).retryable)
+        assertTrue(AgentModelFailure.stream(
+            JSONObject().put("status", "429").put("message", "slow down"),
+            "限流",
+        ).retryable)
+        // 只有泛化信号时才允许按文案兜底。
+        assertTrue(AgentModelFailure.stream(
+            JSONObject().put("type", "error")
+                .put("message", "Upstream rate limit exceeded, please retry later"),
+            "限流",
+        ).retryable)
+        assertTrue(AgentModelFailure.stream(
+            JSONObject().put("code", JSONObject.NULL).put("type", JSONObject.NULL)
+                .put("message", "Upstream rate limit exceeded, please retry later"),
+            "限流",
+        ).retryable)
+        // 未知错误不能因为文案里出现 retry later 就重试。
+        assertFalse(AgentModelFailure.stream(
+            JSONObject().put("message", "Internal error, please retry later"),
+            "未知错误",
+        ).retryable)
+        assertFalse(AgentModelFailure.stream(
+            JSONObject().put("code", "some_new_error")
+                .put("message", "Upstream rate limit exceeded, please retry later"),
+            "未知错误",
+        ).retryable)
+    }
+
+    @Test
+    fun authenticationBillingQuotaAndContextFailuresStayUnretryable() {
+        val rateLimitText = "Upstream rate limit exceeded, please retry later"
+        assertFalse(AgentModelFailure.stream(
+            JSONObject().put("type", "authentication_error").put("message", rateLimitText),
+            "认证失败",
+        ).retryable)
+        assertFalse(AgentModelFailure.stream(
+            JSONObject().put("status", "UNAUTHENTICATED").put("message", rateLimitText),
+            "认证失败",
+        ).retryable)
+        for (code in listOf("insufficient_quota", "quota_exceeded", "billing_error", "usage_limit_reached")) {
+            assertFalse(AgentModelFailure.stream(
+                JSONObject().put("code", code).put("message", rateLimitText),
+                "额度受限",
+            ).retryable)
+        }
+        assertFalse(AgentModelFailure.stream(
+            JSONObject().put("message", "Billing issue: rate limit exceeded"),
+            "计费失败",
+        ).retryable)
+        val overflow = AgentModelFailure.stream(
+            JSONObject().put("code", "context_length_exceeded").put("message", rateLimitText),
+            "上下文超限",
+        )
+        assertEquals(AgentModelFailure.CONTEXT_OVERFLOW, overflow.code)
+        assertFalse(overflow.retryable)
+    }
+
+    @Test
+    fun hostedToolStartBlocksMessageOnlyRateLimitRetry() {
+        val rateLimit = AgentModelFailure.stream(
+            JSONObject().put("message", "Upstream rate limit exceeded, please retry later"),
+            "模型接口 Responses 请求失败：Upstream rate limit exceeded, please retry later",
+        )
+        var calls = 0
+        val noRetry = AgentModelRetry { _, _ -> fail("不应重试") }
+        val thrown = assertThrows(AgentModelFailure::class.java) {
+            complete(noRetry, provider { _, emit ->
+                emit(ProviderEvent.HostedToolStarted("call-1", "web_search"))
+                calls++
+                throw rateLimit
+            })
+        }
+        assertEquals(1, calls)
+        assertFalse(thrown.retryable)
+    }
+
     private fun complete(
         retry: AgentModelRetry,
         provider: AgentProviderClient,

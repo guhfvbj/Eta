@@ -92,6 +92,62 @@ class AgentConversationStoreTest {
     }
 
     @Test
+    fun failedPartialReplyAndSeparateNoticeSurviveColdReloadWithoutEnteringHistory() = runBlocking {
+        val partial = AgentMessageUi(
+            id = "assistant-partial-1-0", content = "已经收到的正文", isStreaming = true,
+        )
+        val messages = AgentRunMessageProjector.applyResult(
+            "partial", listOf(partial), "", SystemNoticeCode.RuntimeFailed, "上游限流",
+        )
+        val state = AgentChatHomeUiState(
+            messages = messages, input = "", isStreaming = false, thinkingEnabled = false,
+            appliedRuntimeRunIds = listOf("partial"),
+        )
+        AgentConversationStore.save(
+            context, "conversation", mapOf("conversation" to state),
+            mapOf("conversation" to "失败保留测试"), mapOf("conversation" to 1L),
+        )
+        EtaDatabase.closeForTests()
+        val restored = AgentConversationStore.load(context).conversationsById.getValue("conversation")
+        val kept = restored.messages.first() as AgentMessageUi
+        assertEquals(partial.id, kept.id)
+        assertEquals(partial.content, kept.content)
+        assertFalse(kept.isStreaming)
+        val notice = restored.messages.last() as SystemNoticeMessageUi
+        assertEquals("failure-partial", notice.id)
+        assertEquals(SystemNoticeCode.RuntimeFailed, notice.code)
+        assertTrue(restored.history.isEmpty())
+        assertTrue(restored.journal.isEmpty())
+        assertEquals(listOf("partial"), restored.appliedRuntimeRunIds)
+        assertTrue(AgentRunMessageProjector { 0L }.resetForReplay("partial", restored.messages).isEmpty())
+    }
+
+    @Test
+    fun legacyFallbackKeepsSuccessfulMessagesButSkipsMarkedFailedAndRetryRuns() = runBlocking {
+        val successful = AgentMessageUi(id = "assistant-good-1-0", content = "旧的完整回答")
+        val partial = AgentMessageUi(id = "assistant-bad-1-0", content = "失败尝试的正文")
+        val failure = AgentRunMessageProjector.applyResult(
+            "bad", listOf(successful, partial), "", SystemNoticeCode.RuntimeFailed, "限流",
+        )
+        val retry = listOf(successful, partial, SystemNoticeMessageUi(
+            id = "assistant-bad-retry-1", code = SystemNoticeCode.ModelRetry,
+        ))
+        for ((index, messages) in listOf(failure, retry).withIndex()) {
+            val id = "legacy-$index"
+            val state = AgentChatHomeUiState(
+                messages = messages, input = "", isStreaming = false, thinkingEnabled = false,
+            )
+            AgentConversationStore.save(
+                context, id, mapOf(id to state), mapOf(id to "旧会话"), mapOf(id to 1L),
+            )
+            EtaDatabase.closeForTests()
+            val restored = AgentConversationStore.load(context).conversationsById.getValue(id)
+            assertEquals(listOf(successful.content), restored.history.map { it.content })
+            assertTrue(restored.messages.filterIsInstance<AgentMessageUi>().any { it.content == partial.content })
+        }
+    }
+
+    @Test
     fun saveAndLoadPreservesConversations() {
         val conversation = AgentChatHomeUiState(
             messages = listOf(

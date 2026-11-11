@@ -63,49 +63,61 @@ internal object AgentPendingResultRecovery {
                 )), false)
         }
 
-        val messagesWithResult = stateWithSupplements.messages
+        val baseMessages = stateWithSupplements.messages
             .filterNot { it is SystemNoticeMessageUi && it.id == interruptedNoticeId(runId) }
-            .toMutableList()
-            .also { messages ->
-            val assistantIndex = AgentRunMessageProjector.resultTargetIndex(runId, messages, includeNotices = true)
-            val resultId = AgentRunMessageProjector.resultFallbackId(runId, messages)
-            val targetRound = (messages.getOrNull(assistantIndex) as? AgentMessageUi)
-                ?.id
-                ?.assistantRound(runId)
-            val sameRoundBlocks = targetRound?.let { round ->
-                messages.count { message ->
-                    message is AgentMessageUi && message.id.assistantRound(runId) == round
-                }
-            } ?: 0
-            val completedMessage: AgentChatMessageUi = when {
-                content != null -> AgentMessageUi(
+        val assistantIndex = AgentRunMessageProjector.resultTargetIndex(runId, baseMessages, includeNotices = true)
+        val resultId = AgentRunMessageProjector.resultFallbackId(runId, baseMessages)
+        val targetRound = (baseMessages.getOrNull(assistantIndex) as? AgentMessageUi)
+            ?.id
+            ?.assistantRound(runId)
+        val sameRoundBlocks = targetRound?.let { round ->
+            baseMessages.count { message ->
+                message is AgentMessageUi && message.id.assistantRound(runId) == round
+            }
+        } ?: 0
+        val messagesWithResult = when {
+            content != null -> {
+                val completedMessage = AgentMessageUi(
                     id = resultId,
                     content = if (sameRoundBlocks > 1) {
-                        (messages[assistantIndex] as AgentMessageUi).content.ifBlank { content }
+                        (baseMessages[assistantIndex] as AgentMessageUi).content.ifBlank { content }
                     } else {
                         content
                     },
                     isStreaming = false,
                     renderMarkdown = true,
                 )
-                result.ok -> SystemNoticeMessageUi(
-                    id = resultId,
-                    code = SystemNoticeCode.EmptyResult,
-                )
-                else -> SystemNoticeMessageUi(
-                    id = resultId,
-                    code = if (result.error == STOPPED_ERROR || result.error == SYNTHETIC_STOPPED) {
-                        SystemNoticeCode.Stopped
-                    } else {
-                        SystemNoticeCode.RuntimeFailed
-                    },
+                if (assistantIndex >= 0) {
+                    baseMessages.mapIndexed { index, message ->
+                        if (index == assistantIndex) completedMessage.copyWithId(message.id) else message
+                    }
+                } else {
+                    baseMessages + completedMessage
+                }
+            }
+            result.ok -> {
+                val completedMessage = SystemNoticeMessageUi(id = resultId, code = SystemNoticeCode.EmptyResult)
+                if (assistantIndex >= 0) {
+                    baseMessages.mapIndexed { index, message ->
+                        if (index == assistantIndex) completedMessage.copyWithId(message.id) else message
+                    }
+                } else {
+                    baseMessages + completedMessage
+                }
+            }
+            else -> {
+                val code = if (result.error == STOPPED_ERROR || result.error == SYNTHETIC_STOPPED) {
+                    SystemNoticeCode.Stopped
+                } else {
+                    SystemNoticeCode.RuntimeFailed
+                }
+                AgentRunMessageProjector.applyFailureNotice(
+                    runId = runId,
+                    messages = baseMessages,
+                    targetIndex = assistantIndex,
+                    code = code,
                     detail = result.error,
                 )
-            }
-            if (assistantIndex >= 0) {
-                messages[assistantIndex] = completedMessage.copyWithId(messages[assistantIndex].id)
-            } else {
-                messages += completedMessage
             }
         }
         return Outcome(

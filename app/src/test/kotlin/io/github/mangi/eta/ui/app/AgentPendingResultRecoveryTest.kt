@@ -43,6 +43,47 @@ class AgentPendingResultRecoveryTest {
     }
 
     @Test
+    fun failedOutboxRecoveryKeepsPartialTextAndTranscriptSeparateAndAppliesOnce() {
+        val first = AgentMessageUi(
+            id = "assistant-partial-1-0", content = "已输出的第一段", isStreaming = true,
+        )
+        val last = AgentMessageUi(
+            id = "assistant-partial-1-2", content = "尚未结束  " + '\n', isStreaming = true,
+        )
+        val completedTool = ToolActivityMessageUi(
+            id = "partial-tool-1-read", toolName = "read_file",
+            status = ToolActivityStatusUi.Success, argumentsSummary = "{}", resultSummary = "已读取",
+        )
+        val transcript = listOf(
+            AgentModelClient.ConversationMessage(role = "assistant", content = "完整完成的上一轮"),
+        )
+        val initial = AgentChatUiState(
+            messages = listOf(first, completedTool, last), input = "",
+            isStreaming = true, thinkingEnabled = false,
+        )
+        for (error in listOf("上游限流", "已停止", "eta_status:stopped")) {
+            val result = AgentRuntimeWire.RunResult(
+                runId = "partial", ok = false, content = "", error = error, transcript = transcript,
+            )
+            val recovered = AgentPendingResultRecovery.apply(initial, "partial", result, supplements = emptyList())
+            assertFalse(recovered.alreadyApplied)
+            assertFalse(recovered.state.isStreaming)
+            assertEquals(first.content, (recovered.state.messages[0] as AgentMessageUi).content)
+            assertEquals(last.content, (recovered.state.messages[2] as AgentMessageUi).content)
+            assertFalse((recovered.state.messages[0] as AgentMessageUi).isStreaming)
+            assertFalse((recovered.state.messages[2] as AgentMessageUi).isStreaming)
+            assertEquals(completedTool, recovered.state.messages[1])
+            val notice = recovered.state.messages.last() as SystemNoticeMessageUi
+            assertEquals("failure-partial", notice.id)
+            assertEquals(if (error == "上游限流") SystemNoticeCode.RuntimeFailed else SystemNoticeCode.Stopped, notice.code)
+            assertEquals(transcript, recovered.state.history)
+            val again = AgentPendingResultRecovery.apply(recovered.state, "partial", result, supplements = emptyList())
+            assertTrue(again.alreadyApplied)
+            assertEquals(recovered.state, again.state)
+        }
+    }
+
+    @Test
     fun recoveryFinalizesLatestRoundAndAppendsTranscriptExactlyOnce() {
         val transcript = listOf(
             AgentModelClient.ConversationMessage(role = "assistant", content = "最终结果")

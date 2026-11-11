@@ -544,15 +544,31 @@ internal object AgentConversationStore {
             }
         }.getOrDefault(emptyList())
 
-    private fun List<ConversationMessageEntity>.toLegacyHistory(): List<AgentModelClient.ConversationMessage> =
-        mapNotNull { message ->
+    private fun List<ConversationMessageEntity>.toLegacyHistory(): List<AgentModelClient.ConversationMessage> {
+        // 旧数据兜底只能重建可信的普通消息。失败/重试保留下来的 UI 正文不是成功 transcript；
+        // 只排除有明确标记的 run，不改变其他旧会话从消息行恢复历史的行为。
+        val incompleteRuns = mapNotNull { message ->
+            if (message.type != TYPE_SYSTEM_NOTICE) return@mapNotNull null
+            when {
+                message.id.startsWith("failure-") && message.content in setOf(
+                    SystemNoticeCode.RuntimeFailed.wireValue, SystemNoticeCode.Stopped.wireValue,
+                ) -> message.id.removePrefix("failure-")
+                message.content == SystemNoticeCode.ModelRetry.wireValue &&
+                    message.id.startsWith("assistant-") && "-retry-" in message.id ->
+                    message.id.removePrefix("assistant-").substringBeforeLast("-retry-")
+                else -> null
+            }
+        }.filter(String::isNotBlank).toSet()
+        return mapNotNull { message ->
             when (message.type) {
                 TYPE_USER -> AgentModelClient.ConversationMessage(
                     role = "user",
                     content = message.content,
                 )
                 TYPE_ASSISTANT -> message.content
-                    .takeIf { it.isNotBlank() }
+                    .takeIf { content -> content.isNotBlank() && incompleteRuns.none { runId ->
+                        message.id.startsWith("assistant-$runId-") || message.id == "assistant-$runId"
+                    } }
                     ?.let { content ->
                         AgentModelClient.ConversationMessage(
                             role = "assistant",
@@ -562,6 +578,7 @@ internal object AgentConversationStore {
                 else -> null
             }
         }
+    }
 
     /**
      * 分支归属落库：会话行已经写完（persist 落地）之后调用。

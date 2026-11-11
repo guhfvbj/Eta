@@ -33,6 +33,21 @@ internal class AgentModelFailure(
 
         private val invalidApiKeyReasons = setOf("API_KEY_INVALID", "API_KEY_EXPIRED")
 
+        /**
+         * 部分兼容端点只在 error.message 里写限流文案，没有 code/type/status。
+         * 仅作错误解析边界的兜底，匹配不到就按不可重试处理。
+         * 不收 "retry later" 一类通用文案，避免把未知错误当成临时限流。
+         */
+        private val transientMessageHints = listOf(
+            "rate limit", "rate_limit", "too many requests",
+        )
+
+        /** 不携带具体原因的结构化信号；只有这些信号时仍允许按文案兜底。 */
+        private val genericErrorSignals = setOf(
+            "null", "error", "api_error", "failed", "unknown", "unknown_error", "unexpected_error",
+            "provider_error", "upstream_error", "internal_error", "server_error",
+        )
+
         fun http(status: Int, body: String, includeParameterDetails: Boolean = false): AgentModelFailure {
             val error = try {
                 JSONObject(body).optJSONObject("error")
@@ -75,10 +90,16 @@ internal class AgentModelFailure(
                 error.optString("status"),
                 error.optJSONObject("metadata")?.optString("error_type").orEmpty(),
             )
+            val permanent = isPermanent(error, error.optString("message"))
+            val structuredTransient = codes.any { it in transientCodes || it.toIntOrNull() in transientStatus }
+            // 只在缺少有效结构化信号（或只有泛化信号）时按文案兜底，避免覆盖认证、参数等明确分类。
+            val hasStructuredSignal = codes.any { it.isNotBlank() && it.lowercase() !in genericErrorSignals }
+            val messageFallback = !permanent && !hasStructuredSignal && messageLooksTransient(
+                error.optString("message"), message,
+            )
             return AgentModelFailure(
                 code = "PROVIDER_STREAM_ERROR",
-                retryable = !isPermanent(error, error.optString("message")) &&
-                    codes.any { it in transientCodes || it.toIntOrNull() in transientStatus },
+                retryable = !permanent && (structuredTransient || messageFallback),
                 message = message,
             )
         }
@@ -125,5 +146,11 @@ internal class AgentModelFailure(
             error?.optString("code") in permanentCodes || error?.optString("type") in permanentCodes ||
                 listOf("insufficient_quota", "quota exceeded", "out of budget", "billing", "usage limit")
                     .any { body.contains(it, ignoreCase = true) }
+
+        private fun messageLooksTransient(vararg messages: String): Boolean =
+            messages.any { message ->
+                val text = message.lowercase()
+                transientMessageHints.any { hint -> hint in text }
+            }
     }
 }
