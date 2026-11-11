@@ -204,7 +204,7 @@ Eta 不对浏览器请求执行额外的 URL、DNS、IP、主机数量、请求�
 
 终端按用途分为三个环境：
 
-- `android` 是原生 Android Shell，负责系统、应用、日志、Magisk 和设备文件操作。Root 会话会自动发现 Magisk、KernelSU 或 APatch 提供的 BusyBox，并以 standalone `ash` 补齐不在系统 PATH 中的 applet。交互式控制台例外：BusyBox 1.35–1.36 的 ash 在提示符处收到窗口尺寸变化信号会另起一行新提示符，命中这些版本时控制台改用系统 `sh`，并把 BusyBox applet 链接（`/data/local/tmp/eta/.busybox`）追加到 PATH 末尾。
+- `android` 是原生 Android Shell，负责系统、应用、日志、Magisk 和设备文件操作。Root 会话会自动发现 Magisk、KernelSU 或 APatch 提供的 BusyBox，并以 standalone `ash` 补齐不在系统 PATH 中的 applet。交互式控制台例外：BusyBox 1.35–1.36 的 ash 在提示符处收到窗口尺寸变化信号会另起一行新提示符，命中这些版本时控制台改用系统 `sh`，并把 BusyBox applet 链接（`/data/adb/eta/workspace/.busybox`）追加到 PATH 末尾。
 - Linux 用户态在 Alpine musl 与 Debian Trixie glibc 中二选一，选择持久化后由模型工具、块式终端和控制台共同使用；模型可见协议统一为 `environment=linux`。基础 rootfs 与基础工具分步安装，基础工具集不包含 Python 或 Node.js；Python profile 只安装 uv，再由 uv 全局安装最新正式版 Python，Node.js profile 安装当前可用的最新正式版。SSH 使用发行版最新稳定包，APK 分析在两个发行版中均可单独安装。Kimi Code profile 依赖 Node.js profile，通过 npm 安装最新正式版 `@moonshot-ai/kimi-code`（国内镜像优先），两个发行版均可使用；安装就绪后可在环境页一键启动 Kimi Web——以守护任务常驻 `kimi web`，从日志解析带 token 的本机地址并拉起系统浏览器。「哪些 profile 已装」以安装器写入的完成标记为准，App 侧只读标记；「现在能干什么」的能力检测另走一条路：在实际 Linux 环境里跑一次 `command -v` 批量采样，chroot 下以 root、proot 下以 proot 身份执行，判据与真正执行命令时的 PATH 完全一致。不在非 Root 进程里 stat rootfs 内容——rootfs 由 root 解包，其中的符号链接对 App 进程连 lstat 都会被拒（SELinux MLS 类别不匹配），`/usr/local/bin/node` 这类绝对链接的目标在宿主侧也不存在；环境不可用时回退到只判真实文件与目录的静态判定。Eta 通过独立 mount namespace + Root chroot 运行所选环境；Linux 默认在映射到 Eta Android 工作目录的 `/workspace` 中执行，共享存储位于 `/sdcard`。它不是安全沙箱，也不会取代 Android 环境。
 - 中国大陆网络下，Alpine APK 只尝试阿里云与官方 CDN；Debian 主仓库只尝试清华 TUNA 与 Debian 官方源，安全更新固定使用 Debian 官方源。成功的源会写回 rootfs 供后续 profile 和工具安装复用；APT 同时关闭易触发连接重置的 HTTP pipelining 并启用重试。GitHub 制品只尝试一个固定 HTTPS 下载入口，再回到官方地址，所有 rootfs/制品仍必须通过固定大小和 SHA-256 校验。
 

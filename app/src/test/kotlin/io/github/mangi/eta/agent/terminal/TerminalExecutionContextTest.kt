@@ -48,7 +48,7 @@ class TerminalExecutionContextTest {
         assertEquals(workspace, context.androidWorkspacePath)
         assertEquals(LinuxExecutionBackend.CHROOT, context.linuxBackend)
         assertEquals("root", context.linuxIdentity)
-        assertEquals("/data/local/tmp/eta", context.linuxHostWorkspacePath)
+        assertEquals("/data/adb/eta/workspace", context.linuxHostWorkspacePath)
     }
 
     @Test fun legacyProotKeepsTheExistingPrivateWorkspace() {

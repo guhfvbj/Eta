@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Report
 import androidx.compose.material.icons.rounded.Warning
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
@@ -39,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.input.pointer.pointerInput
@@ -193,6 +195,7 @@ private fun MarkdownText(
     modifier: Modifier = Modifier,
     softWrap: Boolean = true,
 ) {
+    val pathOpenScope = rememberCoroutineScope()
     val reveal = scope.reveal
     val highlighted = scope.highlight?.let { block.speechHighlighted(it, MiuixTheme.colorScheme.primary.copy(alpha = 0.18f)) }
     val text = highlighted ?: block.text
@@ -243,7 +246,7 @@ private fun MarkdownText(
                 val layout = textLayout ?: return@detectTapGestures
                 val offset = layout.getOffsetForPosition(position)
                 pathRanges.firstOrNull { (range, _) -> offset in range }?.let { (_, path) ->
-                    MarkdownPathLinks.open(context, path)
+                    pathOpenScope.launch { MarkdownPathLinks.open(context, path) }
                 }
             }
         }

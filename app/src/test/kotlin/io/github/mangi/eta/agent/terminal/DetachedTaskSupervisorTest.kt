@@ -261,4 +261,19 @@ class DetachedTaskSupervisorTest {
         override fun warn(message: String) = Unit
         override fun error(message: String, throwable: Throwable?) = Unit
     }
+    @Test
+    fun newLinuxDaemonRecordsKeepTheirExplicitHostWorkspace() {
+        val supervisor = newSupervisor()
+        val task = DetachedTask(
+            id = "dm_new", pid = 1234, token = "token", command = "true", cwd = "/workspace",
+            identity = "root", environment = TerminalEnvironment.DEBIAN,
+            logPath = "/workspace/daemon/dm_new.log", startedAt = 0,
+            hostWorkspace = TerminalRuntime.ROOT_WORKSPACE_PATH,
+        )
+        assertEquals("/data/adb/eta/workspace/daemon/dm_new.log", supervisor.hostDaemonPath(task, task.logPath))
+        assertEquals("/data/adb/eta/workspace/daemon", DetachedTaskSupervisor.DEFAULT_DAEMON_DIR)
+        // Old null-host records stay attached to the old location, never to a new empty tree.
+        assertEquals("/data/local/tmp/eta/daemon/dm_new.log", supervisor.hostDaemonPath(task.copy(hostWorkspace = null), task.logPath))
+    }
+
 }

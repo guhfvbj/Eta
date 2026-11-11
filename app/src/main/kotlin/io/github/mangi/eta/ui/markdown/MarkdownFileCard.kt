@@ -592,8 +592,12 @@ private const val MT_EDIT_ACTIVITY = ".OpenTextActivity"
  */
 private fun openInMtEditor(context: Context, path: String): Boolean {
     // 只认真实存在的绝对路径：相对路径会被 am 当成 file://<host>，MT 那边报「Is a directory」。
-    if (!path.startsWith("/") || !File(path).isFile) return false
+    if (!path.startsWith("/")) return false
+    val protectedWorkspace = io.github.mangi.eta.ui.app.isProtectedWorkspacePath(path)
+    if (!protectedWorkspace && !File(path).isFile) return false
     val packages = listOf(MT_PACKAGE_CANARY, MT_PACKAGE_STABLE).filter { isInstalled(context, it) }
+    // Root files must be opened by an editor with Root; never weaken the host parent mode.
+    if (protectedWorkspace) return packages.any { rootAmStartEditor(it, path) }
     // 没装 MT：按约定交给系统的「打开方式」。
     if (packages.isEmpty()) return openWithSystemChooser(context, path)
 

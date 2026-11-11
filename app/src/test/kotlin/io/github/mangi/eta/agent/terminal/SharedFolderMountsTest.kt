@@ -132,7 +132,7 @@ class SharedFolderMountsTest {
         assertTrue(payload.contains("\$eta_rootfs/workspace/mounts/dl\" bind"))
         assertTrue(payload.contains("\$eta_rootfs/workspace/mounts/app\" bind"))
         // 共享挂载必须在 workspace bind 之后执行，目标路径才落在已挂载的 workspace 上。
-        val workspaceBind = payload.indexOf("eta_mount_required /data/local/tmp/eta")
+        val workspaceBind = payload.indexOf("eta_mount_required /data/adb/eta/workspace")
         val sharedMount = payload.indexOf("workspace/mounts/dl")
         assertTrue(workspaceBind >= 0 && sharedMount > workspaceBind)
     }
@@ -146,4 +146,13 @@ class SharedFolderMountsTest {
         )
         assertFalse(payload.contains("workspace/mounts"))
     }
+    @Test
+    fun protectedHostWorkspaceAndRestoredMountsAreRejected() {
+        listOf("/data/adb", "/data/adb/eta/workspace", "/data/adb/eta/workspace/projects", "/data/local/tmp/eta").forEach {
+            assertEquals(SharedFolderMounts.SourceError.FORBIDDEN_ROOT, SharedFolderMounts.validateSource(it, emptyList()))
+        }
+        assertTrue(SharedFolderMounts.decode("""[{"name":"private","source":"/data/adb/eta/workspace"}]""").isEmpty())
+        assertEquals("/data/adb/eta/workspace/mounts", SharedFolderMounts.ANDROID_MOUNTS_ROOT)
+    }
+
 }

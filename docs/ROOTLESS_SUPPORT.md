@@ -32,7 +32,7 @@ Android 17 对访问局域网增加运行时权限。连接局域网模型服务
 
 新建普通工作区位于 `filesDir/terminal-user/workspace`，PRoot 环境位于 `filesDir/terminal-user/proot/<发行版>`，避开旧版可能由 Root 创建的 `filesDir/terminal` 父目录。已存在于旧布局的普通工作区与 PRoot 环境继续使用原位置，不自动迁移或修改属主；目录选择不依赖 Root 授权。工作区在 Linux 中仍映射为 `/workspace`。Android 文件与命令使用同一个私有工作区；已确认 Root 授权时默认直接使用 Root，否则使用 App UID，显式 `identity=user` 可选择普通身份。工作区页面支持通过 Root 文件后端列举和导出 Root 生成的文件。不额外设置文件路径白名单，其他路径是否可读写由系统权限决定。每次运行固定工作目录和已选 Linux 环境，获得或失去 Root 不自动切换工作区。文件选择器返回的 URI 如果无法作为 App UID 可读路径使用，会先有界导入工作区再引用；不能直接导入的目录会给出明确说明。公共目录共享按需申请“所有文件访问”，拒绝后仍可使用私有工作区与导入导出。
 
-PRoot 与 chroot 使用独立 rootfs。旧 chroot、`/data/local/tmp/eta` 与特权共享挂载不迁移；运行会话和任务固定创建时的后端与路径。Root 状态变化不会删除环境、更改属主或自动切换已有会话。PRoot 内的模拟 root 没有 Android Root 权限。
+PRoot 与 chroot 使用独立 rootfs。PRoot 不迁移已有 chroot 和特权共享挂载；Root 工作区已改到 `/data/adb/eta/workspace`，旧 `/data/local/tmp/eta` 内容保留，不自动搬动；运行会话和任务固定创建时的后端与路径。Root 状态变化不会删除环境、更改属主或自动切换已有会话。PRoot 内的模拟 root 没有 Android Root 权限。
 
 免 Root 安装器复用固定 rootfs 的下载校验，在临时目录流式解包，处理归档路径、链接、取消与失败清理，运行检查成功后才写完成标记。基础工具、Python/uv、Node.js、SSH、APK 分析和 Kimi 通过所选后端执行安装与检查。
 

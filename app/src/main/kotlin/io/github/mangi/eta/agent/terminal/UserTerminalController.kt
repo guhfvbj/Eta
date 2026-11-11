@@ -25,7 +25,7 @@ internal class UserTerminalController(
 ) : AutoCloseable {
 
     private companion object {
-        const val DEFAULT_CWD = "/data/local/tmp/eta"
+        const val DEFAULT_CWD = TerminalRuntime.ROOT_WORKSPACE_PATH
         const val LINUX_DEFAULT_CWD = "/workspace"
         const val MAX_SESSIONS = 6
         const val STREAM_MAX_BYTES = 1024 * 1024

@@ -19,12 +19,12 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(EtaRobolectricTestRunner::class)
-@Config(application = Application::class)
+@Config(application = Application::class, sdk = [36])
 class WorkspaceFileStoreTest {
     @Test
     fun exportUsesThePrivilegedBackendForAnAppUnreadableArtifact() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
-        val bytes = ByteArray(70_000) { (it % 256).toByte() }
+        val bytes = ByteArray(700_000) { (it % 256).toByte() }
         var reads = 0
         val store = WorkspaceFileStore(context) { root ->
             object : FileToolBackend by LocalFileToolBackend(root) {
@@ -62,4 +62,50 @@ class WorkspaceFileStoreTest {
         assertEquals(listOf("saved.txt"), entries.map { it.path })
         assertEquals("saved", File(legacy, "saved.txt").readText())
     }
+    @Test
+    fun privilegedListingPaginatesWithoutDirectAppAccess() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val root = File(context.cacheDir, "privileged-list").apply { mkdirs() }
+        repeat(205) { File(root, "item-$it.txt").writeText("saved") }
+        File(root, "folder").mkdirs()
+        val store = WorkspaceFileStore(context, rootDirectory = root, directAccess = { false }) { LocalFileToolBackend(it) }
+        val entries = store.list("")
+        assertEquals(206, entries.size)
+        assertEquals("folder", entries.first().name)
+        assertTrue(entries.none { it.path.startsWith("/") })
+    }
+
+    @Test
+    fun privilegedBinaryCopyIsNotLimitedByTheTextPreviewBudget() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val root = File(context.cacheDir, "privileged-copy").apply { mkdirs() }
+        val bytes = ByteArray((WORKSPACE_PREVIEW_MAX_BYTES + 17).toInt()) { (it % 256).toByte() }
+        File(root, "large.apk").writeBytes(bytes)
+        val store = WorkspaceFileStore(context, rootDirectory = root, directAccess = { false }) { LocalFileToolBackend(it) }
+        val output = File(context.cacheDir, "shared_docs/large.apk")
+        assertEquals(bytes.size.toLong(), store.copyTo("large.apk", output))
+        assertArrayEquals(bytes, output.readBytes())
+        try {
+            store.readText("large.apk")
+            org.junit.Assert.fail("oversized text preview must fail")
+        } catch (expected: java.io.IOException) {
+            assertEquals("WORKSPACE_FILE_TOO_LARGE", expected.message)
+        }
+    }
+
+    @Test
+    fun privilegedTextPreviewAndTraversalChecksUseTheBackend() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val root = File(context.cacheDir, "privileged-text").apply { mkdirs() }
+        File(root, "note.txt").writeText("工作区迁移😀")
+        val store = WorkspaceFileStore(context, rootDirectory = root, directAccess = { false }) { LocalFileToolBackend(it) }
+        assertEquals("工作区迁移😀", store.readText("note.txt"))
+        try {
+            store.readText("../outside.txt")
+            org.junit.Assert.fail("traversal must fail")
+        } catch (expected: IllegalArgumentException) {
+            assertEquals("WORKSPACE_PATH_OUTSIDE_ROOT", expected.message)
+        }
+    }
+
 }

@@ -22,7 +22,7 @@ internal object SharedFolderMounts {
     const val PREFS_KEY = "linux_shared_mounts"
     const val MAX_MOUNTS = 16
     const val LINUX_MOUNTS_ROOT = "/workspace/mounts"
-    const val ANDROID_MOUNTS_ROOT = "/data/local/tmp/eta/mounts"
+    const val ANDROID_MOUNTS_ROOT = "${TerminalRuntime.ROOT_WORKSPACE_PATH}/mounts"
 
     private val NAME_PATTERN = Regex("[A-Za-z0-9._-]{1,48}")
 
@@ -36,7 +36,9 @@ internal object SharedFolderMounts {
         "/vendor",
         "/apex",
         "/product",
-        "/data/local/tmp/eta",
+        "/data/adb",
+        TerminalRuntime.ROOT_WORKSPACE_PATH,
+        TerminalRuntime.LEGACY_ROOT_WORKSPACE_PATH,
     )
 
     enum class SourceError {
@@ -132,6 +134,7 @@ internal object SharedFolderMounts {
             val name = item.optString("name").trim()
             val source = normalizeSourcePath(item.optString("source")) ?: continue
             if (!NAME_PATTERN.matches(name) || name == "." || name == "..") continue
+            if (validateSource(source, mounts) != null) continue
             if (mounts.any { it.name == name || it.sourcePath == source }) continue
             mounts += SharedFolderMount(name = name, sourcePath = source)
         }

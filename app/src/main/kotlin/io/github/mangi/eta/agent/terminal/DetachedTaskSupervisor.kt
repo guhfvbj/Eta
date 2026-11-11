@@ -33,7 +33,7 @@ internal class DetachedTaskSupervisor(
     private val releaseUserLease: (String) -> Unit = TerminalRuntime::releaseUserTask,
 ) {
     companion object {
-        const val DEFAULT_DAEMON_DIR = "/data/local/tmp/eta/daemon"
+        const val DEFAULT_DAEMON_DIR = "${TerminalRuntime.ROOT_WORKSPACE_PATH}/daemon"
         const val LINUX_DAEMON_DIR = "/workspace/daemon"
         const val MAX_TASKS = 8
         const val MAX_RETAINED_RECORDS = 32
@@ -122,6 +122,7 @@ internal class DetachedTaskSupervisor(
             environment = environment,
             logPath = "$wireDir/$id.log",
             startedAt = System.currentTimeMillis(),
+            hostWorkspace = File(daemonDir).parent,
             commandTask = commandTask,
             description = description,
             timeoutMs = timeoutMs,
@@ -517,7 +518,7 @@ internal class DetachedTaskSupervisor(
      */
     internal fun hostDaemonPath(task: DetachedTask, wirePath: String): String =
         if (task.environment.isLinux && wirePath.startsWith(LINUX_DAEMON_DIR)) {
-            (task.hostWorkspace?.let { "$it/daemon" } ?: DEFAULT_DAEMON_DIR) + wirePath.removePrefix(LINUX_DAEMON_DIR)
+            (task.hostWorkspace?.let { "$it/daemon" } ?: "${TerminalRuntime.LEGACY_ROOT_WORKSPACE_PATH}/daemon") + wirePath.removePrefix(LINUX_DAEMON_DIR)
         } else {
             wirePath
         }

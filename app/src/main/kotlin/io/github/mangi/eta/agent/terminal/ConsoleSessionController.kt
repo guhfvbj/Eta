@@ -20,7 +20,7 @@ internal class ConsoleSessionController(
 ) : AutoCloseable {
 
     private companion object {
-        const val DEFAULT_ANDROID_CWD = "/data/local/tmp/eta"
+        const val DEFAULT_ANDROID_CWD = TerminalRuntime.ROOT_WORKSPACE_PATH
         const val MAX_SESSIONS = 6
     }
 

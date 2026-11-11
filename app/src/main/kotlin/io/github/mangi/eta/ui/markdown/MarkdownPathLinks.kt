@@ -5,6 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import java.io.File
+import io.github.mangi.eta.ui.app.isProtectedWorkspacePath
+import io.github.mangi.eta.ui.app.stageProtectedWorkspaceFile
+import kotlinx.coroutines.CancellationException
 
 /**
  * 聊天里可点击的本地路径。
@@ -24,12 +27,20 @@ internal object MarkdownPathLinks {
         val path = raw.trim()
         if (path.length < 3 || !path.startsWith("/")) return null
         if (path.any { it.isWhitespace() || it == '\n' }) return null
+        // Root checks existence and canonical containment when the user opens the link.
+        if (isProtectedWorkspacePath(path) && File(path).extension.isNotBlank()) return path
         val file = runCatching { File(path) }.getOrNull() ?: return null
         return path.takeIf { runCatching { file.isFile && file.exists() }.getOrDefault(false) }
     }
 
-    fun open(context: Context, path: String): Boolean {
-        val file = runCatching { File(path) }.getOrNull() ?: return false
+    suspend fun open(context: Context, path: String): Boolean {
+        val file = try {
+            if (isProtectedWorkspacePath(path)) stageProtectedWorkspaceFile(context, path) else File(path)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return false
+        }
         if (!file.isFile) return false
         val mime = mimeOf(file.extension.lowercase())
         if (file.extension.lowercase() in setOf("apk", "zip") && openWithMt(context, file, mime)) return true

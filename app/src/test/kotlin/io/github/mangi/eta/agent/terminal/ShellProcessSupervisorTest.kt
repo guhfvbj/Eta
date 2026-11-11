@@ -50,7 +50,7 @@ class ShellProcessSupervisorTest {
         assertTrue(payload.contains("unshare -m --propagation private"))
         assertTrue(payload.contains("mount -t proc"))
         assertTrue(payload.contains("eta_mount_required /data/local/tmp"))
-        assertTrue(payload.contains("eta_mount_required /data/local/tmp/eta"))
+        assertTrue(payload.contains("eta_mount_required /data/adb/eta/workspace"))
         assertTrue(payload.contains("eta_rootfs/workspace"))
         assertTrue(payload.contains("chroot"))
         assertTrue(payload.contains(AlpineEnvironmentPaths.READY_MARKER))
@@ -109,12 +109,19 @@ class ShellProcessSupervisorTest {
         val payload = supervisor.buildAndroidPayload("root", command = null, interactivePty = true)
 
         assertTrue(payload.contains("*' v1.35.'*|*' v1.36.'*)"))
-        assertTrue(payload.contains("--install -s '/data/local/tmp/eta/.busybox'"))
-        assertTrue(payload.contains("export PATH=\"${'$'}PATH:\"'/data/local/tmp/eta/.busybox'; sh;;"))
+        assertTrue(payload.contains("--install -s '/data/adb/eta/workspace/.busybox'"))
+        assertTrue(payload.contains("export PATH=\"${'$'}PATH:\"'/data/adb/eta/workspace/.busybox'; sh;;"))
         assertTrue(payload.contains("*) export ASH_STANDALONE=1; \"${'$'}eta_busybox\" ash ;;"))
-        val syntax = ProcessBuilder("sh", "-n", "-c", payload).redirectErrorStream(true).start()
-        val output = syntax.inputStream.bufferedReader().readText()
-        assertEquals(output, 0, syntax.waitFor())
+        // A script file avoids Windows/MSYS rewriting the nested quotes in a -c argument.
+        val script = File.createTempFile("eta-shell-syntax-", ".sh")
+        try {
+            script.writeText(payload)
+            val syntax = ProcessBuilder("sh", "-n", script.absolutePath).redirectErrorStream(true).start()
+            val output = syntax.inputStream.bufferedReader().readText()
+            assertEquals(output, 0, syntax.waitFor())
+        } finally {
+            script.delete()
+        }
     }
 
     @Test
@@ -124,4 +131,16 @@ class ShellProcessSupervisorTest {
         assertFalse(payload.contains("v1.36."))
         assertTrue(payload.contains("ash -c 'id'"))
     }
+    @Test
+    fun newRootShellsAndChrootUseTheProtectedPersistentWorkspace() {
+        val supervisor = ShellProcessSupervisor()
+        val android = supervisor.buildAndroidPayload("root", "pwd")
+        assertTrue(android.contains("/data/adb/eta/workspace"))
+        assertFalse(android.contains("/data/local/tmp/eta"))
+        assertFalse(supervisor.buildAndroidPayload("user", "pwd").contains("/data/adb"))
+        val linux = supervisor.buildLinuxPayload("/data/user/0/app/files/terminal/debian/rootfs", "pwd")
+        assertTrue(linux.contains("eta_mount_required /data/adb/eta/workspace"))
+        assertFalse(linux.contains("/data/local/tmp/eta"))
+    }
+
 }

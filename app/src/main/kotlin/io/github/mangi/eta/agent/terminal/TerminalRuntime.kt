@@ -13,7 +13,9 @@ internal enum class LinuxExecutionBackend(val wireName: String) {
 
 /** App 进程的终端运行条件；读取能力不会触发 su 授权。 */
 internal object TerminalRuntime {
-    const val ROOT_WORKSPACE_PATH = "/data/local/tmp/eta"
+    const val ROOT_WORKSPACE_PATH = "/data/adb/eta/workspace"
+    // Existing files and detached processes remain at their original location.
+    const val LEGACY_ROOT_WORKSPACE_PATH = "/data/local/tmp/eta"
     const val LINUX_WORKSPACE_PATH = "/workspace"
 
     @Volatile private var appContext: Context? = null
