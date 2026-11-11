@@ -1,5 +1,7 @@
 package io.github.mangi.eta.ui
 
+import io.github.mangi.eta.ui.screens.models.rememberFeatureSettings
+import androidx.compose.material.icons.rounded.AutoAwesome
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -271,6 +273,25 @@ private fun SettingsPageContent(
         "${provider.name} / ${selectedModel?.displayName ?: stringResource(R.string.settings_model_not_selected)}"
     } ?: stringResource(R.string.settings_not_configured)
 
+    val titleSettings = rememberFeatureSettings().value
+    val titleModelId = titleSettings.optString("title_custom_model_id")
+    val titleProviderId = titleSettings.optString("title_custom_provider_id")
+    val titleProvider = providers.firstOrNull { provider ->
+        if (titleProviderId.isNotBlank()) provider.id == titleProviderId
+        else provider.models.any { it.id == titleModelId }
+    }
+    val titleModel = titleProvider?.models?.firstOrNull { it.id == titleModelId }
+    val titleModelSummary = when {
+        !titleSettings.optBoolean("title_enabled", true) -> stringResource(R.string.status_disabled)
+        titleSettings.optBoolean("title_custom") -> titleModel?.let { "${titleProvider.name} · ${it.displayName}" }
+            ?: stringResource(R.string.settings_model_not_selected)
+        else -> stringResource(R.string.title_model_follow_current)
+    }.let { summary ->
+        if (titleSettings.optBoolean("title_enabled", true) && titleSettings.optBoolean("title_follow")) {
+            "$summary · ${stringResource(R.string.model_feature_title_follow)}"
+        } else summary
+    }
+
     // prefs 绑定到 XposedService：service 到达时切换到 RemotePreferences（跨进程提交到
     // LSPosed 数据库）；未就绪时保持 null，UI 禁止修改。
     var prefs by remember { mutableStateOf(Prefs.remotePreferencesForUi(EtaApp.serviceInstance)) }
@@ -376,6 +397,13 @@ private fun SettingsPageContent(
                         onClick = { onNavigate(AppRoute.ModelProviders) },
                     )
                     CouiIconDivider()
+                    CouiPreference(
+                        title = stringResource(R.string.title_model_title),
+                        summary = titleModelSummary,
+                        icon = { CouiSettingsIcon(Icons.Rounded.AutoAwesome, SettingsIconColors.Orange) },
+                        onClick = { onNavigate(AppRoute.TitleModel) },
+                    )
+                    CouiIconDivider()
                     SwitchPref(
                         context = context,
                         prefs = agentPrefs,
@@ -405,6 +433,12 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.Memory) },
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
+                        title = stringResource(R.string.automation_title),
+                        icon = { CouiSettingsIcon(Icons.Rounded.FilterAlt, SettingsIconColors.Blue) },
+                        onClick = { onNavigate(AppRoute.Tasks) },
                     )
                     CouiIconDivider()
                     CouiPreference(
@@ -726,6 +760,15 @@ private fun SettingsPageContent(
                     }
                 }
 
+                Group(title = stringResource(R.string.prompt_studio_section)) {
+                    CouiPreference(
+                        title = stringResource(R.string.prompt_studio_title),
+                        summary = stringResource(R.string.prompt_studio_section_summary),
+                        icon = { CouiSettingsIcon(Icons.Rounded.Psychology, SettingsIconColors.Blue) },
+                        onClick = { onNavigate(AppRoute.PromptStudio) },
+                    )
+                }
+
                 Group(title = stringResource(R.string.ui_about_bed172)) {
                     CouiPreference(
                         title = stringResource(R.string.ui_about_version_title),
@@ -794,6 +837,12 @@ private fun SettingsPageContent(
                             },
                             onClick = { onNavigate(AppRoute.ModelProviders) },
                         )
+                        ArrowPreference(
+                            title = stringResource(R.string.title_model_title),
+                            summary = titleModelSummary,
+                            startAction = { SettingsIcon(Icons.Rounded.AutoAwesome, tint = SettingsIconColors.Orange) },
+                            onClick = { onNavigate(AppRoute.TitleModel) },
+                        )
                         SwitchPref(
                             context = context,
                             prefs = agentPrefs,
@@ -825,6 +874,11 @@ private fun SettingsPageContent(
                                 )
                             },
                             onClick = { onNavigate(AppRoute.Memory) },
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.automation_title),
+                            startAction = { SettingsIcon(Icons.Rounded.FilterAlt, tint = SettingsIconColors.Blue) },
+                            onClick = { onNavigate(AppRoute.Tasks) },
                         )
                         ArrowPreference(
                             title = "Subagent",
@@ -1184,6 +1238,18 @@ private fun SettingsPageContent(
                                 enabled = prefs != null && !accessibilityProtectionPending,
                             )
                         }
+                    }
+                }
+
+                item(key = "section_prompt_studio") {
+                    SmallTitle(stringResource(R.string.prompt_studio_section))
+                    SettingsGroupCard {
+                        ArrowPreference(
+                            title = stringResource(R.string.prompt_studio_title),
+                            summary = stringResource(R.string.prompt_studio_section_summary),
+                            startAction = { SettingsIcon(Icons.Rounded.Psychology, tint = SettingsIconColors.Blue) },
+                            onClick = { onNavigate(AppRoute.PromptStudio) },
+                        )
                     }
                 }
 

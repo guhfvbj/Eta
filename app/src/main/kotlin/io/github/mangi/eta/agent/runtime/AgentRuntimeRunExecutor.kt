@@ -205,7 +205,22 @@ internal class AgentRuntimeRunExecutor(
                 screenshotExcludedPackages = {
                     entrySurfaceGuard?.consumeScreenshotExcludedPackages().orEmpty()
                 },
-                beforeToolExecution = { toolName ->
+                beforeToolExecution = beforeTool@{ toolName ->
+                    if (io.github.mangi.eta.agent.automation.AgentTaskScheduler.isRegistered(request.runId)) {
+                        if (toolName in io.github.mangi.eta.agent.automation.AgentTaskTools.names) {
+                            return@beforeTool ToolExecutionDecision.Reject(
+                                "AUTOMATION_TASK_TOOL_UNAVAILABLE",
+                                "自动任务不能创建或修改其他自动任务；本次调用未执行",
+                            )
+                        }
+                        if (AgentToolRequirements.requiresAccessibility(toolName) ||
+                            AgentOverlayVisibilityPolicy.isForegroundOperationTool(toolName) || toolName == "browser_use") {
+                            return@beforeTool ToolExecutionDecision.Reject(
+                                "AUTOMATION_FOREGROUND_UNAVAILABLE",
+                                "自动任务没有前台入口，无法操作主屏；请从前台发起",
+                            )
+                        }
+                    }
                     val requiresAccessibility =
                         AgentToolRequirements.requiresAccessibility(toolName)
                     if (

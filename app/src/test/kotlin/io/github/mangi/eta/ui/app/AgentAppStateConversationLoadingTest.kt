@@ -87,6 +87,46 @@ class AgentAppStateConversationLoadingTest {
     }
 
     @Test
+    fun editingFirstMessagePreservesLegacyManualTitleWithoutFeatureFlag() {
+        seed("first" to conversation("first"))
+        val state = AgentAppState(context, scope)
+
+        state.beginMessageEdit("first-0")
+        state.sendCurrentMessage("Updated first question")
+
+        assertEquals("first", state.conversationPaneState.conversations.single().title)
+    }
+
+    @Test
+    fun editingFirstMessageRefreshesTheOriginalAutomaticTitle() {
+        val original = conversation("first")
+        runBlocking {
+            AgentConversationStore.save(context, "first", mapOf("first" to original),
+                mapOf("first" to "first-message-0-end"), mapOf("first" to 1L))
+        }
+        val state = AgentAppState(context, scope)
+
+        state.beginMessageEdit("first-0")
+        state.sendCurrentMessage("Updated first question")
+
+        assertEquals("Updated first question", state.conversationPaneState.conversations.single().title)
+    }
+
+    @Test
+    fun editingFirstMessageResetsAGeneratedTitleForTheNextSuccessfulRun() {
+        seed("first" to conversation("first"))
+        val features = context.getSharedPreferences("eta_agent_features", Context.MODE_PRIVATE)
+        features.edit().putBoolean("generated_title_first", true).commit()
+        val state = AgentAppState(context, scope)
+
+        state.beginMessageEdit("first-0")
+        state.sendCurrentMessage("Updated first question")
+
+        assertEquals("Updated first question", state.conversationPaneState.conversations.single().title)
+        assertFalse(features.contains("generated_title_first"))
+    }
+
+    @Test
     fun deletingAnUnloadedConversationKeepsOtherStoredConversationsIntact() {
         seed("first" to conversation("first"), "second" to conversation("second"), "third" to conversation("third"))
         val state = AgentAppState(context, scope)

@@ -132,9 +132,26 @@ internal object RuntimeConfigRepository {
         return buildRuntimeConfig(provider, model)
     }
 
+    fun withEntryToolPermissions(
+        config: AgentModelClient.ModelConfig,
+    ): AgentModelClient.ModelConfig = config.copy(
+        terminalTools = Prefs.isEnabled(Prefs.Keys.AGENT_TERMINAL_TOOLS),
+        browserTools = Prefs.isEnabled(Prefs.Keys.AGENT_BROWSER_TOOLS),
+        deviceDirectTools = Prefs.isEnabled(Prefs.Keys.AGENT_DEVICE_DIRECT_TOOLS),
+        deviceSensitiveReadTools = Prefs.isEnabled(Prefs.Keys.AGENT_DEVICE_SENSITIVE_READ_TOOLS),
+        deviceSensitiveActionTools = Prefs.isEnabled(Prefs.Keys.AGENT_DEVICE_SENSITIVE_ACTION_TOOLS),
+        subagentTools = Prefs.isEnabled(Prefs.Keys.AGENT_SUBAGENT_ENABLED),
+    )
+
     /** 会话绑定的模型仍可用时使用它，否则回落到默认模型。 */
-    suspend fun runtimeConfigFor(modelId: String?): AgentModelClient.ModelConfig? {
+    suspend fun runtimeConfigFor(modelId: String?, providerId: String? = null): AgentModelClient.ModelConfig? {
         ProviderRepository.ensureBuiltInsMerged()
+        if (!providerId.isNullOrBlank()) {
+            val provider = ProviderRepository.providerById(providerId)?.takeIf { it.isEnabled }
+            val model = provider?.models?.firstOrNull { it.id == modelId && it.isEnabled }
+            if (provider != null && model != null) return buildRuntimeConfig(provider, model)
+            return currentRuntimeConfig()
+        }
         ProviderRepository.allProviders().enabledModel(modelId)?.let { (provider, model) ->
             return buildRuntimeConfig(provider, model)
         }

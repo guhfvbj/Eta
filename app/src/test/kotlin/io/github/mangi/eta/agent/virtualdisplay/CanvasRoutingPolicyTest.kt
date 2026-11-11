@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.virtualdisplay
 
+import io.github.mangi.eta.BuildConfig
 import android.view.Display
 import io.github.mangi.eta.agent.virtualdisplay.CanvasRoutingPolicy.CanvasTarget
 import io.github.mangi.eta.agent.virtualdisplay.CanvasRoutingPolicy.RequestedDisplay
@@ -38,7 +39,7 @@ class CanvasRoutingPolicyTest {
     @Test
     fun systemUiAndEtaOwnPackageAlwaysStayOnMainDisplay() {
         listOf(
-            "io.github.mangi.eta",
+            BuildConfig.APPLICATION_ID,
             "com.android.systemui",
             "com.miui.home",
             "com.oppo.launcher",

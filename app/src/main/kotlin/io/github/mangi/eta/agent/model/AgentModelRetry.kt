@@ -22,12 +22,17 @@ internal class AgentModelRetry(
     ): Result {
         var round = initialRound
         var retries = 0
+        var snapshotTaken = false
         while (true) {
             controller.throwIfCancelled()
             onEvent(AgentEvent.RoundStarted(round, request.messages.length()))
             var hostedToolStarted = false
             var callbackFailed = false
             try {
+                if (!snapshotTaken) {
+                    snapshotTaken = true
+                    AgentRequestSnapshot.capture(request)
+                }
                 val response = provider.complete(request, controller) { event ->
                     if (event is ProviderEvent.HostedToolStarted) hostedToolStarted = true
                     try {

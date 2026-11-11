@@ -742,6 +742,87 @@ fun AgentAppRoot(
                     onImport = agentState::importBackup,
                 )
             }
+            entry<AppRoute.PromptStudio>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptStudioScreen(
+                    onBack = ::popRoute,
+                    onNavigate = { route -> pushRoute(route) },
+                )
+            }
+
+            entry<AppRoute.PromptEditor>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptEditorScreen(
+                    onBack = ::popRoute,
+                    onOpenNewPreset = { pushRoute(AppRoute.PromptPresetEditor(null)) },
+                    onManageGroups = { pushRoute(AppRoute.PromptToolGroups) },
+                )
+            }
+
+            entry<AppRoute.PromptVersions>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptVersionsScreen(onBack = ::popRoute)
+            }
+
+            entry<AppRoute.PromptTools>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptToolsScreen(
+                    onBack = ::popRoute,
+                    onManageGroups = { pushRoute(AppRoute.PromptToolGroups) },
+                )
+            }
+
+            entry<AppRoute.PromptPresets>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptPresetsScreen(
+                    onBack = ::popRoute,
+                    onEditPreset = { name -> pushRoute(AppRoute.PromptPresetEditor(name)) },
+                )
+            }
+
+            entry<AppRoute.PromptPresetEditor>(swipeDismiss = swipeDismiss) { route ->
+                io.github.mangi.eta.ui.screens.prompts.PromptEditorScreen(
+                    onBack = ::popRoute,
+                    presetMode = true,
+                    presetName = route.name,
+                    onManageGroups = { pushRoute(AppRoute.PromptToolGroups) },
+                )
+            }
+
+            entry<AppRoute.PromptSnapshots>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptSnapshotsScreen(
+                    onBack = ::popRoute,
+                    onOpen = { fileName -> pushRoute(AppRoute.PromptSnapshotDetail(fileName)) },
+                )
+            }
+
+            entry<AppRoute.PromptSnapshotDetail>(swipeDismiss = swipeDismiss) { route ->
+                io.github.mangi.eta.ui.screens.prompts.PromptSnapshotDetailScreen(
+                    fileName = route.fileName,
+                    onBack = ::popRoute,
+                )
+            }
+
+            entry<AppRoute.PromptEffective>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptEffectiveScreen(
+                    onBack = ::popRoute,
+                    onOpenSegment = { index -> pushRoute(AppRoute.PromptEffectiveItem(index)) },
+                )
+            }
+            entry<AppRoute.PromptEffectiveItem>(swipeDismiss = swipeDismiss) { route ->
+                io.github.mangi.eta.ui.screens.prompts.PromptEffectiveItemScreen(
+                    segment = route.segment,
+                    onBack = ::popRoute,
+                )
+            }
+            entry<AppRoute.PromptToolGroups>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptToolGroupsScreen(onBack = ::popRoute)
+            }
+            entry<AppRoute.PromptIntegrity>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptIntegrityScreen(onBack = ::popRoute)
+            }
+            entry<AppRoute.TitleModel>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.models.TitleModelSettingsScreen(::popRoute)
+            }
+            entry<AppRoute.Tasks>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.tasks.AgentTasksScreen(onBack = ::popRoute)
+            }
+
             entry<AppRoute.Memory>(swipeDismiss = swipeDismiss) {
                 LaunchedEffect(Unit) {
                     memory.refreshMemory()

@@ -60,7 +60,10 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         require(config.openAiEndpointMode == OpenAiEndpointMode.RESPONSES) {
             "当前 Provider 未配置为 Responses API"
         }
-        val body = buildRequestJson(config, request.messages, request.effectiveTools)
+        val body = buildRequestJson(config, request.messages, request.effectiveTools).also { body ->
+            request.outputLimit?.takeIf { config.authMode != io.github.mangi.eta.data.model.ProviderAuthModes.OPENAI_CHATGPT }
+                ?.let { body.put("max_output_tokens", it.coerceIn(1, 8192)) }
+        }
             .toString()
             .toRequestBody(JSON_MEDIA_TYPE)
         val headers = okhttp3.Headers.Builder()

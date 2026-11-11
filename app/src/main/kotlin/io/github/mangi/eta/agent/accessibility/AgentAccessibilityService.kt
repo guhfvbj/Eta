@@ -121,7 +121,20 @@ class AgentAccessibilityService : AccessibilityService() {
         signalWindowChanged()
     }
 
+    private var lastTriggerPackage: String = ""
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val packageName = event.packageName?.toString().orEmpty()
+            val eventWindow = windows.firstOrNull { it.id == event.windowId }
+            if (eventWindow?.displayId == android.view.Display.DEFAULT_DISPLAY &&
+                packageName.isNotBlank() && packageName != lastTriggerPackage) {
+                lastTriggerPackage = packageName
+                if (packageName != this.packageName) {
+                    io.github.mangi.eta.agent.automation.AgentTaskScheduler.publish(this, "app_foreground", "${event.eventTime}:$packageName", JSONObject().put("packageName", packageName))
+                }
+            }
+        }
         when (event?.eventType) {
             AccessibilityEvent.TYPE_WINDOWS_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {

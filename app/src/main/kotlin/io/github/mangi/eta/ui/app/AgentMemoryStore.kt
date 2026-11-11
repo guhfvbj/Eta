@@ -108,6 +108,9 @@ internal class AgentMemoryStore(
             runCatching { AgentMemoryRepository.replaceAll(target) }
                 .fold(
                     onSuccess = { snapshot ->
+                        io.github.mangi.eta.agent.automation.AgentTaskScheduler.publish(
+                            appContext, "memory_updated", snapshot.revision,
+                        )
                         withContext(Dispatchers.Main) {
                             memoryState = memoryState.copy(
                                 isSaving = false,

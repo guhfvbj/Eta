@@ -68,6 +68,13 @@ internal object AgentRuntimePolicy {
         )
     }
 
+    fun withoutOptionalThinking(config: AgentModelClient.ModelConfig): AgentModelClient.ModelConfig = config.copy(
+        thinkingEnabled = false, reasoningEffort = ReasoningEffort.OFF,
+        extraBodyJson = stripThinkingOverrides(config.extraBodyJson),
+        customBody = config.customBody.mapNotNull { body ->
+            if (body.key.isThinkingKey()) null else body.copy(value = body.value.stripThinkingOverrides())
+        },
+    )
     private fun SharedPreferences?.allowed(key: String): Boolean {
         if (this == null) return false
         val default = Prefs.Keys.BOOLEAN_DEFAULTS[key] ?: false

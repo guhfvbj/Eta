@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.virtualdisplay
 
+import io.github.mangi.eta.BuildConfig
 import android.view.Display
 import java.util.Locale
 
@@ -104,7 +105,7 @@ internal object CanvasRoutingPolicy {
         requested: RequestedDisplay = RequestedDisplay.AUTO,
         targetPackage: String? = null,
         foregroundPackageOnMainDisplay: String? = null,
-        ownPackage: String = "io.github.mangi.eta",
+        ownPackage: String = BuildConfig.APPLICATION_ID,
     ): CanvasTarget {
         if (!virtualDisplayEnabled || !backendAvailable) return CanvasTarget.MAIN_DISPLAY
         if (requested == RequestedDisplay.MAIN) return CanvasTarget.MAIN_DISPLAY

@@ -55,6 +55,12 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             .build()
 
         val requestJson = buildRequestJson(config, request.messages, request.effectiveTools).apply {
+            request.outputLimit?.let { limit ->
+                val field = if (config.providerSourceType == ProviderSourceTypes.OPENAI || config.baseUrl.contains("api.openai.com")) {
+                    "max_completion_tokens"
+                } else "max_tokens"
+                put(field, limit.coerceIn(1, 8192))
+            }
             if (!request.purpose.allowsTools) {
                 remove("tools")
                 remove("tool_choice")

@@ -1,5 +1,8 @@
 package io.github.mangi.eta
 
+import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.agent.automation.AgentTaskScheduler
+import io.github.mangi.eta.agent.model.AgentRequestSnapshot
 import io.github.mangi.eta.agent.voice.SpeechOssUpload
 import android.app.Application
 import android.content.ComponentCallbacks2
@@ -60,6 +63,12 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         PredictiveBackController.apply(applicationInfo, predictiveBackEnabled)
         AgentMemoryRepository.init(this)
         ProviderRepository.init(this)
+        runCatching { AgentRequestSnapshot.init(this) }
+        applicationScope.launch {
+            EtaDatabase.get(this@EtaApp).agentTaskDao().recoverInterrupted(System.currentTimeMillis())
+            AgentTaskScheduler.enqueueDue(this@EtaApp)
+            AgentTaskScheduler.refresh(this@EtaApp)
+        }
         McpServerRepository.init(this)
         XposedServiceHelper.registerListener(this)
         applicationScope.launch {
