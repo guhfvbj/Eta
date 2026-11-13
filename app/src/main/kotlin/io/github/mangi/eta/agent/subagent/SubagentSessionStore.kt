@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.subagent
 
 import io.github.mangi.eta.agent.model.AgentModelClient
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -16,7 +17,10 @@ internal object SubagentSessionStore {
         val profile: SubagentProfile,
         @Volatile var history: List<AgentModelClient.ConversationMessage> = emptyList(),
         val running: AtomicBoolean = AtomicBoolean(false),
-    )
+    ) {
+        // 与独立子上下文一起保留，resume 时复用，父 Agent 与其他 Subagent 不共享。
+        val openedMcpGroups: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
+    }
 
     private class ConversationBucket {
         val sequence = AtomicInteger(0)

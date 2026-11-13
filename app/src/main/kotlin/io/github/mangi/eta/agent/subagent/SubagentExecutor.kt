@@ -1,15 +1,20 @@
 package io.github.mangi.eta.agent.subagent
 
 import android.os.SystemClock
+import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
+import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentModelExecutionException
+import io.github.mangi.eta.agent.model.AgentProviderClient
+import io.github.mangi.eta.agent.model.ProviderClientFactory
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
+import io.github.mangi.eta.config.Prefs
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,11 +30,15 @@ internal class SubagentExecutor(
     private val baseToolExecutor: AgentModelClient.ToolExecutor,
     private val skillContext: SkillContext,
     private val memoryContext: AgentMemoryContext,
-    private val mcpTools: JSONArray,
+    private val mcpSnapshot: McpRunSnapshot,
+    private val mcpLoadingMode: String,
     private val executionContext: TerminalExecutionContext?,
     private val onProgress: (AgentEvent.SubagentProgress) -> Unit,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val providerFor: (AgentModelClient.ModelConfig) -> AgentProviderClient = ProviderClientFactory::getClient,
 ) {
+    private val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
+    private val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
     private val latestSnapshots = ConcurrentHashMap<String, String>()
 
     fun latestSnapshotJson(toolCallId: String): String? = latestSnapshots[toolCallId]
@@ -134,9 +143,15 @@ internal class SubagentExecutor(
 
         publishSnapshot(force = true)
 
+        val subagentMcpLoader = McpProgressiveLoader(
+            mcpSnapshot, entry.openedMcpGroups, mcpSearchEnabled, profile::isToolAllowed,
+        )
         val childToolExecutor = AgentModelClient.ToolExecutor { subCall ->
             childController.throwIfCancelled()
-            if (!profile.isToolAllowed(subCall.name)) {
+            // 导航工具由已授权的 MCP 组派生，不走 Profile 的普通工具白名单，也不触碰父 Agent 的加载状态。
+            if (progressiveMcp && subCall.name in McpProgressiveLoader.names) {
+                subagentMcpLoader.execute(subCall)
+            } else if (!profile.isToolAllowed(subCall.name)) {
                 AgentModelClient.ToolResult(
                     content = JSONObject()
                         .put("ok", false)
@@ -162,17 +177,23 @@ internal class SubagentExecutor(
             val response = AgentModelClient.complete(
                 config = subagentConfig,
                 prompt = prompt,
+                provider = providerFor(subagentConfig),
                 toolExecutor = childToolExecutor,
                 history = priorHistory,
                 runController = childController,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
-                additionalTools = profile.filterTools(mcpTools),
+                additionalTools = if (progressiveMcp) JSONArray() else {
+                    profile.filterTools(JSONArray().also(mcpSnapshot::appendModelTools))
+                },
                 executionContext = executionContext,
                 capabilitiesProvider = capabilitiesProvider,
                 sessionId = "$conversationKey-$subagentId",
                 operationId = "${toolCall.id}-$subagentId",
                 toolFilter = profile::filterTools,
+                mcpProjection = if (progressiveMcp) mcpSnapshot else null,
+                mcpSearchEnabled = mcpSearchEnabled,
+                openedMcpGroupsProvider = { entry.openedMcpGroups.toSet() },
                 onEvent = { childEvent ->
                     val force = tracker.onChildEvent(childEvent)
                     publishSnapshot(force = force)

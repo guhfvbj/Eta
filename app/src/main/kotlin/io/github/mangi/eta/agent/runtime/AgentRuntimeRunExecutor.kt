@@ -168,7 +168,6 @@ internal class AgentRuntimeRunExecutor(
                     McpRunSnapshot.EMPTY
                 }
             }
-            val fullMcpTools = JSONArray().also(mcpSnapshot::appendModelTools)
             val mcpLoadingMode = Prefs.mcpLoadingMode()
             val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
             val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
@@ -296,7 +295,8 @@ internal class AgentRuntimeRunExecutor(
                 baseToolExecutor = routingExecutor,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
-                mcpTools = fullMcpTools,
+                mcpSnapshot = mcpSnapshot,
+                mcpLoadingMode = mcpLoadingMode,
                 executionContext = executor.terminalExecutionContext,
                 onProgress = { progressEvent ->
                     acceptEvent(
@@ -308,7 +308,8 @@ internal class AgentRuntimeRunExecutor(
                     )
                 },
             )
-            val runTools = (if (progressiveMcp) JSONArray() else JSONArray(fullMcpTools.toString())).also { tools ->
+            val runTools = JSONArray().also { tools ->
+                if (!progressiveMcp) mcpSnapshot.appendModelTools(tools)
                 if (subagentAllowed()) AgentSubagentToolCatalog.appendSchemas(tools)
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
                 if (characterMemoryTools != null && memoryEnabled) {
