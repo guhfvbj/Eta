@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import org.json.JSONArray
 import org.json.JSONObject
@@ -10,6 +11,7 @@ internal class AgentContextCompactor(
     private val provider: AgentProviderClient,
     private val controller: AgentRunController,
     private val roleplay: Boolean = false,
+    private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
 ) {
     fun compact(
         messages: JSONArray,
@@ -66,6 +68,13 @@ internal class AgentContextCompactor(
         }
         if (result.toString().length >= messages.toString().length) {
             throw failure("CONTEXT_NO_REDUCTION", "摘要未能缩小上下文，原始上下文已保留。")
+        }
+        // Add metadata only after the existing reduction check. Recover it from the actual
+        // compacted prefix (including earlier summary markers), never from the retained tail.
+        val groups = AgentMcpContext.compactedGroupIds(durable, dynamicMcpGroupsProvider())
+        if (groups.isNotEmpty()) {
+            val boundary = result.getJSONObject(systemCount)
+            boundary.put("content", AgentMcpContext.appendMarker(boundary.optString("content"), groups))
         }
         return result
     }

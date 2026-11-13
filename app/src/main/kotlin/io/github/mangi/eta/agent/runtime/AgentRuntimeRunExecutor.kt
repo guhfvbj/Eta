@@ -18,6 +18,7 @@ import io.github.mangi.eta.agent.roleplay.CharacterMemoryTools
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import io.github.mangi.eta.agent.subagent.AgentSubagentToolCatalog
 import io.github.mangi.eta.agent.subagent.SubagentExecutor
+import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
 import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.mcp.McpToolExecutor
 import io.github.mangi.eta.agent.mcp.RoutingToolExecutor
@@ -38,6 +39,7 @@ import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -166,7 +168,12 @@ internal class AgentRuntimeRunExecutor(
                     McpRunSnapshot.EMPTY
                 }
             }
-            val mcpTools = JSONArray().also(mcpSnapshot::appendModelTools)
+            val fullMcpTools = JSONArray().also(mcpSnapshot::appendModelTools)
+            val mcpLoadingMode = Prefs.mcpLoadingMode()
+            val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
+            val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
+            val openedMcpGroups = ConcurrentHashMap.newKeySet<String>()
+            val mcpLoader = McpProgressiveLoader(mcpSnapshot, openedMcpGroups, mcpSearchEnabled)
             val browserKey = AgentConversationIdentity.fromHandoff(request.handoff, request.runId)
             browserBinding = BrowserSessionRegistry.acquireRun(browserKey, request.runId)
             guiRun = guiControl.openRun(request.runId, runController) { status ->
@@ -289,7 +296,7 @@ internal class AgentRuntimeRunExecutor(
                 baseToolExecutor = routingExecutor,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
-                mcpTools = mcpTools,
+                mcpTools = fullMcpTools,
                 executionContext = executor.terminalExecutionContext,
                 onProgress = { progressEvent ->
                     acceptEvent(
@@ -301,7 +308,7 @@ internal class AgentRuntimeRunExecutor(
                     )
                 },
             )
-            val runTools = JSONArray(mcpTools.toString()).also { tools ->
+            val runTools = (if (progressiveMcp) JSONArray() else JSONArray(fullMcpTools.toString())).also { tools ->
                 if (subagentAllowed()) AgentSubagentToolCatalog.appendSchemas(tools)
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
                 if (characterMemoryTools != null && memoryEnabled) {
@@ -316,7 +323,9 @@ internal class AgentRuntimeRunExecutor(
                 }
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
-                if (call.name in AgentSubagentToolCatalog.names) {
+                if (progressiveMcp && call.name in McpProgressiveLoader.names) {
+                    mcpLoader.execute(call)
+                } else if (call.name in AgentSubagentToolCatalog.names) {
                     if (!subagentAllowed()) {
                         AgentModelClient.ToolResult(
                             JSONObject()
@@ -382,6 +391,9 @@ internal class AgentRuntimeRunExecutor(
                 skillContext = skillContext,
                 memoryContext = memoryContext,
                 additionalTools = runTools,
+                mcpProjection = if (progressiveMcp) mcpSnapshot else null,
+                mcpSearchEnabled = mcpSearchEnabled,
+                openedMcpGroupsProvider = { openedMcpGroups.toSet() },
                 executionContext = executor.terminalExecutionContext,
             ) { event ->
                 timing.accept(event)

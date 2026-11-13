@@ -1,5 +1,6 @@
 package io.github.mangi.eta.ui.screens.mcp
 
+import android.content.SharedPreferences
 import android.widget.Toast
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -87,6 +89,8 @@ import io.github.mangi.eta.ui.components.coui.CouiPageBottomSpacer
 import io.github.mangi.eta.ui.components.coui.CouiPreference
 import io.github.mangi.eta.ui.components.coui.CouiScaffoldPage
 import io.github.mangi.eta.ui.components.coui.CouiSectionTitle
+import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.ui.components.coui.CouiDropdownPreference
 import io.github.mangi.eta.ui.components.coui.CouiSwitchPreference
 import io.github.mangi.eta.ui.components.coui.CouiTextField
 import io.github.mangi.eta.ui.components.coui.CouiTopAppBarIconButton
@@ -107,6 +111,7 @@ import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -120,6 +125,29 @@ internal fun McpServersScreen(
     val context = LocalContext.current
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
+    remember(context.applicationContext) { Prefs.initLocal(context); true }
+    val localPrefs = remember { Prefs.localAgentPreferences() }
+    var mcpLoadingMode by remember { mutableStateOf(Prefs.mcpLoadingMode()) }
+    DisposableEffect(localPrefs) {
+        val preferences = localPrefs ?: return@DisposableEffect onDispose {}
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || key == Prefs.Keys.AGENT_MCP_LOADING_MODE) mcpLoadingMode = Prefs.mcpLoadingMode()
+        }
+        preferences.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    val loadingModes = listOf(Prefs.Keys.MCP_LOADING_MODE_SEARCH, Prefs.Keys.MCP_LOADING_MODE_GROUP, Prefs.Keys.MCP_LOADING_MODE_OFF)
+    val loadingModeLabels = listOf(
+        stringResource(R.string.mcp_loading_mode_search),
+        stringResource(R.string.mcp_loading_mode_group),
+        stringResource(R.string.mcp_loading_mode_off),
+    )
+    val onLoadingModeChange: (Int) -> Unit = { index ->
+        loadingModes.getOrNull(index)?.let { mode ->
+            Prefs.setMcpLoadingMode(mode)
+            mcpLoadingMode = Prefs.mcpLoadingMode()
+        }
+    }
     val servers by McpServerRepository.serversFlow().collectAsState(initial = emptyList())
     var showAdd by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
@@ -210,6 +238,15 @@ internal fun McpServersScreen(
                     )
                 },
             ) {
+                Group(title = stringResource(R.string.mcp_loading_settings)) {
+                    CouiDropdownPreference(
+                        title = stringResource(R.string.mcp_loading_mode_title),
+                        summary = stringResource(R.string.mcp_loading_mode_summary),
+                        items = loadingModeLabels,
+                        selectedIndex = loadingModes.indexOf(mcpLoadingMode).coerceAtLeast(0),
+                        onSelectedIndexChange = onLoadingModeChange,
+                    )
+                }
                 Group(
                     title = stringResource(R.string.mcp_configured_servers, servers.size),
                     headerActions = {
@@ -316,6 +353,18 @@ internal fun McpServersScreen(
                     }
                 },
             ) {
+                item(key = "mcp-loading") {
+                    SmallTitle(stringResource(R.string.mcp_loading_settings))
+                    Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)) {
+                        OverlayDropdownPreference(
+                            title = stringResource(R.string.mcp_loading_mode_title),
+                            summary = stringResource(R.string.mcp_loading_mode_summary),
+                            items = loadingModeLabels,
+                            selectedIndex = loadingModes.indexOf(mcpLoadingMode).coerceAtLeast(0),
+                            onSelectedIndexChange = onLoadingModeChange,
+                        )
+                    }
+                }
                 item(key = "servers") {
                     Row(
                         modifier = Modifier

@@ -52,6 +52,10 @@ internal object Prefs {
         const val AGENT_SUBAGENT_ENABLED = "agent_subagent_enabled"
         const val AGENT_VIRTUAL_DISPLAY_ENABLED = "agent_virtual_display_enabled"
         const val AGENT_RUNTIME_CONFIG_JSON = "agent_runtime_config_json"
+        const val AGENT_MCP_LOADING_MODE = "agent_mcp_loading_mode"
+        const val MCP_LOADING_MODE_SEARCH = "search"
+        const val MCP_LOADING_MODE_GROUP = "group"
+        const val MCP_LOADING_MODE_OFF = "off"
         const val AGENT_DISABLED_TOOLS_JSON = "agent_disabled_tools_json"
 
         /** 全部布尔开关及其默认值。 */
@@ -161,6 +165,19 @@ internal object Prefs {
 
     /** Eta 设置页与 Runtime 使用的本地 Agent 配置，不依赖 LSPosed。 */
     fun localAgentPreferences(): SharedPreferences? = localAgent
+
+    fun mcpLoadingMode(): String = normalizeMcpLoadingMode(runCatching {
+        localAgent?.getString(Keys.AGENT_MCP_LOADING_MODE, Keys.MCP_LOADING_MODE_SEARCH)
+    }.getOrNull())
+
+    fun setMcpLoadingMode(mode: String) {
+        localAgent?.edit()?.putString(Keys.AGENT_MCP_LOADING_MODE, normalizeMcpLoadingMode(mode))?.apply()
+    }
+
+    private fun normalizeMcpLoadingMode(mode: String?): String = when (mode) {
+        Keys.MCP_LOADING_MODE_GROUP, Keys.MCP_LOADING_MODE_OFF -> mode
+        else -> Keys.MCP_LOADING_MODE_SEARCH
+    }
 
     /**
      * 首次升级优先把已有 RemotePreferences 值迁入本地；之后本地值是事实源，并在框架

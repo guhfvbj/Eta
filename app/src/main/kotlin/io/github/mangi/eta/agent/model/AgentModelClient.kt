@@ -1,5 +1,9 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
+import io.github.mangi.eta.agent.mcp.McpGroupCatalog
+import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
+import io.github.mangi.eta.agent.mcp.AgentToolSearchCatalog
 import io.github.mangi.eta.agent.prompt.PromptCustomizationStore
 import io.github.mangi.eta.agent.prompt.AgentToolPolicyStore
 import io.github.mangi.eta.agent.runtime.AgentEvent
@@ -33,6 +37,13 @@ internal object AgentModelClient {
         encodeDefaults = false
     }
     private val traceFormatter = AgentTraceFormatter()
+
+    interface McpToolProjection {
+        fun deferredGroups(toolAllowed: (String) -> Boolean = { true }): List<McpDeferredGroup>
+        fun appendTools(destination: JSONArray, openedGroupIds: Set<String>?, toolAllowed: (String) -> Boolean = { true })
+        fun searchCandidates(openableGroupIds: Set<String>, toolAllowed: (String) -> Boolean = { true }): List<AgentToolSearch.Candidate>
+        fun openedGroupIdsFrom(toolNames: Collection<String>): Set<String>
+    }
 
     fun loadConfig(): ModelConfig {
         val runtimeJson = Prefs.getString(Prefs.Keys.AGENT_RUNTIME_CONFIG_JSON)
@@ -113,14 +124,31 @@ internal object AgentModelClient {
         rewriteReply: Boolean = false,
         assistantScreenContext: String = "",
         toolFilter: ((JSONArray) -> JSONArray)? = null,
+        mcpProjection: McpToolProjection? = null,
+        mcpSearchEnabled: Boolean = true,
+        openedMcpGroupsProvider: () -> Set<String> = { emptySet() },
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
-        onEvent: (AgentEvent) -> Unit = {}
+        onEvent: (AgentEvent) -> Unit = {},
     ): ModelResponse.Text {
         config.validate()
         val customization = PromptCustomizationStore.load()
         val toolPolicy = AgentToolPolicyStore.load()
         val initialCapabilities = capabilitiesProvider()
+        // Resolve policy/profile permission against the full MCP catalog, never the withheld view.
+        val permittedMcpTools = if (mcpProjection == null || rewriteReply) emptySet() else {
+            JSONArray().also { mcpProjection.appendTools(it, null) }
+                .let(toolPolicy::filterTools).let { toolFilter?.invoke(it) ?: it }.let(::toolNames)
+        }
+        val mcpToolAllowed: (String) -> Boolean = { it in permittedMcpTools }
+        val dynamicMcpGroups = if (rewriteReply) emptyList() else mcpProjection?.deferredGroups(mcpToolAllowed).orEmpty()
+        val permittedMcpGroupIds = dynamicMcpGroups.mapTo(linkedSetOf()) { it.id }
+        val initialOpenedMcpGroups = (openedMcpGroupsProvider() +
+            mcpProjection?.openedGroupIdsFrom(historyToolNames(history)).orEmpty() +
+            AgentMcpContext.openedGroupIds(history)).intersect(permittedMcpGroupIds)
+        var currentOpenedMcpGroups = initialOpenedMcpGroups
+        fun unopenedMcpGroups() = dynamicMcpGroups.filterNot { it.id in currentOpenedMcpGroups }
+
         val messages = AgentPromptBuilder.buildInitialMessages(
             config,
             prompt,
@@ -132,6 +160,8 @@ internal object AgentModelClient {
             roleplayContext = roleplayContext,
             executionContext = executionContext,
             customization = customization,
+            unopenedMcpGroups = unopenedMcpGroups(),
+            mcpSearchEnabled = mcpSearchEnabled,
         )
         if (rewriteReply) {
             messages.put(messages.length() - 1, AgentConversationCodec.userTextMessage(
@@ -149,12 +179,16 @@ internal object AgentModelClient {
         if (compactOnly) messages.remove(messages.length() - 1)
         val transcript = JSONArray()
         // 旧 history 中的无效消息可能在组装时被跳过，系统边界不能由 history 条数倒推。
-        val systemCount = AgentPromptBuilder.buildSystemMessages(
+        var systemCount = AgentPromptBuilder.buildSystemMessages(
             config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext, executionContext, customization,
+            unopenedMcpGroups(), mcpSearchEnabled,
         ).length()
         fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
             if (rewriteReply) return JSONArray()
-            val tools = AgentToolDirectory.build(
+            val roundAdditionalTools = JSONArray(additionalTools.toString()).also {
+                mcpProjection?.appendTools(it, currentOpenedMcpGroups, mcpToolAllowed)
+            }
+            return AgentToolDirectory.build(
                 terminalTools = config.terminalTools,
                 browserTools = config.browserTools,
                 deviceDirectTools = config.deviceDirectTools,
@@ -168,10 +202,12 @@ internal object AgentModelClient {
                 localWebSearch = !config.usesHostedWebSearch,
                 disabledTools = Prefs.disabledTools(),
                 policy = toolPolicy,
-                additionalTools = additionalTools,
+                additionalTools = roundAdditionalTools,
+                openableMcpGroups = unopenedMcpGroups(),
+                mcpSearchEnabled = mcpSearchEnabled,
+                toolFilter = toolFilter,
                 rewriteReply = rewriteReply,
             )
-            return toolFilter?.invoke(tools) ?: tools
         }
         val tools = toolsFor(initialCapabilities)
         onEvent(
@@ -183,18 +219,25 @@ internal object AgentModelClient {
             )
         )
         // 工具目录与系统提示都是请求前缀，按轮重算会让一次瞬时状态抖动废掉整段缓存。
-        // Root 授权真正变化时整体重建；其余能力只增不减：短暂不可用的工具仍保留，执行时自行报告错误码。
+        // Root 授权或已打开的 MCP 组变化时整体重建；其余能力只增不减：短暂不可用的工具仍保留，执行时自行报告错误码。
         var promptRootAvailable = initialCapabilities.rootAvailable
         var publishedTools = tools
         fun toolsForRound(): JSONArray {
             val capabilities = capabilitiesProvider()
-            if (capabilities.rootAvailable != promptRootAvailable) {
+            val nextOpenedMcpGroups = (currentOpenedMcpGroups + initialOpenedMcpGroups + openedMcpGroupsProvider())
+                .intersect(permittedMcpGroupIds)
+            if (capabilities.rootAvailable != promptRootAvailable || nextOpenedMcpGroups != currentOpenedMcpGroups) {
+                currentOpenedMcpGroups = nextOpenedMcpGroups
                 val systemMessages = AgentPromptBuilder.buildSystemMessages(
                     config, skillContext, memoryContext, capabilities.rootAvailable, roleplayContext, executionContext, customization,
+                    unopenedMcpGroups(), mcpSearchEnabled,
                 )
-                for (index in 0 until systemMessages.length()) {
-                    messages.put(index, systemMessages.getJSONObject(index))
-                }
+                // The index message disappears after the last server opens; preserve the entire tail.
+                val tail = (systemCount until messages.length()).map(messages::getJSONObject)
+                while (messages.length() > 0) messages.remove(messages.length() - 1)
+                for (index in 0 until systemMessages.length()) messages.put(systemMessages.getJSONObject(index))
+                tail.forEach(messages::put)
+                systemCount = systemMessages.length()
                 promptRootAvailable = capabilities.rootAvailable
                 publishedTools = toolsFor(capabilities)
                 return publishedTools
@@ -211,6 +254,8 @@ internal object AgentModelClient {
         val loop = AgentLoop(
             transcript = transcript,
             systemCount = systemCount,
+            systemCountProvider = { systemCount },
+            dynamicMcpGroupsProvider = { dynamicMcpGroups },
             operationId = operationId,
             onContextSnapshot = if (rewriteReply) ({ _ -> }) else onContextSnapshot,
             onTranscript = onTranscript,
@@ -222,9 +267,30 @@ internal object AgentModelClient {
             // 目录在运行内只增不减，可见不再等于可用：执行前用同一规则复核，
             // 中途失去的能力返回与目录过滤一致的错误码，而不是让底层接口给出含糊的失败。
             toolExecutor = AgentModelClient.ToolExecutor { call ->
-                if (!toolPolicy.allows(call.name)) {
+                val emittedLoader = call.name in McpProgressiveLoader.names && call.name in toolNames(publishedTools)
+                if (!emittedLoader && !toolPolicy.allows(call.name)) {
                     return@ToolExecutor ToolResult(JSONObject().put("ok", false).put("code", "TOOL_NOT_ALLOWED_BY_POLICY")
                         .put("message", "该工具不在本次工具白名单中，未执行").toString())
+                }
+                if (emittedLoader) {
+                    val arguments = runCatching { JSONObject(call.argumentsJson) }.getOrNull()
+                    val groupIds = unopenedMcpGroups().mapTo(linkedSetOf()) { it.id }
+                    if (call.name == McpGroupCatalog.USE_GROUP && arguments?.optString("group") !in groupIds) {
+                        return@ToolExecutor ToolResult(JSONObject().put("ok", false)
+                            .put("code", "MCP_GROUP_NOT_AVAILABLE").toString())
+                    }
+                    if (call.name == AgentToolSearchCatalog.SEARCH && arguments?.opt("query") is String) {
+                        val hits = AgentToolSearch.search(arguments.getString("query"),
+                            mcpProjection?.searchCandidates(groupIds, mcpToolAllowed).orEmpty(),
+                            arguments.optInt("max_results", AgentToolSearch.DEFAULT_RESULTS))
+                        if (hits.isEmpty()) return@ToolExecutor ToolResult(JSONObject().put("ok", false)
+                            .put("code", "NO_MATCHING_TOOLS").toString())
+                        // Pass only permitted exact matches to the runtime loader, even if its snapshot
+                        // also contains tools removed by this run's PromptStudio policy or profile.
+                        arguments.put("query", "select:" + hits.joinToString(",") { it.name })
+                        return@ToolExecutor toolExecutor.execute(call.copy(argumentsJson = arguments.toString()))
+                    }
+                    return@ToolExecutor toolExecutor.execute(call)
                 }
                 val unavailable = AgentToolRequirements.find(call.name)
                     ?.let { capabilitiesProvider().unavailableCode(call.name) }
@@ -269,6 +335,16 @@ internal object AgentModelClient {
                 result.sensitiveToolCallIds,
             ),
         )
+    }
+
+    internal fun historyToolNames(history: List<ConversationMessage>): Set<String> = buildSet {
+        history.forEach { message ->
+            val calls = runCatching { JSONArray(message.toolCallsJson) }.getOrNull() ?: return@forEach
+            for (index in 0 until calls.length()) {
+                calls.optJSONObject(index)?.optJSONObject("function")?.optString("name")
+                    ?.takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
     }
 
     private fun toolName(tool: JSONObject): String? = tool.optJSONObject("function")?.optString("name")

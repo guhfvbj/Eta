@@ -1,5 +1,8 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
+import io.github.mangi.eta.agent.mcp.McpGroupCatalog
+import io.github.mangi.eta.agent.mcp.AgentToolSearchCatalog
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.agent.prompt.AgentToolPolicy
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
@@ -29,6 +32,9 @@ internal object AgentToolDirectory {
         additionalTools: JSONArray? = null,
         restrictedToolNames: Set<String>? = null,
         rewriteReply: Boolean = false,
+        openableMcpGroups: List<McpDeferredGroup> = emptyList(),
+        mcpSearchEnabled: Boolean = true,
+        toolFilter: ((JSONArray) -> JSONArray)? = null,
     ): JSONArray {
         if (rewriteReply) return JSONArray()
         val tools = AgentToolCatalog.build(
@@ -50,8 +56,8 @@ internal object AgentToolDirectory {
                 tools.put(additionalTools.opt(index))
             }
         }
-        val policyTools = policy.filterTools(tools)
-        return if (restrictedToolNames == null) {
+        val policyTools = policy.filterTools(tools).let { toolFilter?.invoke(it) ?: it }
+        val filtered = if (restrictedToolNames == null) {
             policyTools
         } else JSONArray().also { filtered ->
             for (index in 0 until policyTools.length()) {
@@ -59,5 +65,10 @@ internal object AgentToolDirectory {
                 if (schema.optJSONObject("function")?.optString("name") in restrictedToolNames) filtered.put(schema)
             }
         }
+        // These navigation tools inherit permission from the permitted MCP groups.
+        // Apply policy/profile filtering to MCP tools before deriving openableMcpGroups.
+        McpGroupCatalog.appendTo(filtered, openableMcpGroups)
+        AgentToolSearchCatalog.appendTo(filtered, openableMcpGroups, mcpSearchEnabled)
+        return filtered
     }
 }

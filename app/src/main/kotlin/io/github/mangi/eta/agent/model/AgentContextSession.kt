@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import org.json.JSONArray
@@ -8,7 +9,7 @@ import org.json.JSONArray
 internal class AgentContextSession(
     private val config: AgentModelClient.ModelConfig,
     private val messages: JSONArray,
-    private val systemCount: Int,
+    systemCount: Int,
     private val operationId: String,
     private val provider: AgentProviderClient,
     private val runController: AgentRunController,
@@ -17,7 +18,10 @@ internal class AgentContextSession(
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit,
     private val transcriptSize: () -> Int = { 0 },
     private val roleplay: Boolean = false,
+    private val systemCountProvider: () -> Int = { systemCount },
+    private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
 ) {
+    private val systemCount: Int get() = systemCountProvider()
     private val contextWindow = config.knownContextWindow
     private var inputTokens: Int? = null
     private var compacted = false
@@ -84,7 +88,8 @@ internal class AgentContextSession(
         val operation = java.util.UUID.randomUUID().toString()
         onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
-            val candidate = AgentContextCompactor(config, provider, runController, roleplay = roleplay).compact(
+            val candidate = AgentContextCompactor(config, provider, runController, roleplay = roleplay,
+                dynamicMcpGroupsProvider = dynamicMcpGroupsProvider).compact(
                 messages, systemCount, sensitiveIds(),
             )
             runController.throwIfCancelled()

@@ -11,6 +11,10 @@ import org.json.JSONObject
 internal class AgentTraceFormatter {
     fun summarizeArguments(toolCall: AgentModelClient.ToolCall): String =
         when (toolCall.name) {
+            "tools_use_group" -> runCatching { JSONObject(toolCall.argumentsJson).optString("group") }
+                .getOrDefault("").takeIf { it.isNotBlank() }?.let { "加载 MCP 服务器 · ${it.take(80)}" }
+                ?: "加载 MCP 服务器"
+            "tools_search" -> summarizeQueryArguments("搜索 MCP 工具", toolCall.argumentsJson)
             BROWSER_TOOL_NAME -> summarizeBrowserArguments(toolCall.argumentsJson)
             "web_search" -> "搜索网页"
             "fetch_url" -> summarizeFetchArguments(toolCall.argumentsJson)
@@ -69,6 +73,7 @@ internal class AgentTraceFormatter {
                     ?: io.github.mangi.eta.agent.context.PersonalSearchTools.searches.firstOrNull { it.name == toolCall.name }?.title
                     ?: when (toolCall.name) { "search_notes" -> "查询便签"; "search_system_memories" -> "查询系统记忆"; "read_personal_item" -> "读取检索详情"; "summarize_bills" -> "汇总账单"; else -> null }
                 when {
+                    toolCall.name.startsWith("mcp_") -> "调用 MCP 工具"
                     label == null -> "准备执行"
                     toolCall.name.startsWith("search_") ->
                         summarizeQueryArguments(label, toolCall.argumentsJson)

@@ -43,6 +43,8 @@ internal object AgentToolNaming {
      * 没法逐个维护中文名：这里去掉尾部哈希、把下划线换成空格、按前缀归到 MCP 分类。
      */
     private fun mcpFace(name: String): Face? {
+        val mcp = Regex("""^mcp_(.+?)_(.+?)_[0-9a-f]{4,8}$""").matchEntire(name)
+        if (mcp != null) return Face("MCP · " + mcp.groupValues[2].replace('_', ' '), CATEGORY_MCP)
         val base = name.replace(Regex("_[0-9a-f]{8}$"), "")
         if (!base.startsWith("mt_") && !name.contains("__")) return null
         val readable = base.removePrefix("mt_").replace('_', ' ').trim()
@@ -50,6 +52,8 @@ internal object AgentToolNaming {
     }
 
     private val table: Map<String, String> = mapOf(
+        "tools_use_group" to "MCP 工具|加载 MCP 服务器",
+        "tools_search" to "MCP 工具|搜索 MCP 工具",
         // 屏幕与界面
         "get_current_context" to "屏幕与界面|读当前时间与位置",
         "search_apps" to "屏幕与界面|查找已装应用",

@@ -60,6 +60,8 @@ import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.ui.graphics.vector.ImageVector
 
 internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
+    "tools_use_group" -> Icons.Rounded.Layers
+    "tools_search" -> Icons.AutoMirrored.Rounded.ManageSearch
     "tasks_triggers", "tasks_list", "tasks_create", "tasks_update",
     "tasks_delete", "tasks_run", "tasks_cancel", "tasks_history" -> Icons.Rounded.Schedule
     "observe", "observe_screen" -> Icons.Rounded.DocumentScanner

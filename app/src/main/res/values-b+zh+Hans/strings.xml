@@ -1829,4 +1829,12 @@
     <string name="prompt_tools_status_all">全局开放 · 共 %1$d 个工具</string>
     <string name="title_model_follow_current">跟随当前对话模型</string>
     <string name="title_model_title">标题模型</string>
+    <string name="mcp_loading_settings">MCP 工具加载</string>
+    <string name="mcp_loading_mode_title">MCP 工具渐进式加载</string>
+    <string name="mcp_loading_mode_summary">下次运行生效。按需搜索工具或加载服务器，也可让全部已启用工具常驻。本地工具和子代理不受影响。</string>
+    <string name="mcp_loading_mode_search">按工具搜索</string>
+    <string name="mcp_loading_mode_group">按服务器加载</string>
+    <string name="mcp_loading_mode_off">关闭（全量常驻）</string>
+    <string name="tool_tools_use_group">加载 MCP 服务器</string>
+    <string name="tool_tools_search">搜索 MCP 工具</string>
 </resources>

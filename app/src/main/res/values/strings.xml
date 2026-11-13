@@ -1848,4 +1848,12 @@
     <string name="prompt_tools_status_all">全局开放 · 共 %1$d 个工具</string>
     <string name="title_model_follow_current">跟随当前对话模型</string>
     <string name="title_model_title">标题模型</string>
+    <string name="mcp_loading_settings">MCP tool loading</string>
+    <string name="mcp_loading_mode_title">MCP tool progressive loading</string>
+    <string name="mcp_loading_mode_summary">Applies to the next run. Load MCP tools on demand by search or server, or keep all enabled tools loaded. Local tools and subagents are unchanged.</string>
+    <string name="mcp_loading_mode_search">Search for tools</string>
+    <string name="mcp_loading_mode_group">Load by server</string>
+    <string name="mcp_loading_mode_off">Off (always load all)</string>
+    <string name="tool_tools_use_group">Load MCP server</string>
+    <string name="tool_tools_search">Search MCP tools</string>
 </resources>

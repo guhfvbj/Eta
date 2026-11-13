@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.mcp
 
 import android.util.Base64
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentToolSearch
 import io.github.mangi.eta.data.model.McpProtocolMode
 import io.github.mangi.eta.data.model.McpServerSetting
 import io.github.mangi.eta.data.model.McpToolDefinition
@@ -20,13 +21,52 @@ internal class McpRunTool(
 /** 一次 run 使用冻结的 MCP 工具目录，设置变更从下一次 run 生效。 */
 internal class McpRunSnapshot(
     val tools: List<McpRunTool>,
-) {
+) : AgentModelClient.McpToolProjection {
     private val byModelName = tools.associateBy(McpRunTool::modelName)
 
     fun resolve(modelName: String): McpRunTool? = byModelName[modelName]
 
-    fun appendModelTools(destination: JSONArray) {
-        tools.forEach { tool ->
+    override fun deferredGroups(toolAllowed: (String) -> Boolean): List<McpDeferredGroup> =
+        tools.filter { toolAllowed(it.modelName) }.groupBy { it.server.id }.map { (serverId, serverTools) ->
+            val server = serverTools.first().server
+            McpDeferredGroup(
+                id = mcpGroupId(serverId),
+                label = "MCP 服务器「${server.name}」",
+                summary = "MCP 服务器「${server.name}」的 ${serverTools.size} 个工具：" +
+                    serverTools.take(6).joinToString("、") { it.definition.name } +
+                    if (serverTools.size > 6) " 等" else "",
+                toolNames = serverTools.mapTo(linkedSetOf()) { it.modelName },
+            )
+        }
+
+    override fun searchCandidates(
+        openableGroupIds: Set<String>,
+        toolAllowed: (String) -> Boolean,
+    ): List<AgentToolSearch.Candidate> = tools.filter {
+        mcpGroupId(it.server.id) in openableGroupIds && toolAllowed(it.modelName)
+    }.map { tool ->
+        AgentToolSearch.Candidate(
+            name = tool.modelName,
+            description = tool.definition.description,
+            searchHint = "${tool.server.name} ${tool.definition.name}",
+            mcp = true,
+            groupId = mcpGroupId(tool.server.id),
+        )
+    }
+
+    override fun openedGroupIdsFrom(toolNames: Collection<String>): Set<String> =
+        toolNames.mapNotNullTo(linkedSetOf()) { byModelName[it]?.let { tool -> mcpGroupId(tool.server.id) } }
+
+    fun appendModelTools(destination: JSONArray) = appendTools(destination, openedGroupIds = null)
+
+    override fun appendTools(
+        destination: JSONArray,
+        openedGroupIds: Set<String>?,
+        toolAllowed: (String) -> Boolean,
+    ) {
+        tools.filter {
+            toolAllowed(it.modelName) && (openedGroupIds == null || mcpGroupId(it.server.id) in openedGroupIds)
+        }.forEach { tool ->
             val description = buildString {
                 append("MCP 服务器「").append(tool.server.name).append("」提供的工具")
                 tool.definition.description.trim().takeIf { it.isNotBlank() }?.let {

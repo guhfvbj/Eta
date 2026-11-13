@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
@@ -40,6 +41,8 @@ internal class AgentLoop(
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
+    private val systemCountProvider: () -> Int = { systemCount },
+    private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
 ) {
     data class Result(
         val content: String,
@@ -62,6 +65,8 @@ internal class AgentLoop(
         config, messages, systemCount, operationId, provider, runController,
         { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
         roleplay = roleplayContext != null,
+        systemCountProvider = systemCountProvider,
+        dynamicMcpGroupsProvider = dynamicMcpGroupsProvider,
     )
     private var supplementIndex = initialSupplementIndex
 
