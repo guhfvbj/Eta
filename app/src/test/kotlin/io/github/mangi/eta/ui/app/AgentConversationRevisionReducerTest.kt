@@ -84,6 +84,42 @@ class AgentConversationRevisionReducerTest {
     }
 
     @Test
+    fun editAndDeleteAfterSummaryKeepCompactedHistoryAndTrimJournalSeparately() {
+        val full = conversationState()
+        val summary = AgentModelClient.ConversationMessage("assistant", "第一轮摘要", contextSummary = true,
+            compactedUserTurns = 1, summaryThroughUserTurn = 1)
+        val state = full.copy(journal = full.history, history = listOf(summary) + full.history.drop(4))
+        val boundary = AgentConversationRevisionReducer.boundary(state, "assistant-3")!!
+        assertEquals(state.history.take(3), boundary.historyPrefix)
+        assertEquals(full.history.take(6), boundary.journalPrefix)
+        assertFalse(boundary.contextWasCompacted)
+        assertFalse(boundary.historyPrefix.any { it.content == "第一答" || it.role == "tool" })
+        val deleted = AgentConversationRevisionReducer.deleteFromTurn(state, "user-3")!!
+        assertEquals(boundary.historyPrefix, deleted.history)
+        assertEquals(boundary.journalPrefix, deleted.journal)
+
+        // Tail alignment also works when the UI has paged out the covered first turn.
+        assertEquals(boundary.historyPrefix, AgentConversationRevisionReducer.boundary(
+            state.copy(messages = state.messages.drop(4)), "user-3")!!.historyPrefix)
+    }
+
+    @Test
+    fun revisionInsideSummaryCoverageFallsBackOnlyToAvailableJournalPrefix() {
+        val full = conversationState()
+        val summary = AgentModelClient.ConversationMessage("assistant", "含第二轮旧结果", contextSummary = true,
+            compactedUserTurns = 1, summaryThroughUserTurn = 2)
+        val state = full.copy(journal = full.history, history = listOf(summary) + full.history.drop(4))
+        val covered = AgentConversationRevisionReducer.boundary(state, "user-2")!!
+        assertTrue(covered.contextWasCompacted)
+        assertEquals(full.history.take(4), covered.historyPrefix)
+        assertEquals(covered.historyPrefix, covered.journalPrefix)
+        assertTrue(AgentConversationRevisionReducer.boundary(state, "user-1")!!.historyPrefix.isEmpty())
+        assertEquals(state.history.take(3), AgentConversationRevisionReducer.boundary(state, "user-3")!!.historyPrefix)
+        val legacy = state.copy(journal = state.history)
+        assertTrue(AgentConversationRevisionReducer.boundary(legacy, "user-2")!!.journalPrefix.isEmpty())
+    }
+
+    @Test
     fun visibleMessagesStopAtEditedUserWithoutMutatingTheSource() {
         val messages = conversationState().messages
 

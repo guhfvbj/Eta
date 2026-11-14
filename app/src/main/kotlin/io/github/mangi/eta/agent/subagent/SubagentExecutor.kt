@@ -4,8 +4,13 @@ import android.os.SystemClock
 import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
 import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
+import io.github.mangi.eta.agent.model.AgentContextCompactor
+import io.github.mangi.eta.agent.model.AgentContextSnapshot
+import io.github.mangi.eta.agent.model.AgentContextSummarizer
+import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentModelExecutionException
+import io.github.mangi.eta.agent.model.AgentModelFailure
 import io.github.mangi.eta.agent.model.AgentProviderClient
 import io.github.mangi.eta.agent.model.ProviderClientFactory
 import io.github.mangi.eta.agent.runtime.AgentEvent
@@ -36,6 +41,7 @@ internal class SubagentExecutor(
     private val onProgress: (AgentEvent.SubagentProgress) -> Unit,
     private val nanoTime: () -> Long = System::nanoTime,
     private val providerFor: (AgentModelClient.ModelConfig) -> AgentProviderClient = ProviderClientFactory::getClient,
+    private val maxToolRounds: Int = 48,
 ) {
     private val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
     private val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
@@ -173,11 +179,65 @@ internal class SubagentExecutor(
             supportsSearchSuggestions = false,
         )
 
+        val initialHistory = priorHistory + AgentModelClient.buildUserHistoryMessage(prompt, emptyList())
+            .copy(messageId = "user-${toolCall.id}-$subagentId")
+        var latestCheckpoint: AgentContextSnapshot? = null
+        var latestTranscript = emptyList<AgentModelClient.ConversationMessage>()
+        var compactionFailure: String? = null
+        var childProvider: AgentProviderClient? = null
+        var sessionReleased = false
+        fun storeHistory(history: List<AgentModelClient.ConversationMessage>) {
+            SubagentSessionStore.complete(conversationKey, subagentId, history)
+            sessionReleased = true
+        }
+        fun retainedHistory(
+            transcript: List<AgentModelClient.ConversationMessage>,
+            checkpoint: AgentContextSnapshot? = latestCheckpoint,
+        ): List<AgentModelClient.ConversationMessage> = if (checkpoint == null) initialHistory + transcript else {
+            checkpoint.messages + transcript.drop(checkpoint.consumedTranscriptMessages ?: transcript.size)
+        }
+        fun completeResult(summary: String, wrapUpReason: String? = null): AgentModelClient.ToolResult {
+            tracker.markCompleted(summary)
+            publishSnapshot(force = true)
+            return AgentModelClient.ToolResult(
+                content = JSONObject()
+                    .put("ok", true)
+                    .put("subagent_id", subagentId)
+                    .put("subagent_type", profile.name)
+                    .put("description", description)
+                    .put("model", modelLabel)
+                    .put("status", SubagentActivitySnapshot.STATUS_COMPLETED)
+                    .put("tool_calls", tracker.toolCount())
+                    .put("summary", summary)
+                    .apply {
+                        if (wrapUpReason != null) put("incomplete", true).put("wrap_up_reason", wrapUpReason)
+                    }
+                    .put("resume_hint", "如需继续，可调用 subagent(resume=\"$subagentId\", prompt=\"...\", description=\"...\")。")
+                    .toString(),
+                command = latestSnapshots[toolCall.id],
+            )
+        }
+        fun fallbackHistory(history: List<AgentModelClient.ConversationMessage>): List<AgentModelClient.ConversationMessage> {
+            val provider = childProvider ?: return history.map { it.copy(reasoningContent = "") }
+            val messages = JSONArray(history.map(AgentConversationCodec::toJsonObject))
+            return try {
+                AgentConversationCodec.transcript(AgentContextCompactor(subagentConfig,
+                    provider, childController,
+                    dynamicMcpGroupsProvider = { mcpSnapshot.deferredGroups(profile::isToolAllowed) },
+                ).fallbackCompact(messages, 0, emptySet()), 0)
+            } catch (failure: AgentModelFailure) {
+                if (failure.code !in setOf("CONTEXT_NO_REDUCTION", "CONTEXT_NOT_COMPACTABLE")) throw failure
+                history.map { it.copy(reasoningContent = "") }
+            }
+        }
+
         return try {
+            val provider = providerFor(subagentConfig)
+            childProvider = provider
             val response = AgentModelClient.complete(
                 config = subagentConfig,
                 prompt = prompt,
-                provider = providerFor(subagentConfig),
+                provider = provider,
                 toolExecutor = childToolExecutor,
                 history = priorHistory,
                 runController = childController,
@@ -194,50 +254,45 @@ internal class SubagentExecutor(
                 mcpProjection = if (progressiveMcp) mcpSnapshot else null,
                 mcpSearchEnabled = mcpSearchEnabled,
                 openedMcpGroupsProvider = { entry.openedMcpGroups.toSet() },
+                maxToolRounds = maxToolRounds.coerceAtLeast(1),
+                onContextSnapshot = { checkpoint ->
+                    latestCheckpoint = checkpoint
+                    entry.history = retainedHistory(latestTranscript)
+                },
+                onTranscript = { transcript ->
+                    latestTranscript = transcript
+                    // Keep the compacted checkpoint plus only its unconsumed delta.
+                    // A failed later round must not restore priorHistory + full transcript.
+                    entry.history = retainedHistory(transcript)
+                },
                 onEvent = { childEvent ->
+                    if (childEvent is AgentEvent.ContextCompaction && childEvent.phase == "failed") {
+                        compactionFailure = childEvent.reasonCode.ifBlank { "CONTEXT_SUMMARY_FAILED" }
+                    }
                     val force = tracker.onChildEvent(childEvent)
                     publishSnapshot(force = force)
                 },
             )
-            val updatedHistory = priorHistory +
-                AgentModelClient.buildUserHistoryMessage(prompt, emptyList()) +
-                response.transcript
-            SubagentSessionStore.complete(conversationKey, subagentId, updatedHistory)
-            tracker.markCompleted(response.content)
-            publishSnapshot(force = true)
-
-            AgentModelClient.ToolResult(
-                content = JSONObject()
-                    .put("ok", true)
-                    .put("subagent_id", subagentId)
-                    .put("subagent_type", profile.name)
-                    .put("description", description)
-                    .put("model", modelLabel)
-                    .put("status", SubagentActivitySnapshot.STATUS_COMPLETED)
-                    .put("tool_calls", tracker.toolCount())
-                    .put("summary", response.content)
-                    .put(
-                        "resume_hint",
-                        "如需在此 Subagent 已有上下文基础上继续追问或深挖，可调用 subagent(resume=\"$subagentId\", prompt=\"...\", description=\"...\")。",
-                    )
-                    .toString(),
-                command = latestSnapshots[toolCall.id],
-            )
+            val retained = retainedHistory(response.transcript, response.contextSnapshot ?: latestCheckpoint)
+            val updatedHistory = if (compactionFailure != null) fallbackHistory(retained) else retained
+            storeHistory(updatedHistory)
+            completeResult(response.content)
         } catch (throwable: Throwable) {
-            val partial = (throwable as? AgentModelExecutionException)?.let { ex ->
-                val partialHistory = priorHistory +
-                    AgentModelClient.buildUserHistoryMessage(prompt, emptyList()) +
-                    ex.transcript
-                SubagentSessionStore.complete(conversationKey, subagentId, partialHistory)
-                tracker.partialOutput()
-            } ?: run {
-                SubagentSessionStore.releaseRunning(conversationKey, subagentId)
-                tracker.partialOutput()
-            }
-
             val cancelled = parentController.isCancelled ||
                 childController.isCancelled ||
                 throwable is AgentRunCancelledException
+            val execution = throwable as? AgentModelExecutionException
+            val history = if (execution != null) retainedHistory(execution.transcript,
+                execution.contextSnapshot ?: latestCheckpoint) else retainedHistory(latestTranscript)
+            val code = ((execution?.cause ?: throwable) as? AgentModelFailure)?.code
+            val wrapUpReason = if (code == "SUBAGENT_ROUND_LIMIT") code else compactionFailure
+            val partial = if (cancelled) tracker.partialOutput() else AgentContextSummarizer.fallbackSummary(history)
+            if (!cancelled && wrapUpReason != null) {
+                val protected = fallbackHistory(history) + AgentModelClient.ConversationMessage("assistant", partial)
+                storeHistory(protected)
+                return completeResult(partial, wrapUpReason)
+            }
+            storeHistory(history)
             val errorMessage = if (cancelled) {
                 "已停止"
             } else {
@@ -284,6 +339,7 @@ internal class SubagentExecutor(
                 command = latestSnapshots[toolCall.id],
             )
         } finally {
+            if (!sessionReleased) SubagentSessionStore.releaseRunning(conversationKey, subagentId)
             controllerBinding.close()
         }
     }

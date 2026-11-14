@@ -1,8 +1,13 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.mcp.McpDeferredGroup
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ProviderSourceTypes
+import io.github.mangi.eta.data.model.ProviderTypes
+import io.github.mangi.eta.data.model.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -88,7 +93,8 @@ class AgentContextCompactionTest {
         assertEquals(listOf("完成最新请求"), result.transcript.map { it.content })
         val snapshot = checkNotNull(result.contextSnapshot)
         assertTrue(snapshot.messages.any { it.contextSummary })
-        assertEquals("最新请求必须保留", snapshot.messages.last().content)
+        assertEquals("完成最新请求", snapshot.messages.last().content)
+        assertTrue(snapshot.messages.any { it.role == "user" && it.content == "最新请求必须保留" })
         assertEquals(9, snapshot.consumedUserTurns)
         assertTrue(events.filterIsInstance<AgentEvent.ContextCompaction>().any { it.phase == "completed" })
         assertTrue(snapshots.all { AgentContextSnapshot.decode(it.encode()) == it })
@@ -234,7 +240,7 @@ class AgentContextCompactionTest {
 
         assertFalse(compacted.toString().contains("STALE_SIGNATURE"))
         assertTrue(compacted.toString().contains("新的问题"))
-        assertFalse(compacted.toString().contains("toolu_old"))
+        assertTrue(compacted.toString().contains("toolu_old")) // retained closed exchange, without its stale signature
     }
 
     @Test
@@ -285,7 +291,7 @@ class AgentContextCompactionTest {
     }
 
     @Test
-    fun summaryRequestIncludesAllCompletedHistoryInOneRequest() {
+    fun summaryRequestIncludesOnlyCompactedPrefixAndRetainsRecentTurns() {
         var requests = 0
         val seen = mutableListOf<String>()
         val result = AgentContextCompactor(config, provider { request, _ ->
@@ -296,7 +302,10 @@ class AgentContextCompactionTest {
         }, AgentRunController()).compact(jsonHistory(), 1, emptySet())
         assertEquals(1, requests)
         for (turn in 1..4) assertTrue(seen.any { it.contains("问题 $turn") })
-        assertTrue(result.toString().contains("问题 6"))
+        for (turn in 5..6) {
+            assertFalse(seen.any { it.contains("问题 $turn") })
+            assertTrue(result.toString().contains("问题 $turn"))
+        }
     }
 
     @Test
@@ -316,6 +325,192 @@ class AgentContextCompactionTest {
         assertNotNull(result.contextSnapshot)
         assertEquals(finalText, result.contextSnapshot!!.messages.last().content)
         assertEquals(finalText, result.transcript.last().content)
+    }
+
+    @Test
+    fun compactionPreservesTwoRecentClosedFileExchangesAndCountsOnlyPrefixUsers() {
+        val source = (1..6).flatMap { turn -> listOf(
+            AgentModelClient.ConversationMessage("user", "inspect $turn"),
+            AgentModelClient.ConversationMessage("assistant", toolCallsJson = """[{"id":"read-$turn","type":"function","function":{"name":"read_file","arguments":"{}"}}]"""),
+            AgentModelClient.ConversationMessage("tool", "file $turn line 10 expected_revision=hash-$turn\n" + "code $turn\n".repeat(3_000),
+                toolCallId = "read-$turn"),
+            AgentModelClient.ConversationMessage("assistant", "found $turn"),
+        ) }
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", "rules"))
+        source.forEach { messages.put(AgentConversationCodec.toJsonObject(it)) }
+        val result = AgentContextCompactor(config, provider { _, _ -> response("older findings") }, AgentRunController())
+            .compact(messages, 1, emptySet())
+        val history = AgentConversationCodec.transcript(result, 1)
+        val summary = history.first()
+        assertTrue(summary.contextSummary)
+        assertTrue(summary.compactedUserTurns in 1..4)
+        assertEquals(summary.compactedUserTurns, summary.summaryThroughUserTurn)
+        assertEquals(6, history.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 })
+        for (turn in 5..6) assertTrue(history.contains(source.first { it.toolCallId == "read-$turn" }))
+        assertTrue(AgentContextCompactor.canSplit((1 until result.length()).map(result::getJSONObject), result.length() - 1))
+        assertTrue(result.toString().length < messages.toString().length)
+    }
+
+    @Test
+    fun nonReducingTailStepsDownAndSingleHugeTurnProtectsLatestUser() {
+        var requests = 0
+        val source = listOf(
+            AgentModelClient.ConversationMessage("user", "old"), AgentModelClient.ConversationMessage("assistant", "ok"),
+            AgentModelClient.ConversationMessage("user", "middle"), AgentModelClient.ConversationMessage("assistant", "ok"),
+            AgentModelClient.ConversationMessage("user", "latest"), AgentModelClient.ConversationMessage("assistant", "x".repeat(30_000)),
+        )
+        val messages = JSONArray(source.map(AgentConversationCodec::toJsonObject))
+        val result = AgentContextCompactor(config, provider { _, _ -> requests++; response("s".repeat(1_000)) }, AgentRunController())
+            .compact(messages, 0, emptySet())
+        assertTrue(requests > 1)
+        val summary = AgentConversationCodec.fromJsonObject(result.getJSONObject(0))
+        assertEquals(2, summary.compactedUserTurns)
+        assertEquals(3, summary.summaryThroughUserTurn)
+        assertEquals("latest", result.getJSONObject(1).getString("content"))
+        assertTrue(result.toString().length < messages.toString().length)
+
+        val single = JSONArray(source.takeLast(2).map(AgentConversationCodec::toJsonObject))
+        val compacted = AgentContextCompactor(config, provider { _, _ -> response("bounded") }, AgentRunController())
+            .compact(single, 0, emptySet())
+        assertFalse(compacted.getJSONObject(0).has("_eta_compacted_users"))
+        assertEquals(1, compacted.getJSONObject(0).getInt("_eta_summary_through_user"))
+        assertEquals("latest", compacted.getJSONObject(1).getString("content"))
+    }
+
+    @Test
+    fun retainedTailDropsOpaqueProviderStateReasoningAndSensitiveResults() {
+        val messages = jsonHistory()
+        val call = JSONObject().put("role", "assistant").put("content", "tail")
+            .put("reasoning_content", "PRIVATE_REASONING")
+            .put("tool_calls", JSONArray("""[{"id":"tail-secret","type":"function","function":{"name":"fixture","arguments":"PRIVATE_ARGS"}}]"""))
+        ResponsesEphemeralState.attachOutputItems(call, JSONArray().put(JSONObject().put("opaque", "PRIVATE_RESPONSES")))
+        AnthropicEphemeralState.attachContentBlocks(call, JSONArray().put(JSONObject().put("type", "thinking")
+            .put("thinking", "PRIVATE_ANTHROPIC").put("signature", "PRIVATE_SIGNATURE")))
+        GeminiEphemeralState.attachSteps(call, JSONArray().put(JSONObject().put("type", "thought").put("text", "PRIVATE_GEMINI")))
+        messages.put(AgentConversationCodec.userTextMessage("tail user"))
+        messages.put(call)
+        messages.put(JSONObject().put("role", "tool").put("tool_call_id", "tail-secret").put("content", "PRIVATE_RESULT"))
+        messages.put(JSONObject().put("role", "assistant").put("content", "closed"))
+        val result = AgentContextCompactor(config, provider { _, _ -> response("summary") }, AgentRunController())
+            .compact(messages, 1, setOf("tail-secret"))
+        assertTrue(result.toString().contains("tail-secret"))
+        assertFalse(result.toString().contains("PRIVATE_"))
+    }
+
+    @Test
+    fun summaryMcpMetadataComesOnlyFromCompactedPrefix() {
+        val groups = listOf(McpDeferredGroup("mcp:old", "old", setOf("mcp_old"), "Old"),
+            McpDeferredGroup("mcp:tail", "tail", setOf("mcp_tail"), "Tail"))
+        val source = (1..3).flatMap { turn -> listOf(
+            AgentModelClient.ConversationMessage("user", "task $turn"),
+            AgentModelClient.ConversationMessage("assistant", toolCallsJson = """[{"id":"call-$turn","function":{"name":"${if (turn == 1) "mcp_old" else "mcp_tail"}","arguments":"{}"}}]"""),
+            AgentModelClient.ConversationMessage("tool", "result", toolCallId = "call-$turn"),
+            AgentModelClient.ConversationMessage("assistant", "facts $turn ".repeat(3_000)),
+        ) }
+        val result = AgentContextCompactor(config, provider { _, _ -> response("older findings") }, AgentRunController(),
+            dynamicMcpGroupsProvider = { groups }).compact(JSONArray(source.map(AgentConversationCodec::toJsonObject)), 0, emptySet())
+        val history = AgentConversationCodec.transcript(result, 0)
+        assertEquals(setOf("mcp:old"), AgentMcpContext.openedGroupIds(history))
+        assertTrue("mcp_tail" in AgentModelClient.historyToolNames(history))
+        assertEquals(1, history.first().compactedUserTurns)
+        assertEquals(1, history.first().summaryThroughUserTurn)
+    }
+
+    @Test
+    fun summarizerUsesPlainTextAndBoundsHugeContentsAndArgumentsWithHeadAndTail() {
+        val output = "HEAD file.kt:10 expected_revision=abc\n" + "body\n".repeat(100_000) + "TAIL file.kt:999"
+        val history = listOf(
+            AgentModelClient.ConversationMessage("assistant", "line one\nline two \"quoted\"", reasoningContent = "PRIVATE_REASONING",
+                toolCallsJson = """[{"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"file.kt\"}"}}]"""),
+            AgentModelClient.ConversationMessage("tool", output, toolCallId = "read"),
+        )
+        val summarizer = AgentContextSummarizer(config, provider { request, _ ->
+            val text = request.messages.getJSONObject(1).getString("content")
+            assertTrue(text.contains("[assistant]\nline one\nline two \"quoted\""))
+            assertTrue(text.contains("[tool_call read_file id=read]\n{\"path\":\"file.kt\"}"))
+            assertTrue(text.contains("HEAD file.kt:10 expected_revision=abc"))
+            assertTrue(text.contains("TAIL file.kt:999"))
+            assertTrue(text.contains("已截断"))
+            assertFalse(text.contains("PRIVATE_REASONING"))
+            assertTrue(text.length < 7_000)
+            response("bounded")
+        }, AgentRunController(), false)
+        assertEquals("bounded", summarizer.summarize(history))
+    }
+
+    @Test
+    fun largeFormattedHistoryUsesBoundedRollingChunksAtMessageBoundaries() {
+        var calls = 0
+        val seen = mutableListOf<String>()
+        val source = (1..90).map { AgentModelClient.ConversationMessage("tool", "message-$it\n" + "code\n".repeat(2_000)) }
+        val summary = AgentContextSummarizer(config, provider { request, _ ->
+            val text = request.messages.getJSONObject(1).getString("content")
+            assertTrue(text.length < 144_000)
+            if (calls > 0) assertTrue(text.contains("rolling-$calls"))
+            assertEquals(ProviderRequestPurpose.COMPACTION, request.purpose)
+            assertEquals(0, request.effectiveTools.length())
+            seen += text
+            response("rolling-${++calls}")
+        }, AgentRunController(), false).summarize(source)
+        assertTrue(calls > 1)
+        assertEquals("rolling-$calls", summary)
+        for (index in 1..90) assertEquals(1, seen.count { it.contains("message-$index\n") })
+    }
+
+    @Test
+    fun summarizationLowersEffortWithinProtocolAndModelCapabilities() {
+        for ((type, source) in listOf(ProviderTypes.GEMINI to ProviderSourceTypes.GEMINI,
+            ProviderTypes.OPENAI_COMPATIBLE to ProviderSourceTypes.DEEPSEEK,
+            ProviderTypes.ANTHROPIC to ProviderSourceTypes.ANTHROPIC)) {
+            val efforts = if (type == ProviderTypes.GEMINI) listOf(ReasoningEffort.LOW, ReasoningEffort.HIGH)
+                else listOf(ReasoningEffort.MINIMAL, ReasoningEffort.LOW, ReasoningEffort.HIGH)
+            val configured = config.copy(providerType = type, providerSourceType = source, thinkingEnabled = true,
+                reasoningEffort = ReasoningEffort.HIGH, reasoningCapabilities = ModelReasoningCapabilities(
+                    supportedEfforts = efforts, mandatory = true))
+            AgentContextSummarizer(configured, provider { request, _ ->
+                assertEquals(ReasoningEffort.LOW, request.config.effectiveReasoningEffort)
+                when (type) {
+                    ProviderTypes.GEMINI -> GeminiInteractionsRequest.build(request.effectiveConfig, request.messages, JSONArray())
+                    ProviderTypes.ANTHROPIC -> ProviderReasoning.applyAnthropicRequest(JSONObject(), request.effectiveConfig)
+                    else -> ProviderReasoning.applyOpenAiCompatibleRequest(JSONObject(), request.effectiveConfig)
+                }
+                response("bounded")
+            }, AgentRunController(), false).summarize(history())
+            assertEquals(ReasoningEffort.HIGH, configured.effectiveReasoningEffort)
+        }
+    }
+
+    @Test
+    fun summaryCanDisableOptionalThinkingAndUsesDefaultForUnknownOrMandatoryDefaultModels() {
+        val optional = ModelReasoningCapabilities(supportedEfforts = listOf(ReasoningEffort.LOW, ReasoningEffort.HIGH), canDisable = true)
+        val defaultOnly = ModelReasoningCapabilities(mandatory = true)
+        for ((capabilities, expected) in listOf(optional to ReasoningEffort.OFF,
+            defaultOnly to ReasoningEffort.DEFAULT, null to ReasoningEffort.DEFAULT)) {
+            AgentContextSummarizer(config.copy(reasoningEffort = ReasoningEffort.HIGH, reasoningCapabilities = capabilities),
+                provider { request, _ ->
+                    assertEquals(expected, request.config.effectiveReasoningEffort)
+                    response("bounded")
+                }, AgentRunController(), false).summarize(history())
+        }
+    }
+
+    @Test
+    fun localFallbackIsExplicitBoundedAndDoesNotInvokeProvider() {
+        val fallback = AgentContextSummarizer.fallbackSummary(listOf(
+            AgentModelClient.ConversationMessage("user", "goal"),
+            AgentModelClient.ConversationMessage("assistant", reasoningContent = "PRIVATE_REASONING",
+                toolCallsJson = """[{"id":"secret","function":{"name":"read_sms_code","arguments":"PRIVATE_ARGS"}}]"""),
+            AgentModelClient.ConversationMessage("tool", "PRIVATE_RESULT", toolCallId = "secret"),
+        ))
+        assertTrue(fallback.contains("goal"))
+        assertFalse(fallback.contains("PRIVATE_"))
+        assertTrue(fallback.length <= 12_000)
+        val original = jsonHistory()
+        val before = original.toString()
+        val result = AgentContextCompactor(config, provider { _, _ -> error("fallback must not call the model") }, AgentRunController())
+            .fallbackCompact(original, 1, emptySet())
+        assertTrue(result.toString().length < before.length)
+        assertEquals(before, original.toString())
     }
 
     private fun history() = (1..6).flatMap { turn -> listOf(

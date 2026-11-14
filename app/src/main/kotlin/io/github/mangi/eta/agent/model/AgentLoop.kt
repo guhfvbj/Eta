@@ -18,8 +18,8 @@ import org.json.JSONObject
  * 单次 Agent run 的纯编排循环。
  *
  * 一次 assistant 响应及其完整工具批次构成一个 turn；
- * steering 只在 turn 结束后注入，不能用取消网络或关闭工具资源来模拟。循环不设置本地轮次上限，
- * 由模型自然结束、取消或错误终止。
+ * steering 只在 turn 结束后注入，不能用取消网络或关闭工具资源来模拟。
+ * 主会话由模型自然结束；子智能体可指定工具批次上限，在完整批次后收尾。
  */
 internal class AgentLoop(
     private val config: AgentModelClient.ModelConfig,
@@ -43,6 +43,7 @@ internal class AgentLoop(
     initialSupplementIndex: Int = 0,
     private val systemCountProvider: () -> Int = { systemCount },
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
+    private val maxToolRounds: Int? = null,
 ) {
     data class Result(
         val content: String,
@@ -96,10 +97,14 @@ internal class AgentLoop(
 
     fun run(): Result {
         var round = 1
+        var toolRounds = 0
         var precedingTools: JSONArray? = null
 
         while (true) {
             runController.throwIfCancelled()
+            if (maxToolRounds != null && toolRounds >= maxToolRounds) {
+                throw AgentModelFailure("SUBAGENT_ROUND_LIMIT", false, "Subagent 已达到 $maxToolRounds 轮工具批次上限，保留已收集结果。")
+            }
             if (purpose.allowsTools) appendPendingSteeringMessage()
 
             // 带签名的工具链沿用发出调用时的请求前缀，工具链完成后再刷新目录。
@@ -236,6 +241,7 @@ internal class AgentLoop(
                 appendToolImages(round, outcomes)
                 publishTranscript()
                 round += 1
+                toolRounds += 1
                 continue
             }
 

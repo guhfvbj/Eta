@@ -8,6 +8,23 @@ import org.json.JSONArray
 internal class ConversationBranchUnavailable : IllegalStateException("conversation_branch_unavailable")
 
 internal object ConversationBranchBoundary {
+    /** A missing target in compacted history belongs to the discarded range. */
+    fun compactedPrefix(
+        messages: List<ConversationBranchMessage>,
+        history: List<ConversationMessage>,
+        roleplay: RoleplayMessageState,
+        targetId: String,
+    ): List<ConversationMessage>? {
+        if (history.none { it.contextSummary }) return null
+        val transcriptId = roleplay.links[targetId]?.transcriptMessageId
+        if (history.none { matchesTarget(it, transcriptId, targetId) }) return null
+        // resolve also validates the exact block boundary and closed tool batches. Do not
+        // conceal a corrupt retained tail by resurrecting the uncompressed journal.
+        val prefix = resolve(messages, history, roleplay, targetId, checkSummary = false)
+        val turns = prefix.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 }
+        return prefix.takeUnless { entries -> entries.any { it.contextSummary && it.summaryThroughUserTurn > turns } }
+    }
+
     fun eligibleMessageIds(messages: List<ConversationBranchMessage>, running: Boolean = false): Set<String> = buildSet {
         var candidate: String? = null
         for (message in messages) {
@@ -31,13 +48,12 @@ internal object ConversationBranchBoundary {
         journal: List<ConversationMessage>,
         roleplay: RoleplayMessageState,
         targetId: String,
+        checkSummary: Boolean = true,
     ): List<ConversationMessage> {
         if (targetId !in eligibleMessageIds(messages)) throw ConversationBranchUnavailable()
         val transcriptId = roleplay.links[targetId]?.transcriptMessageId
         val matches = journal.withIndex().filter { (_, message) ->
-            message.role == "assistant" && message.messageId.isNotBlank() &&
-                if (transcriptId != null) message.messageId == transcriptId
-                else targetId == message.messageId || targetId.startsWith("${message.messageId}-")
+            matchesTarget(message, transcriptId, targetId)
         }
         val longest = matches.maxOfOrNull { it.value.messageId.length }
         val exact = matches.filter { it.value.messageId.length == longest }
@@ -50,10 +66,15 @@ internal object ConversationBranchBoundary {
             throw ConversationBranchUnavailable()
         }
         val turns = prefix.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 }
-        if (prefix.any { it.contextSummary && it.summaryThroughUserTurn > turns }) throw ConversationBranchUnavailable()
+        if (checkSummary && prefix.any { it.contextSummary && it.summaryThroughUserTurn > turns }) throw ConversationBranchUnavailable()
         requireClosedTools(prefix)
         return prefix
     }
+
+    private fun matchesTarget(message: ConversationMessage, transcriptId: String?, targetId: String): Boolean =
+        message.role == "assistant" && message.messageId.isNotBlank() &&
+            if (transcriptId != null) message.messageId == transcriptId
+            else targetId == message.messageId || targetId.startsWith("${message.messageId}-")
 
     private fun requireClosedTools(messages: List<ConversationMessage>) {
         val pending = mutableSetOf<String>()

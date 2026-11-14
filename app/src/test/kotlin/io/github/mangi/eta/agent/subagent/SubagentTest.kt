@@ -7,6 +7,9 @@ import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
 import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.mcp.McpRunTool
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
+import io.github.mangi.eta.agent.model.AgentModelFailure
+import io.github.mangi.eta.agent.model.ProviderRequestPurpose
+import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.agent.model.AgentLoop
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentProviderClient
@@ -548,6 +551,117 @@ class SubagentTest {
     }
 
     @Test
+    fun toolRoundLimitReturnsDeterministicEvidenceAndResumeRetainsFindings() {
+        val key = UUID.randomUUID().toString()
+        var rounds = 0
+        var executed = 0
+        val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+            assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+            assertTrue("read_file" in request.tools.toolNames())
+            rounds++
+            response(toolCall("read_file", """{"path":"file-$rounds.kt"}"""))
+        }, AgentModelClient.ToolExecutor {
+            AgentModelClient.ToolResult("file-${++executed}.kt:42 expected_revision=hash-$executed")
+        }, maxToolRounds = 3, terminalTools = true)
+        val result = executeSubagent(executor, SubagentProfile.TYPE_EXPLORE)
+        assertEquals(3, rounds)
+        assertEquals(3, executed)
+        assertTrue(result.getBoolean("incomplete"))
+        assertEquals("SUBAGENT_ROUND_LIMIT", result.getString("wrap_up_reason"))
+        for (index in 1..3) assertTrue(result.getString("summary").contains("file-$index.kt:42"))
+        assertFalse(session(key).running.get())
+        for (index in 1..3) assertTrue(session(key).history.any { it.content.contains("file-$index.kt:42") })
+        val resumed = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+            assertTrue(request.messages.toString().contains("expected_revision=hash-3"))
+            response()
+        })
+        executeSubagent(resumed, type = null, resume = result.getString("subagent_id"))
+    }
+
+    @Test
+    fun subagentCompactionFailureWrapsUpWithoutAnotherModelCallAndKeepsFallbackOnResume() {
+        val key = UUID.randomUUID().toString()
+        var chats = 0
+        var summaries = 0
+        val failingProvider = object : AgentProviderClient {
+            override val id = "failing-summary"
+            override val capabilities = ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS, true, true, true, true, false, false)
+            override fun complete(request: ProviderRequest, runController: AgentRunController,
+                onEvent: (ProviderEvent) -> Unit): ProviderResponse {
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    return ProviderResponse(JSONObject().put("role", "assistant").put("content", "partial").put("finish_reason", "length"))
+                }
+                assertTrue("read_file" in request.tools.toolNames())
+                chats++
+                onEvent(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 120_000)))
+                return response(toolCall("read_file", """{"path":"evidence.kt"}"""))
+            }
+        }
+        val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, failingProvider, AgentModelClient.ToolExecutor {
+            AgentModelClient.ToolResult("evidence.kt:10\n" + "code\n".repeat(20_000) + "expected_revision=retained-hash")
+        }, terminalTools = true)
+        val result = executeSubagent(executor, SubagentProfile.TYPE_EXPLORE)
+        assertTrue(result.getBoolean("incomplete"))
+        assertEquals("CONTEXT_SUMMARY_INVALID", result.getString("wrap_up_reason"))
+        assertEquals(1, chats)
+        assertEquals(1, summaries)
+        assertTrue(result.getString("summary").contains("evidence.kt:10"))
+        assertTrue(result.getString("summary").contains("expected_revision=retained-hash"))
+        assertTrue(session(key).history.any { it.contextSummary })
+        assertFalse(session(key).running.get())
+        assertTrue(session(key).history.sumOf { it.content.length } < 30_000)
+        executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+            assertTrue(request.messages.toString().contains("retained-hash"))
+            assertTrue(request.messages.toString().contains("本地应急整理"))
+            response()
+        }), type = null, resume = result.getString("subagent_id"))
+    }
+
+    @Test
+    fun successfulCheckpointPlusOnlyNewTranscriptIsStoredOnSuccessAndLaterFailure() {
+        for (failLater in listOf(false, true)) {
+            val key = UUID.randomUUID().toString()
+            val entry = SubagentSessionStore.create(key, SubagentProfile.EXPLORE)
+            SubagentSessionStore.complete(key, entry.subagentId, listOf(
+                AgentModelClient.ConversationMessage("user", "old task"),
+                AgentModelClient.ConversationMessage("assistant", "OLD_UNCOMPRESSED_BODY".repeat(5_000)),
+            ))
+            var rounds = 0
+            val checkpointProvider = object : AgentProviderClient {
+                override val id = "checkpoint-test"
+                override val capabilities = ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS, true, true, true, true, false, false)
+                override fun complete(request: ProviderRequest, runController: AgentRunController,
+                    onEvent: (ProviderEvent) -> Unit): ProviderResponse {
+                    if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                        return ProviderResponse(JSONObject().put("role", "assistant").put("content", "OLD_SUMMARY").put("finish_reason", "stop"))
+                    }
+                    assertTrue("read_file" in request.tools.toolNames())
+                    rounds++
+                    if (rounds == 1) onEvent(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 120_000)))
+                    if (rounds <= 2) return response(toolCall("read_file", id = "read-$rounds"))
+                    if (failLater) throw AgentModelFailure("MODEL_TIMEOUT", false, "fixture")
+                    return response()
+                }
+            }
+            val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, checkpointProvider,
+                AgentModelClient.ToolExecutor { call -> AgentModelClient.ToolResult("evidence-${call.id}") }, terminalTools = true)
+            val args = JSONObject().put("prompt", "continue").put("description", "checkpoint regression").put("resume", entry.subagentId)
+            val result = JSONObject(executor.execute(1, toolCall("subagent", args.toString())).content)
+            assertEquals(!failLater, result.getBoolean("ok"))
+            assertTrue(entry.history.any { it.contextSummary && it.content.contains("OLD_SUMMARY") })
+            assertFalse(entry.history.any { it.content.contains("OLD_UNCOMPRESSED_BODY") })
+            assertEquals(listOf("evidence-read-1", "evidence-read-2"), entry.history.filter { it.role == "tool" }.map { it.content })
+            assertFalse(entry.running.get())
+            executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+                assertFalse(request.messages.toString().contains("OLD_UNCOMPRESSED_BODY"))
+                assertTrue(request.messages.toString().contains("OLD_SUMMARY"))
+                response()
+            }), type = null, resume = entry.subagentId)
+        }
+    }
+
+    @Test
     fun subagentProgressEventRoundTripsThroughRuntimeWire() {
         val snapshot = SubagentActivitySnapshot(
             subagentId = "sub_1",
@@ -588,6 +702,8 @@ class SubagentTest {
         baseToolExecutor: AgentModelClient.ToolExecutor = AgentModelClient.ToolExecutor { call ->
             error("Unexpected base tool call: ${call.name}")
         },
+        maxToolRounds: Int = 48,
+        terminalTools: Boolean = false,
     ) = SubagentExecutor(
         conversationKey = conversationKey,
         parentController = AgentRunController(),
@@ -598,6 +714,7 @@ class SubagentTest {
                 model = "fixture",
                 systemPrompt = "fixed",
                 contextWindow = 128_000,
+                terminalTools = terminalTools,
                 browserTools = false,
             )
         },
@@ -610,6 +727,7 @@ class SubagentTest {
         executionContext = null,
         onProgress = {},
         providerFor = { provider },
+        maxToolRounds = maxToolRounds,
     )
 
     private fun executeSubagent(

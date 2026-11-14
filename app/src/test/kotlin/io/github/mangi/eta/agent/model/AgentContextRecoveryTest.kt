@@ -140,6 +140,38 @@ class AgentContextRecoveryTest {
     }
 
     @Test
+    fun summaryToolCallAndLaterInvalidRollingChunkNeverCommitPartialSummary() {
+        for (streamed in listOf(false, true)) {
+            val original = messages()
+            val before = original.toString()
+            val session = AgentContextSession(config, original, 1, "operation", provider { _, emit ->
+                if (streamed) emit(ProviderEvent.BlockStart(AssistantBlockKind.TOOL_CALL, 0, name = "read_file"))
+                ProviderResponse(JSONObject().put("role", "assistant").put("content", "invalid")
+                    .put("finish_reason", "stop").put("tool_calls", JSONArray().put(JSONObject()
+                        .put("id", "forbidden").put("function", JSONObject().put("name", "read_file").put("arguments", "{}")))))
+            }, AgentRunController(), { emptySet() }, {}, { fail("tool summary must not commit") })
+            assertEquals("CONTEXT_SUMMARY_INVALID", assertThrows(AgentModelFailure::class.java) { session.compact(force = true) }.code)
+            assertEquals(before, original.toString())
+            assertNull(session.snapshot())
+        }
+
+        val original = JSONArray().put(JSONObject().put("role", "system").put("content", "fixed"))
+        repeat(90) { index ->
+            original.put(AgentConversationCodec.userTextMessage("turn $index"))
+            original.put(JSONObject().put("role", "assistant").put("content", "code".repeat(2_000)))
+        }
+        val before = original.toString()
+        var calls = 0
+        val session = AgentContextSession(config, original, 1, "operation", provider { _, _ ->
+            if (++calls == 1) response("valid first chunk") else response("", "length")
+        }, AgentRunController(), { emptySet() }, {}, { fail("partial rolling summary must not commit") })
+        assertEquals("CONTEXT_SUMMARY_INVALID", assertThrows(AgentModelFailure::class.java) { session.compact(force = true) }.code)
+        assertEquals(2, calls)
+        assertEquals(before, original.toString())
+        assertNull(session.snapshot())
+    }
+
+    @Test
     fun emptyLengthResponseIsNotReplayedEvenWhenInputIsNearWindow() {
         var requests = 0
         val failure = assertThrows(AgentModelExecutionException::class.java) {

@@ -74,6 +74,29 @@ class AgentConversationBranchPersistenceTest {
     }
 
     @Test
+    fun branchAfterChunkedSummaryKeepsCompactedHistoryAndIndependentTrimmedJournal() = runBlocking {
+        val full = conversation(10)
+        val summary = ConversationMessage("assistant", "摘要事实".repeat(6_000), contextSummary = true,
+            compactedUserTurns = 6, summaryThroughUserTurn = 6)
+        val source = full.copy(history = listOf(summary) + full.journal.drop(12))
+        val persistence = AgentConversationPersistence()
+        persistence.save(context, snapshot(source))
+        assertTrue(dao.contextCheckpointRow("source")!!.historyJson.startsWith(ChunkedTextDao.REFERENCE_PREFIX))
+
+        val child = persistence.branch(context, "source", "assistant-8-0", "child", "分支", 2L)
+        assertEquals(source.history.take(7).map { it.content }, child.history.map { it.content })
+        assertEquals(full.journal.take(18).map { it.content }, child.journal.map { it.content })
+        assertTrue(child.history.first().contextSummary)
+        assertFalse(child.history.any { it.content == "回答 0" || it.content == "回答 9" })
+        assertEquals(ConversationBranchBoundary.remapId("child", "assistant-8"), child.history.last().messageId)
+        assertEquals(source.history, AgentConversationStore.loadConversation(context, "source")!!.history)
+        dao.deleteConversation("source")
+        EtaDatabase.closeForTests()
+        assertEquals(child.history, AgentConversationStore.loadConversation(context, "child")!!.history)
+        assertEquals(child.journal, AgentConversationStore.loadConversation(context, "child")!!.journal)
+    }
+
+    @Test
     fun queuedOldSnapshotsPreserveCommittedBranchUntilPublicationThenAllowDeletion() = runBlocking {
         val initial = snapshot(conversation(100))
         val persistence = AgentConversationPersistence()
@@ -160,6 +183,20 @@ class AgentConversationBranchPersistenceTest {
         val greeting = persistence.branch(context, "child", child.messages.first().id, "greeting-child", "开场分支", 4L)
         assertEquals(1, greeting.messages.size)
         assertEquals("开场白", greeting.history.single().content)
+
+        // The stored compacted roleplay projection already contains the selected text.
+        // Earlier links/revisions remain for UI/journal, without re-projecting old bodies.
+        val compacted = source.copy(history = listOf(ConversationMessage("assistant", "开场与首轮已压缩",
+            contextSummary = true, compactedUserTurns = 1, summaryThroughUserTurn = 1)) + source.history.takeLast(2))
+        persistence.save(context, snapshot(compacted))
+        val compactedChild = persistence.branch(context, "source", "assistant-1-0", "compacted-child", "摘要分支", 5L)
+        assertEquals(compacted.history.map { it.content }, compactedChild.history.map { it.content })
+        assertEquals(source.journal.map { it.content }, compactedChild.journal.map { it.content })
+        assertEquals("后续改写", compactedChild.history.last().content)
+        assertEquals("后续回答", compactedChild.journal.last().content)
+        val compactedGrandchild = persistence.branch(context, "compacted-child", compactedChild.messages.last().id,
+            "compacted-grandchild", "再次摘要分支", 6L)
+        assertEquals(compactedChild.history.map { it.content }, compactedGrandchild.history.map { it.content })
     }
 
     @Test

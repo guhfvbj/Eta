@@ -97,6 +97,24 @@ class ConversationBranchBoundaryTest {
     }
 
     @Test
+    fun compactedPrefixKeepsSummaryAndClosedTailWithoutRestoringCoveredTurns() {
+        val rows = outline("user" to "u1", "assistant" to "a1", "user" to "u2", "assistant" to "a2",
+            "user" to "u3", "assistant" to "a3")
+        val summary = ConversationMessage("assistant", "第一轮摘要", contextSummary = true,
+            compactedUserTurns = 1, summaryThroughUserTurn = 1)
+        val history = listOf(summary, user("u2"), call(), result(), assistant("a2"), user("u3"), assistant("a3"))
+        assertEquals(history.take(5), ConversationBranchBoundary.compactedPrefix(rows, history, emptyRole, "a2"))
+        assertEquals(2, ConversationBranchBoundary.compactedPrefix(rows,
+            history.map { if (it.contextSummary) it.copy(summaryThroughUserTurn = 2) else it }, emptyRole, "a2")!!.first().summaryThroughUserTurn)
+        assertEquals(null, ConversationBranchBoundary.compactedPrefix(rows, history, emptyRole, "a1"))
+        assertEquals(null, ConversationBranchBoundary.compactedPrefix(rows,
+            history.map { if (it.contextSummary) it.copy(summaryThroughUserTurn = 3) else it }, emptyRole, "a2"))
+        assertThrows(ConversationBranchUnavailable::class.java) {
+            ConversationBranchBoundary.compactedPrefix(rows, history.filterNot { it.role == "tool" }, emptyRole, "a2")
+        }
+    }
+
+    @Test
     fun greetingAndRemappedBlockIdsRemainBranchable() {
         val greeting = "greeting-source"
         assertEquals(listOf(assistant(greeting)), ConversationBranchBoundary.resolve(

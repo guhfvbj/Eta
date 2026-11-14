@@ -27,22 +27,33 @@ internal object AgentConversationRevisionReducer {
         val targetUserOrdinal = userMessageIndices.indexOf(userMessageIndex)
         if (targetUserOrdinal < 0) return null
 
-        val source = state.journal.ifEmpty { state.history }
-        val historyUserIndices = source.indices.filter { source[it].role == "user" }
         // 旧版本可能已经丢失前缀；只能对已有记录做尾部对齐，不能伪造恢复。
-        val retainedUserOrdinal = historyUserIndices.size - (userMessageIndices.size - targetUserOrdinal)
-        val historyIndex = historyUserIndices.getOrNull(retainedUserOrdinal)
-        val prefix = historyIndex?.let(source::take).orEmpty()
-        val targetTurn = prefix.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 } + 1
-        val invalidatesSummary = prefix.any { it.contextSummary && it.summaryThroughUserTurn >= targetTurn }
-        val compacted = historyIndex == null || invalidatesSummary
+        fun prefix(source: List<AgentModelClient.ConversationMessage>): List<AgentModelClient.ConversationMessage>? {
+            val users = source.indices.filter { source[it].role == "user" }
+            val ordinal = users.size - (userMessageIndices.size - targetUserOrdinal)
+            return users.getOrNull(ordinal)?.let(source::take)
+        }
+        fun validPrefix(source: List<AgentModelClient.ConversationMessage>): List<AgentModelClient.ConversationMessage> {
+            val turn = source.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 } + 1
+            return source.filterNot { it.contextSummary && it.summaryThroughUserTurn >= turn }
+        }
+        val historyPrefix = prefix(state.history)
+        val journalPrefix = if (state.journal.isNotEmpty()) validPrefix(prefix(state.journal).orEmpty()) else null
+        val targetTurn = historyPrefix.orEmpty().sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 } + 1
+        val invalidatesSummary = state.history.any {
+            it.contextSummary && (historyPrefix == null || it.summaryThroughUserTurn >= targetTurn)
+        }
+        val retainedHistory = if (state.history.isEmpty() || historyPrefix == null || invalidatesSummary) {
+            journalPrefix ?: validPrefix(historyPrefix.orEmpty())
+        } else historyPrefix
 
         return Boundary(
             userMessage = userMessage,
             userMessageIndex = userMessageIndex,
-            historyPrefix = prefix.filterNot { it.contextSummary && it.summaryThroughUserTurn >= targetTurn },
+            historyPrefix = retainedHistory,
+            journalPrefix = journalPrefix ?: retainedHistory,
             laterTurnCount = userMessageIndices.size - targetUserOrdinal - 1,
-            contextWasCompacted = compacted,
+            contextWasCompacted = historyPrefix == null || invalidatesSummary,
         )
     }
 

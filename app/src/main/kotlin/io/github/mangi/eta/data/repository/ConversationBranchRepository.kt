@@ -32,14 +32,20 @@ internal object ConversationBranchRepository {
         val target = outline.firstOrNull { it.id == targetMessageId } ?: throw ConversationBranchUnavailable()
         val roleplay = source.revisionsJson.takeIf { it.isNotBlank() }
             ?.let { json.decodeFromString<RoleplayMessageState>(it) } ?: RoleplayMessageState()
-        val journal = ConversationBranchBoundary.resolve(outline, loadJournal(dao, sourceId), roleplay, targetMessageId)
+        val checkpoint = dao.contextCheckpointRow(sourceId) ?: throw ConversationBranchUnavailable()
+        val journal = ConversationBranchBoundary.resolve(outline,
+            loadCheckpoint(dao, sourceId, "journal", checkpoint.journalJson), roleplay, targetMessageId)
+        val compactedHistory = ConversationBranchBoundary.compactedPrefix(outline,
+            loadCheckpoint(dao, sourceId, "history", checkpoint.historyJson), roleplay, targetMessageId)
         val retainedIds = outline.asSequence().filter { it.sortIndex <= target.sortIndex }.map { it.id }.toSet()
         val transcriptIds = journal.mapTo(mutableSetOf()) { it.messageId }
         val links = roleplay.links.filterKeys { it in retainedIds }
         if (links.values.any { it.transcriptMessageId !in transcriptIds }) throw ConversationBranchUnavailable()
         val revisions = roleplay.revisions.filterKeys { it in links }
         val retainedRoleplay = RoleplayMessageState(links = links, revisions = revisions)
-        val history = if (source.roleplayJson.isBlank()) journal else {
+        // Stored history is already the roleplay projection. Re-projecting it would add
+        // duplicate notices (and rebuilding from journal would undo compaction).
+        val history = compactedHistory ?: if (source.roleplayJson.isBlank()) journal else {
             val changedTranscripts = revisions.keys.mapNotNullTo(mutableSetOf()) { links[it]?.transcriptMessageId }
             val needed = links.filterValues { it.transcriptMessageId in changedTranscripts }.keys
             val contents = buildMap {
@@ -84,10 +90,9 @@ internal object ConversationBranchRepository {
         }
     }
 
-    private suspend fun loadJournal(dao: ConversationDao, id: String): List<ConversationMessage> {
-        val stored = dao.contextCheckpointRow(id)?.journalJson?.takeIf { it.isNotBlank() }
-            ?: throw ConversationBranchUnavailable()
-        return dao.openTextStream("conversation_context_checkpoints", id, "journal", stored).use {
+    private fun loadCheckpoint(dao: ConversationDao, id: String, field: String, stored: String): List<ConversationMessage> {
+        if (stored.isBlank()) return emptyList()
+        return dao.openTextStream("conversation_context_checkpoints", id, field, stored).use {
             AgentConversationCodec.decodeTranscript(it)
         }
     }

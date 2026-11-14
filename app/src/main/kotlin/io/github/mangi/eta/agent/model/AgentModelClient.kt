@@ -127,6 +127,7 @@ internal object AgentModelClient {
         mcpProjection: McpToolProjection? = null,
         mcpSearchEnabled: Boolean = true,
         openedMcpGroupsProvider: () -> Set<String> = { emptySet() },
+        maxToolRounds: Int? = null,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
         onEvent: (AgentEvent) -> Unit = {},
@@ -310,6 +311,7 @@ internal object AgentModelClient {
             roleplayContext = roleplayContext,
             initialSupplementIndex = initialSupplementIndex,
             toolsForRound = ::toolsForRound,
+            maxToolRounds = maxToolRounds,
         )
         val result = try {
             if (compactOnly) loop.compactOnly() else loop.run()
