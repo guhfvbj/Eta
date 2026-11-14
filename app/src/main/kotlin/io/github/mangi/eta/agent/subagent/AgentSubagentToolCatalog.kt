@@ -35,6 +35,7 @@ internal object AgentSubagentToolCatalog {
             append("or use one of the preset types below. When multiple independent subtasks can run in parallel, issue multiple `subagent` tool calls in the same turn — the runtime executes them concurrently.\n\n")
             append("Writing the prompt:\n")
             append("- A fresh subagent starts with zero conversation history. State the goal clearly and include any known file paths, time ranges, package names, or constraints.\n")
+            append("- For explore, provide search roots/globs; use grep_files/glob_files and batch independent read_file calls in one turn. It has read-only inspection, skills and memory tools, but no shell or GUI.\n")
             append("- Prefer resuming an existing subagent (pass its `resume` id) when continuing earlier work so it retains its prior context.\n")
             append("- For ad-hoc specialized roles (e.g. `bill-analyzer`, `log-auditor`, `schedule-checker`), pass the role name in `subagent_type` and optionally specify `role` or `tools` — it runs immediately as an ephemeral subagent.\n")
             append("- The subagent's output is only returned to you; summarize relevant findings for the user in your own reply.\n\n")

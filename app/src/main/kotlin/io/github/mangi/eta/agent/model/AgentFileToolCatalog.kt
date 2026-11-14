@@ -8,7 +8,7 @@ internal object AgentFileToolCatalog {
     val names = setOf("read_file", "write_file", "edit_file", "stat_file", "list_directory", "glob_files", "grep_files")
 
     fun appendTo(tools: JSONArray) {
-        tools.put(tool("read_file", "读取 UTF-8 文本。已知路径直接读取；返回的 next_offset_bytes 是准确续读位置，续读同时传 expected_revision。支持 start_line 定位；超长行可分段，二进制请使用对应媒体工具。", properties()
+        tools.put(tool("read_file", "读取 UTF-8 文本。已知路径直接读取；多个独立文件在同一轮批量调用，需要大段代码时设 max_lines=2000、max_bytes=16000，避免逐轮读取小片段。返回的 next_offset_bytes 是准确续读位置，续读同时传 expected_revision。支持 start_line 定位；超长行可分段，二进制请使用对应媒体工具。", properties()
             .put("path", path())
             .put("offset_bytes", integer("字节起点，默认 0；续读使用上次 next_offset_bytes，不要自行推算。", 0))
             .put("max_bytes", integer("单次文本字节预算，默认 16000；为兼容旧调用接受更大值，但实际最多返回 16000 字节。", 4, 262144))
@@ -31,12 +31,12 @@ internal object AgentFileToolCatalog {
             .put("limit", integer("原始目录单页条目数，默认 80，隐藏项过滤后可能不足此数。", 1, 200))
             .put("offset", integer("目录枚举位置，默认 0；续页使用 next_offset。", 0))
             .put("expected_revision", revision()), emptyList()))
-        tools.put(tool("glob_files", "按路径模式递归查找工作目录内的文件。支持 *、?、**，默认跳过隐藏目录且不追踪目录链接。结果有界；继续查询使用原样 cursor，partial=true 时不能断言已搜索全部文件。", properties()
+        tools.put(tool("glob_files", "按路径模式递归查找工作目录内的文件，优先于逐级 list_directory；独立搜索可在同一轮批量调用。支持 *、?、**，默认跳过隐藏目录且不追踪目录链接。结果有界；继续查询使用原样 cursor，partial=true 时不能断言已搜索全部文件。", properties()
             .put("path", path()).put("pattern", text("相对于搜索目录的模式，例如 **/*.json。", 500).put("minLength", 1))
             .put("limit", integer("最多返回条目数，默认 80。", 1, 200))
             .put("cursor", text("上次查询返回的不透明续查游标，保持所有查询条件不变。", FileToolSearch.MAX_CURSOR_CHARS))
             .put("include_hidden", JSONObject().put("type", "boolean").put("default", false)), listOf("pattern")))
-        tools.put(tool("grep_files", "在目录或单个普通文件的 UTF-8 文本中搜索字面文本，返回路径、行号与匹配行。单文件时 glob 匹配文件名，显式指定的隐藏文件也会搜索。默认区分大小写；不依赖系统 rg。按条目和字节预算分段扫描，可通过游标续查；二进制和不可访问项会被跳过并报告不完整范围。", properties()
+        tools.put(tool("grep_files", "在目录或单个普通文件的 UTF-8 文本中搜索字面文本，返回路径、行号与匹配行。单文件时 glob 匹配文件名，显式指定的隐藏文件也会搜索。定位内容优先于逐个 read_file；独立搜索可在同一轮批量调用。默认区分大小写；不依赖系统 rg。按条目和字节预算分段扫描，可通过游标续查；二进制和不可访问项会被跳过并报告不完整范围。", properties()
             .put("path", path()).put("query", text("要查找的字面文本，不是正则表达式。", 500).put("minLength", 1))
             .put("glob", text("相对于目录的文件模式，默认 **/*。", 500))
             .put("limit", integer("最多返回匹配条数，默认 50。", 1, 200))

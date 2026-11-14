@@ -223,6 +223,48 @@ class SubagentTest {
     }
 
     @Test
+    fun exploreIncludesInspectionSkillsMemoryDeviceAndTaskHistoryWithoutSideEffects() {
+        val allowed = setOf("read_file", "stat_file", "list_directory", "glob_files", "grep_files",
+            "skills_list", "skills_read", "skills_read_resource", "memory_get", "character_memory_get",
+            "device_status", "get_logcat", "tasks_list", "tasks_triggers", "tasks_history")
+        val denied = setOf("write_file", "edit_file", "terminal", "terminal_job", "terminal_daemon",
+            "subagent", "subagent_profile", "observe_screen", "tap", "browser_use", "memory_write",
+            "character_memory_write", "skills_install_from_github", "tasks_create", "tasks_update",
+            "tasks_delete", "tasks_run", "tasks_cancel", "mcp_server_read", "tools_search", "tools_use_group")
+        val profiles = listOf(SubagentProfile.EXPLORE, SubagentProfile.PLAN,
+            SubagentProfile.resolve("explore", catalog = SubagentProfile.BUILTIN_PROFILES, customTools = listOf("*")))
+        for (profile in profiles) {
+            allowed.forEach { assertTrue("${profile.name}: $it", profile.isToolAllowed(it)) }
+            denied.forEach { assertFalse("${profile.name}: $it", profile.isToolAllowed(it)) }
+        }
+        val narrowed = SubagentProfile.resolve("explore", catalog = SubagentProfile.BUILTIN_PROFILES,
+            customTools = listOf("read_file", "terminal", "write_file"))
+        assertTrue(narrowed.isToolAllowed("read_file"))
+        assertFalse(narrowed.isToolAllowed("grep_files"))
+        assertFalse(narrowed.isToolAllowed("terminal"))
+        assertFalse(narrowed.isToolAllowed("write_file"))
+        val prompt = SubagentProfile.EXPLORE.buildSystemPrompt()
+        for (guidance in listOf("grep_files / glob_files", "同一轮", "max_lines=2000", "max_bytes=16000",
+            "environment=linux", "partial=true", "cursor", "GUI")) assertTrue(guidance, prompt.contains(guidance))
+        assertTrue(AgentSubagentToolCatalog.schema().toString().contains("no shell or GUI"))
+    }
+
+    @Test
+    fun exploreCatalogFilteringCopiesSchemasAndNeverMutatesTheParentCatalog() {
+        val catalog = AgentToolCatalog.build(terminalTools = true, browserTools = true, memoryTools = true,
+            deviceDirectTools = true, capabilities = AgentToolCapabilities(rootAvailable = true))
+        val before = catalog.toString()
+        val child = SubagentProfile.EXPLORE.filterTools(catalog)
+        assertTrue(child.length() > 0)
+        child.getJSONObject(0).getJSONObject("function").put("description", "child only")
+        assertEquals(before, catalog.toString())
+        val wildcard = SubagentProfile.resolve("custom-worker", catalog = emptyList(), customTools = listOf("*"))
+        assertTrue(wildcard.isToolAllowed("terminal"))
+        assertTrue(wildcard.isToolAllowed("write_file"))
+        SubagentProfile.FORBIDDEN_TOOLS.forEach { assertFalse(it, wildcard.isToolAllowed(it)) }
+    }
+
+    @Test
     fun customSubagentProfileCanBeSavedDiscoveredAndFilteredSafely() {
         val tempDir = java.nio.file.Files.createTempDirectory("eta-subagent-test").toFile()
         try {

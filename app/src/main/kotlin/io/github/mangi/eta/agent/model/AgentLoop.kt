@@ -8,8 +8,10 @@ import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import io.github.mangi.eta.agent.subagent.AgentSubagentToolCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.supervisorScope
 import org.json.JSONArray
 import org.json.JSONObject
@@ -59,7 +61,7 @@ internal class AgentLoop(
 
     private var availableToolNames = emptySet<String>()
     private val accumulatedReasoning = StringBuilder()
-    private val sensitiveToolCallIds = linkedSetOf<String>()
+    private val sensitiveToolCallIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val toolBatchLock = Any()
     private var pendingToolImageMessage: JSONObject? = null
     private val turnMetrics = TurnMetricsAccumulator()
@@ -265,8 +267,11 @@ internal class AgentLoop(
             if (toolCalls.isNotEmpty()) {
                 publishTranscript() // Persist the call before entering a potentially interrupted tool batch.
                 val outcomes = executeToolBatch(round, toolCalls, providerResponse.stopReason)
-                outcomes.forEach { outcome ->
-                    appendMessage(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
+                // Completed results were journaled immediately, including before a
+                // cancellation. Only the model projection is ordered by call position.
+                val resultStart = messages.length() - outcomes.size
+                outcomes.forEachIndexed { index, outcome ->
+                    messages.put(resultStart + index, AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
                 }
                 publishTranscript()
                 appendToolImages(round, outcomes)
@@ -395,8 +400,15 @@ internal class AgentLoop(
                 if (parallelBatch.size == 1) {
                     outcomes += executeTool(round, parallelBatch.single())
                 } else {
-                    outcomes += executeParallelSubagents(round, parallelBatch)
+                    outcomes += executeParallelTools(round, parallelBatch)
                 }
+            } else if (current.name in PARALLEL_FILE_READ_TOOLS && current.name in availableToolNames) {
+                val batch = mutableListOf<AgentModelClient.ToolCall>()
+                while (index < toolCalls.size && batch.size < 4 &&
+                    toolCalls[index].name in PARALLEL_FILE_READ_TOOLS && toolCalls[index].name in availableToolNames) {
+                    batch += toolCalls[index++].copy(round = round)
+                }
+                outcomes += if (batch.size == 1) listOf(executeTool(round, batch.single())) else executeParallelTools(round, batch)
             } else {
                 outcomes += executeTool(round, current.copy(round = round))
                 index += 1
@@ -405,12 +417,13 @@ internal class AgentLoop(
         return outcomes
     }
 
-    private fun executeParallelSubagents(
+    private fun executeParallelTools(
         round: Int,
         calls: List<AgentModelClient.ToolCall>,
     ): List<ToolOutcome> {
         runController.throwIfCancelled()
         calls.forEach { toolCall ->
+            runController.throwIfCancelled()
             synchronized(toolBatchLock) {
                 onEvent(
                     AgentEvent.ToolStarted(
@@ -423,49 +436,62 @@ internal class AgentLoop(
                 )
             }
         }
-        val outcomes = runBlocking(Dispatchers.IO) {
-            supervisorScope {
-                calls.map { toolCall ->
-                    async {
-                        val toolStartMs = monotonicNowMs()
-                        val result = try {
-                            toolExecutor.execute(toolCall)
-                        } catch (throwable: Exception) {
-                            if (runController.isCancelled) {
-                                AgentModelClient.ToolResult(
-                                    content = JSONObject()
-                                        .put("ok", false)
-                                        .put("code", "SUBAGENT_CANCELLED")
-                                        .put("message", "已停止")
-                                        .toString(),
-                                )
-                            } else {
-                                AgentModelClient.ToolResult(
-                                    content = JSONObject()
-                                        .put("ok", false)
-                                        .put("code", "TOOL_ERROR")
-                                        .put("message", throwable.message ?: throwable.javaClass.simpleName)
-                                        .toString(),
-                                )
+        val outcomes = try {
+            runBlocking {
+                val cancellation = runController.register { coroutineContext.job.cancel() }
+                try {
+                    supervisorScope {
+                        val completed = Channel<Int>(Channel.UNLIMITED)
+                        val tasks = calls.mapIndexed { index, toolCall ->
+                            async {
+                                try {
+                                    runInterruptible(Dispatchers.IO) { executeParallelCall(toolCall) }
+                                } finally {
+                                    completed.trySend(index)
+                                }
                             }
                         }
-                        val elapsedMs = (monotonicNowMs() - toolStartMs).coerceAtLeast(0L)
-                        synchronized(toolBatchLock) {
-                            if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
-                                sensitiveToolCallIds += toolCall.id
+                        val ordered = arrayOfNulls<ToolOutcome>(calls.size)
+                        repeat(calls.size) {
+                            val index = completed.receive()
+                            val (outcome, elapsedMs) = tasks[index].await()
+                            runController.throwIfCancelled()
+                            // Only execution runs in workers. Keep terminal UI events,
+                            // metrics, sensitive IDs and checkpoint callbacks on this thread.
+                            if (outcome.result.sensitive || AgentSensitiveToolPolicy.isSensitive(outcome.call.name)) {
+                                sensitiveToolCallIds += outcome.call.id
                             }
-                            if (!runController.isCancelled) {
-                                turnMetrics.recordToolMs(elapsedMs)
-                                emitToolFinished(round, toolCall, result)
-                            }
+                            turnMetrics.recordToolMs(elapsedMs)
+                            emitToolFinished(round, outcome.call, outcome.result)
+                            ordered[index] = outcome
                         }
-                        ToolOutcome(toolCall, result)
+                        ordered.map { checkNotNull(it) }
                     }
-                }.awaitAll()
+                } finally {
+                    cancellation.close()
+                }
             }
+        } catch (failure: Exception) {
+            runController.throwIfCancelled()
+            throw failure
         }
         runController.throwIfCancelled()
         return outcomes
+    }
+
+    private fun executeParallelCall(toolCall: AgentModelClient.ToolCall): Pair<ToolOutcome, Long> {
+        runController.throwIfCancelled()
+        val started = monotonicNowMs()
+        val result = try {
+            toolExecutor.execute(toolCall)
+        } catch (failure: Exception) {
+            runController.throwIfCancelled()
+            if (failure is java.util.concurrent.CancellationException || failure is InterruptedException ||
+                Thread.currentThread().isInterrupted) throw failure
+            AgentModelClient.ToolResult(JSONObject().put("ok", false).put("code", "TOOL_ERROR")
+                .put("message", failure.message ?: failure.javaClass.simpleName).toString())
+        }
+        return ToolOutcome(toolCall, result) to (monotonicNowMs() - started).coerceAtLeast(0L)
     }
 
     private fun executeTool(
@@ -547,6 +573,8 @@ internal class AgentLoop(
         toolCall: AgentModelClient.ToolCall,
         result: AgentModelClient.ToolResult,
     ) {
+        appendMessage(AgentConversationCodec.toolResultMessage(toolCall, result))
+        publishTranscript()
         onEvent(
             AgentEvent.ToolFinished(
                 round = round,
@@ -657,6 +685,12 @@ internal class AgentLoop(
         }
 
     private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
+    private companion object {
+        // Explicitly exclude shell, GUI, browser, memories and MCP: those executors
+        // may own mutable sessions even when a particular action sounds read-only.
+        val PARALLEL_FILE_READ_TOOLS = setOf("read_file", "stat_file", "list_directory", "glob_files", "grep_files")
+    }
 
     private class TurnMetricsAccumulator {
         private var stepCount: Int = 0

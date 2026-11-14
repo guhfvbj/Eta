@@ -51,3 +51,17 @@ internal interface FileToolBackend {
         expectedSha256: String? = null,
     ): FileToolWriteResult
 }
+
+/** Optional, search-only snapshots. No shell matching: Kotlin retains all cursor/text semantics.
+ * Each bounded read is checked before and after I/O. Implementations must not follow an
+ * enumerated symlink or suppress per-file failures. Results are consumed in traversal order.
+ */
+internal interface FileToolSearchBackend {
+    fun readSearchBatch(requests: List<FileToolSearchRequest>): List<Result<FileToolSearchRead>>
+
+    /** Recheck consumed snapshots before publishing results (prefetch may outlive a read). */
+    fun verifySearchBatch(stats: List<FileToolStat>)
+}
+
+internal data class FileToolSearchRequest(val path: String, val offset: Long, val limit: Int)
+internal data class FileToolSearchRead(val stat: FileToolStat, val offset: Long, val bytes: ByteArray)

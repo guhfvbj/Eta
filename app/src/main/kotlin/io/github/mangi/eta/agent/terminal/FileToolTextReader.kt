@@ -55,7 +55,11 @@ internal class FileToolTextReader(private val backend: FileToolBackend) {
     }
 
     fun read(stat: FileToolStat, offset: Long, maxBytes: Int, maxChars: Int = 16_000): FileToolTextChunk {
-        val bytes = backend.readBytes(stat.path, offset, maxBytes.coerceIn(1, 16_000))
+        return decode(stat, offset, backend.readBytes(stat.path, offset, maxBytes.coerceIn(1, 16_000)), maxChars)
+    }
+
+    /** Decode a checked search snapshot with the exact same 16K boundaries as read_file. */
+    fun decode(stat: FileToolStat, offset: Long, bytes: ByteArray, maxChars: Int = 16_000): FileToolTextChunk {
         if (bytes.any { it == 0.toByte() }) throw FileToolException("BINARY_FILE", "文件包含二进制内容，请使用文件导出或终端工具处理")
         val eof = offset + bytes.size >= stat.sizeBytes
         val input = ByteBuffer.wrap(bytes)

@@ -133,6 +133,9 @@ internal object AgentPromptBuilder {
         if (config.terminalTools) {
             messages.put(systemMessage(
                 "Eta 内置文件与终端工具。文件和命令共用本次运行的默认身份与工作区；已知路径可直接读取或写入，不必先查目录。" +
+                    "多个已知文件的独立 read_file、grep_files、glob_files 应在同一轮批量调用，文件只读批次最多 4 路并行；" +
+                    "定位内容优先 grep_files，定位路径用 glob_files；需要整段代码时用 max_lines=2000、max_bytes=16000，避免每轮串行读取 100 行小片段。" +
+                    "依赖前次结果或涉及写入的调用保持先后顺序；partial=true 时检查 skipped/stop_reason 并使用 cursor 续查。" +
                     rootInstructions(rootAvailable) +
                     "普通命令调用 terminal，只需 command；单次命令结束后进程会回收，不要用 & 起后台进程；持续 Shell 工作可 action=open 后用 session_id 复用，目录变化用会话内的 cd。" +
                     "希望回复后继续运行的命令使用 terminal_job：start 提交任务，完成时会通知用户；list/read 查看进度，确实依赖结果时再 wait，stop 终止。日志路径可用于分页读取完整输出。跨任务服务使用 terminal_daemon。" +

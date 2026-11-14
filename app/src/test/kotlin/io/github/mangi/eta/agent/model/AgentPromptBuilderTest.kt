@@ -66,6 +66,30 @@ class AgentPromptBuilderTest {
     }
 
     @Test
+    fun fileEfficiencyGuidanceIsConditionalStableAndAgreesWithToolSchemas() {
+        fun prompt(enabled: Boolean) = AgentPromptBuilder.buildSystemMessages(
+            config = modelConfig("", terminalTools = enabled, browserTools = false),
+            skillContext = SkillContext.EMPTY, memoryContext = AgentMemoryContext.DISABLED, rootAvailable = false,
+        ).toString()
+        val enabled = prompt(true)
+        assertEquals(enabled, prompt(true))
+        for (guidance in listOf("grep_files", "glob_files", "同一轮批量", "最多 4 路并行", "max_lines=2000",
+            "max_bytes=16000", "先后顺序", "partial=true", "skipped/stop_reason", "cursor")) {
+            assertTrue(guidance, enabled.contains(guidance))
+        }
+        assertFalse(prompt(false).contains("最多 4 路并行"))
+        val tools = JSONArray().also(AgentFileToolCatalog::appendTo)
+        val functions = (0 until tools.length()).map { tools.getJSONObject(it).getJSONObject("function") }
+        for (name in listOf("read_file", "glob_files", "grep_files")) {
+            val schema = functions.single { it.getString("name") == name }
+            assertTrue(name, schema.getString("description").contains("批量"))
+        }
+        val read = functions.single { it.getString("name") == "read_file" }.getJSONObject("parameters").getJSONObject("properties")
+        assertEquals(2_000, read.getJSONObject("max_lines").getInt("maximum"))
+        assertTrue(read.getJSONObject("max_bytes").getInt("maximum") >= 16_000)
+    }
+
+    @Test
     fun currentModelIdentityFollowsConfigWithCustomOrEmptyProviderPrompt() {
         for (providerPrompt in listOf("你是小满", "")) {
             val config = modelConfig(providerPrompt, terminalTools = false, browserTools = false)

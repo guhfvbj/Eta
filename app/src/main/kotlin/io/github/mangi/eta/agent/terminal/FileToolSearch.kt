@@ -41,7 +41,7 @@ internal class FileToolSearch(
             .put("include_hidden", includeHidden).put("case_sensitive", caseSensitive)
             .put("environment", backend.environment).put("identity", backend.identity).toString())
         val state = if (!cursor.isNullOrBlank()) decodeCursor(cursor, signature) else if (singleFile) {
-            State(mutableListOf(), if (matcher.matches(rootStat.name)) Pending("", 0, 1, rootStat.revision) else null)
+            State(mutableListOf(), if (matcher.matches(rootStat.name)) Pending("", 0, 1, rootStat.revision, sizeBytes = rootStat.sizeBytes) else null)
         } else State(mutableListOf(Frame("", 0, rootStat.revision)))
         if (singleFile && (state.frames.isNotEmpty() || state.pending?.relative?.isNotEmpty() == true)) {
             throw FileToolException("INVALID_CURSOR", "单文件搜索游标无效")
@@ -58,11 +58,16 @@ internal class FileToolSearch(
         val skippedBefore = state.skipped
         var entryBudget = MAX_ENTRIES
         var byteBudget = MAX_BYTES
+        // Prefetch and failed/binary decodes also cost I/O. Do not let thousands
+        // of skipped files bypass the byte budget merely by consuming no text.
+        var readBudget = MAX_BYTES
         var outputChars = 0
         val maxResults = limit.coerceAtMost(200)
         var stopReason = "complete"
         val reader = FileToolTextReader(backend)
         val directoryPages = mutableMapOf<String, CachedPage>()
+        val prefetched = mutableMapOf<String, Result<FileToolSearchRead>>()
+        val consumedSnapshots = linkedMapOf<String, FileToolStat>()
         while (matches.length() < maxResults && outputChars < MAX_MATCH_CHARS) {
             backend.checkActive()
             if (timeExpired() && (entryBudget < MAX_ENTRIES || byteBudget < MAX_BYTES)) { stopReason = "time_limit"; break }
@@ -91,10 +96,39 @@ internal class FileToolSearch(
             val filePath = join(root, pending.relative)
             val displayPath = if (singleFile) rootStat.name else pending.relative
             try {
-                val stat = backend.stat(filePath)
+                val fastBackend = backend as? FileToolSearchBackend
+                var snapshot: FileToolSearchRead? = null
+                if (fastBackend != null) {
+                    val cached = prefetched[filePath]?.getOrThrow()
+                    if (cached == null || (pending.offset >= cached.offset + cached.bytes.size && pending.offset < cached.stat.sizeBytes) ||
+                        (cached.bytes.size + cached.offset < cached.stat.sizeBytes && cached.offset + cached.bytes.size - pending.offset < 4)) {
+                        prefetched.remove(filePath)
+                        if (readBudget < 4) { stopReason = "byte_limit"; break }
+                        val requests = searchRequests(root, pending, state, matcher, includeHidden,
+                            minOf(byteBudget, readBudget), entryBudget, directoryPages)
+                        readBudget -= requests.sumOf { it.limit }
+                        val results = fastBackend.readSearchBatch(requests)
+                        check(results.size == requests.size)
+                        requests.forEachIndexed { index, request -> prefetched[request.path] = results[index] }
+                    }
+                    snapshot = prefetched.getValue(filePath).getOrThrow()
+                    consumedSnapshots[filePath] = snapshot.stat
+                }
+                val stat = snapshot?.stat ?: backend.stat(filePath)
+                pending.sizeBytes = stat.sizeBytes
                 if (stat.revision != pending.revision) throw FileToolException("STALE_CURSOR", "搜索中的文件已变化，请重新开始搜索")
-                val chunk = reader.read(stat, pending.offset, minOf(16_000, byteBudget))
-                if (chunk.text.isEmpty()) { state.pending = null; continue }
+                val chunk = if (snapshot == null) {
+                    if (readBudget < 4) { stopReason = "byte_limit"; break }
+                    val limitBytes = minOf(16_000, byteBudget, readBudget)
+                    val bytes = backend.readBytes(stat.path, pending.offset, limitBytes)
+                    readBudget -= bytes.size
+                    reader.decode(stat, pending.offset, bytes)
+                } else {
+                    val from = (pending.offset - snapshot.offset).toInt()
+                    reader.decode(stat, pending.offset, snapshot.bytes.copyOfRange(from,
+                        minOf(from + minOf(16_000, byteBudget), snapshot.bytes.size)))
+                }
+                if (chunk.text.isEmpty()) { state.pending = null; prefetched.remove(filePath); continue }
                 var position = 0
                 var paused = false
                 while (position < chunk.text.length) {
@@ -136,23 +170,29 @@ internal class FileToolSearch(
                     }
                     if (matches.length() >= maxResults) { stopReason = "result_limit"; paused = true; break }
                 }
-                if (backend.stat(filePath).revision != stat.revision) throw FileToolException("STALE_CURSOR", "搜索期间文件已变化，请重新开始搜索")
-                if (pending.offset >= stat.sizeBytes) state.pending = null
+                if (snapshot == null && backend.stat(filePath).revision != stat.revision) throw FileToolException("STALE_CURSOR", "搜索期间文件已变化，请重新开始搜索")
+                if (pending.offset >= stat.sizeBytes) { state.pending = null; prefetched.remove(filePath) }
                 if (paused) break
             } catch (error: FileToolException) {
                 backend.checkActive()
                 if (error.isGlobalFailure()) throw error
                 skip(state, skipped, displayPath, error.code)
+                prefetched.remove(filePath)
                 state.pending = null
             } catch (_: IOException) {
                 backend.checkActive()
                 skip(state, skipped, displayPath, "FILE_UNREADABLE")
+                prefetched.remove(filePath)
                 state.pending = null
             } catch (_: SecurityException) {
                 backend.checkActive()
                 skip(state, skipped, displayPath, "FILE_ACCESS_DENIED")
+                prefetched.remove(filePath)
                 state.pending = null
             }
+        }
+        (backend as? FileToolSearchBackend)?.let { fastBackend ->
+            consumedSnapshots.values.chunked(32).forEach { fastBackend.verifySearchBatch(it) }
         }
         val hasMore = state.pending != null || state.frames.isNotEmpty()
         if (hasMore && stopReason == "complete") stopReason = "result_limit"
@@ -164,6 +204,38 @@ internal class FileToolSearch(
             .put("entries_scanned", MAX_ENTRIES - entryBudget).put("bytes_scanned", MAX_BYTES - byteBudget)
             .put("skipped_files", state.skipped - skippedBefore).put("total_skipped", state.skipped).put("skipped", skipped)
             .put("next_cursor", if (hasMore) encodeCursor(state, signature) else JSONObject.NULL)
+    }
+
+    /** Prefetch only the next contiguous file run in this directory page. Never advance
+     * cursor state speculatively or visit hidden directories/symlinks. All buffers are
+     * per-call, <=256 KiB, and discarded when the call returns (including a limit stop).
+     */
+    private fun searchRequests(
+        root: String, pending: Pending, state: State, matcher: FileToolGlob, includeHidden: Boolean,
+        byteBudget: Int, entryBudget: Int, pages: Map<String, CachedPage>,
+    ): List<FileToolSearchRequest> {
+        val requests = mutableListOf<FileToolSearchRequest>()
+        var remaining = minOf(byteBudget, 256 * 1024)
+        fun add(path: String, offset: Long, size: Long = 64_000) {
+            val limit = minOf(64_000L, remaining.toLong(), (size - offset).coerceAtLeast(4)).toInt()
+            if (limit < 4) return
+            requests += FileToolSearchRequest(path, offset, limit)
+            remaining -= limit
+        }
+        add(join(root, pending.relative), pending.offset, pending.sizeBytes ?: (pending.offset + 64_000).coerceAtLeast(0))
+        if (pending.sizeBytes == null || pending.sizeBytes!! - pending.offset > 64_000) return requests
+        val frame = state.frames.lastOrNull() ?: return requests
+        val page = pages[frame.relative] ?: return requests
+        val start = (frame.offset - page.offset).coerceAtLeast(0)
+        for (index in start until minOf(page.page.entries.size, start + entryBudget)) {
+            if (requests.size >= 32 || remaining < 4) break
+            val entry = page.page.entries[index]
+            if (!includeHidden && entry.name.startsWith('.')) continue
+            if (entry.kind == FileToolKind.DIRECTORY) break // Preserve depth-first order.
+            val relative = if (frame.relative.isEmpty()) entry.name else "${frame.relative}/${entry.name}"
+            if (entry.kind == FileToolKind.FILE && matcher.matches(relative)) add(join(root, relative), 0, entry.sizeBytes)
+        }
+        return requests
     }
 
     private fun nextFile(root: String, state: State, matcher: FileToolGlob, includeHidden: Boolean, budget: Int, skipped: JSONArray, pages: MutableMap<String, CachedPage>, timeExpired: () -> Boolean): NextFile {
@@ -181,7 +253,7 @@ internal class FileToolSearch(
             }
             val page = try {
                 if (cached != null && frame.offset >= cached.offset && frame.offset < cached.offset + cached.page.entries.size) cached
-                else CachedPage(frame.offset, backend.list(join(root, frame.relative), frame.offset, minOf(64, budget - visited), frame.revision))
+                else CachedPage(frame.offset, backend.list(join(root, frame.relative), frame.offset, minOf(200, budget - visited), frame.revision))
                     .also { pages[frame.relative] = it }
             } catch (error: FileToolException) {
                 backend.checkActive()
@@ -206,7 +278,7 @@ internal class FileToolSearch(
                 if (state.frames.size >= MAX_DEPTH) { skip(state, skipped, relative, "DEPTH_LIMIT"); continue }
                 state.frames += Frame(relative, 0, entry.revision)
             } else if (entry.kind == FileToolKind.FILE && matcher.matches(relative)) {
-                return NextFile(Pending(relative, 0, 1, entry.revision), visited)
+                return NextFile(Pending(relative, 0, 1, entry.revision, sizeBytes = entry.sizeBytes), visited)
             } else if (entry.kind == FileToolKind.SYMLINK) {
                 skip(state, skipped, relative, "SYMLINK_NOT_FOLLOWED")
             }
@@ -275,14 +347,14 @@ internal class FileToolSearch(
     )
 
     private data class Frame(val relative: String, var offset: Int, val revision: String)
-    private data class Pending(val relative: String, var offset: Long, var line: Long, val revision: String, var tail: String = "", var lineMatched: Boolean = false)
+    private data class Pending(val relative: String, var offset: Long, var line: Long, val revision: String, var tail: String = "", var lineMatched: Boolean = false, var sizeBytes: Long? = null)
     private data class State(val frames: MutableList<Frame>, var pending: Pending? = null, var skipped: Int = 0)
     private data class NextFile(val file: Pending?, val visited: Int, val timeLimited: Boolean = false)
     private data class CachedPage(val offset: Int, val page: FileToolDirectoryPage)
 
     companion object {
-        const val MAX_ENTRIES = 2_000
-        const val MAX_BYTES = 256 * 1024
+        const val MAX_ENTRIES = 10_000
+        const val MAX_BYTES = 4 * 1024 * 1024
         const val MAX_MATCH_CHARS = 12_000
         const val MAX_CURSOR_CHARS = 16_384
         const val MAX_DEPTH = 24

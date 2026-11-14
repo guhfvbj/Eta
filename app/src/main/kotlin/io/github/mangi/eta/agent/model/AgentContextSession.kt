@@ -42,6 +42,11 @@ internal class AgentContextSession(
     fun prepareRequest(roundTools: JSONArray) {
         tools = roundTools
         requestBaseline = null
+        if (AgentToolOutputFolder.fold(messages, systemCount) > 0) {
+            // Observed usage described a different prefix; estimate the folded request
+            // locally until a successful response establishes its new exact baseline.
+            baseline = null
+        }
     }
 
     fun captureRequest() { requestBaseline = tokenBaseline(messages) }

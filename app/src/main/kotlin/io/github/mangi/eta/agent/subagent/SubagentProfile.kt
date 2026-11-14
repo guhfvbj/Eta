@@ -45,13 +45,18 @@ internal data class SubagentProfile(
         if (toolName.isBlank() || toolName in FORBIDDEN_TOOLS || toolName in disallowedTools) {
             return false
         }
+        // Per-call tools may narrow a read-only profile, never grant it a shell,
+        // writes or an opaque MCP tool. Custom/coder profiles still support '*'.
+        val readOnly = toolName in READ_ONLY_TOOLS || toolName in PersonalSearchTools.names ||
+            toolName in AgentPhoneToolCatalog.reads
+        if (!allowWriteFilesAndTerminal && !readOnly) return false
         val customAllowlist = explicitTools
         if (customAllowlist != null) {
             if ("*" in customAllowlist) return true
             return toolName in customAllowlist ||
                 ("personal_data" in customAllowlist && (toolName in PersonalSearchTools.names || toolName in AgentPhoneToolCatalog.reads))
         }
-        if (toolName in READ_ONLY_TOOLS || toolName in PersonalSearchTools.names || toolName in AgentPhoneToolCatalog.reads) {
+        if (readOnly) {
             return true
         }
         if (!allowWriteFilesAndTerminal) return false
@@ -161,6 +166,9 @@ internal data class SubagentProfile(
             "skills_list",
             "skills_read",
             "skills_read_resource",
+            "tasks_list",
+            "tasks_triggers",
+            "tasks_history",
         )
 
         private val CODER_EXTRA_TOOLS =
@@ -170,9 +178,14 @@ internal data class SubagentProfile(
             name = TYPE_EXPLORE,
             summary = "只读探索与多源信息检索",
             whenToUse = "Fast read-only agent specialized for exploring files, personal device data (calendar, notes, messages, notifications, bills, media, system memories), logs, and web pages. Specify desired thoroughness in the prompt: \"quick\", \"medium\", or \"thorough\".",
-            toolHighlights = listOf("read_file", "glob_files", "grep_files", "web_search", "fetch_url", "personal_data", "get_logcat"),
+            toolHighlights = listOf("read_file", "glob_files", "grep_files", "skills_read", "memory_get", "personal_data", "device_status", "tasks_list"),
             roleInstruction = "你是只读探索 Subagent（explore）。你的职责是快速、准确地检索文件、设备个人数据、系统状态或网页资料，" +
-                "严禁尝试修改任何文件或设备状态。在最终回复中直接给出结构化证据、关键路径/时间点与结论摘要。",
+                "严禁尝试修改任何文件或设备状态，也不能使用终端、递归派发或 GUI。" +
+                "定位代码优先用 grep_files / glob_files；已知路径的多个独立 read_file 应在同一轮批量发出，" +
+                "按需要设置 max_lines=2000、max_bytes=16000，避免逐目录遍历或每轮只读 100 行；" +
+                "partial=true 时检查 skipped、stop_reason，并用原样 cursor 续查，不把局部未命中当作不存在。" +
+                "Linux 仓库文件显式传 environment=linux；可按需读取 Skills、记忆、设备状态和任务历史。" +
+                "在最终回复中直接给出结构化证据、关键路径/时间点与结论摘要。",
             allowWriteFilesAndTerminal = false,
             builtin = true,
         )

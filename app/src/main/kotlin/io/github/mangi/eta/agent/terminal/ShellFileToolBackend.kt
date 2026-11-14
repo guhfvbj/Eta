@@ -11,7 +11,7 @@ internal class ShellFileToolBackend(
     private val home: String,
     private val ensureActive: () -> Unit = {},
     private val execute: (command: String, stdin: ByteArray?, maxOutputBytes: Int) -> OneShotShellResult,
-) : FileToolBackend {
+) : FileToolBackend, FileToolSearchBackend {
     override fun checkActive() = ensureActive()
 
     override fun resolve(path: String): String {
@@ -79,6 +79,103 @@ internal class ShellFileToolBackend(
         )
         val from = prefix.coerceAtMost(result.output.size)
         return result.output.copyOfRange(from, (from + limit).coerceAtMost(result.output.size))
+    }
+
+    /** One guest invocation for a bounded run of files. POSIX sh + stat + dd also
+     * works under Android BusyBox ash; no rg/grep locale/glob/ignore semantics leak
+     * into matching. Paths travel as quoted script literals over stdin. Metadata is
+     * NUL-framed; content is length-framed (it may contain any byte, including NUL).
+     */
+    override fun readSearchBatch(requests: List<FileToolSearchRequest>): List<Result<FileToolSearchRead>> {
+        require(requests.size in 1..32 && requests.sumOf { it.limit.toLong() } <= 256 * 1024)
+        requests.forEach { require(it.offset >= 0 && it.limit in 1..64_000 && '\u0000' !in it.path) }
+        val script = buildString {
+            append("eta_file_stat() {\n").append(statScript("\"${'$'}1\"")).append("\n}\n")
+            append("""
+                eta_search_read() {
+                    eta_before=${'$'}(eta_file_stat "${'$'}1"); eta_status=${'$'}?
+                    if [ "${'$'}eta_status" -eq 0 ]; then
+                        case "${'$'}eta_before" in file'
+                '*) [ -r "${'$'}1" ] || eta_status=43 ;; *) eta_status=46 ;; esac
+                    fi
+                    printf '%s\000%s\000' "${'$'}eta_status" "${'$'}eta_before"
+                    [ "${'$'}eta_status" -eq 0 ] || return 0
+                    eta_size=${'$'}{eta_before#*'
+                '}; eta_size=${'$'}{eta_size%%'
+                '*}
+                    eta_count=${'$'}((eta_size - ${'$'}2 * 4096))
+                    [ "${'$'}eta_count" -ge 0 ] || eta_count=0
+                    [ "${'$'}eta_count" -le "${'$'}3" ] || eta_count=${'$'}3
+                    printf '%s\000' "${'$'}eta_count"
+                    dd if="${'$'}1" bs=4096 skip="${'$'}2" count="${'$'}4" 2>/dev/null
+                    eta_status=${'$'}?
+                    printf '\000%s\000' "${'$'}eta_status"
+                    eta_after=${'$'}(eta_file_stat "${'$'}1"); eta_status=${'$'}?
+                    printf '%s\000%s\000' "${'$'}eta_status" "${'$'}eta_after"
+                }
+            """.trimIndent()).append('\n')
+            requests.forEach { request ->
+                val prefix = (request.offset % BLOCK_BYTES).toInt()
+                val blocks = (prefix + request.limit + BLOCK_BYTES - 1) / BLOCK_BYTES
+                append("eta_search_read ").append(shellQuote(request.path)).append(' ')
+                    .append(request.offset / BLOCK_BYTES).append(' ').append(blocks * BLOCK_BYTES)
+                    .append(' ').append(blocks).append('\n')
+            }
+        }
+        val maxBytes = requests.sumOf { it.limit + 2 * MAX_STAT_BYTES + 2 * BLOCK_BYTES + 64 }
+        val output = run("sh -s", stdin = script.toByteArray(Charsets.UTF_8), maxOutputBytes = maxBytes).output
+        var position = 0
+        fun record(): String {
+            val end = (position until output.size).firstOrNull { output[it] == 0.toByte() }
+                ?: fail("FILE_CHANGED", "搜索快照不完整，请重试")
+            val text = decode(output.copyOfRange(position, end))
+            position = end + 1
+            return text
+        }
+        fun status(code: String): FileToolException? = when (code) {
+            "0" -> null
+            "41" -> FileToolException("FILE_NOT_FOUND", "搜索文件已不存在或不可访问")
+            "43" -> FileToolException("FILE_ACCESS_DENIED", "搜索文件未获读取权限")
+            "46" -> FileToolException("STALE_CURSOR", "搜索文件类型已变化")
+            else -> FileToolException("FILE_COMMAND_FAILED", "无法读取搜索快照（exit=$code）")
+        }
+        val results = requests.map { request ->
+            val beforeError = status(record())
+            val beforeMetadata = record()
+            if (beforeError != null) Result.failure(beforeError) else {
+                val before = parseStat(request.path, beforeMetadata)
+                val size = record().toIntOrNull()?.takeIf { it in 0..(request.limit + 2 * BLOCK_BYTES) }
+                    ?: fail("FILE_CHANGED", "搜索快照长度无效，请重试")
+                if (size > output.size - position) fail("FILE_CHANGED", "搜索快照已变化，请重试")
+                val prefix = (request.offset % BLOCK_BYTES).toInt().coerceAtMost(size)
+                val bytes = output.copyOfRange(position + prefix, position + minOf(prefix + request.limit, size))
+                position += size
+                if (record().isNotEmpty()) fail("FILE_CHANGED", "搜索快照边界已变化，请重试")
+                val readError = status(record())
+                val afterError = status(record())
+                val afterMetadata = record()
+                when {
+                    afterError != null -> Result.failure(FileToolException("STALE_CURSOR", "搜索期间文件已变化"))
+                    parseStat(request.path, afterMetadata).revision != before.revision ->
+                        Result.failure(FileToolException("STALE_CURSOR", "搜索期间文件已变化"))
+                    readError != null -> Result.failure(readError)
+                    else -> Result.success(FileToolSearchRead(before, request.offset, bytes))
+                }
+            }
+        }
+        if (position != output.size) fail("FILE_CHANGED", "搜索快照含多余数据，请重试")
+        return results
+    }
+
+    override fun verifySearchBatch(stats: List<FileToolStat>) {
+        require(stats.size in 1..32)
+        val current = try {
+            statPage(stats.map { it.path })
+        } catch (error: FileToolException) {
+            if (error.code !in setOf("FILE_NOT_FOUND", "FILE_ACCESS_DENIED")) throw error
+            fail("STALE_CURSOR", "搜索期间文件已变化或不可访问")
+        }
+        if (current != stats) fail("STALE_CURSOR", "搜索期间文件已变化")
     }
 
     override fun list(path: String, offset: Int, limit: Int, expectedRevision: String?): FileToolDirectoryPage {

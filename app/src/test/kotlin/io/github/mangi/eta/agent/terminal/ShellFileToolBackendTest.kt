@@ -279,6 +279,153 @@ class ShellFileToolBackendTest {
         }
     }
 
+    @Test fun searchBatchReadsArbitraryBytesAtUnalignedOffsetsWithLiteralFilenames() {
+        val repo = temporaryFolder.newFolder("repo")
+        val file = File(repo, "-line\n' \$(printf injected)`printf injected`*.bin").apply {
+            writeBytes(ByteArray(140_000) { (it % 251).toByte() })
+        }
+        var invocations = 0
+        val backend = newBackend { command, input, maxBytes ->
+            invocations++
+            assertEquals("sh -s", command)
+            assertTrue(input!!.decodeToString().contains(shellQuote(file.path)))
+            assertTrue(maxBytes < 1024 * 1024)
+            runShell(command, input)
+        }
+        val requests = listOf(0L to 7, 4095L to 9, 16_001L to 64_000, 139_998L to 10, 150_000L to 4)
+            .map { (offset, limit) -> FileToolSearchRequest(file.path, offset, limit) }
+        val reads = backend.readSearchBatch(requests)
+        val bytes = file.readBytes()
+        requests.zip(reads).forEach { (request, result) ->
+            val snapshot = result.getOrThrow()
+            assertEquals(request.offset, snapshot.offset)
+            assertEquals(file.path, snapshot.stat.path)
+            val from = minOf(request.offset, bytes.size.toLong()).toInt()
+            assertArrayEquals(bytes.copyOfRange(from, minOf(from + request.limit, bytes.size)), snapshot.bytes)
+        }
+        assertEquals(1, invocations)
+    }
+
+    @Test fun searchBatchKeepsMissingAndNonRegularFailuresSeparateFromValidFiles() {
+        val repo = temporaryFolder.newFolder("repo")
+        val first = File(repo, "first").apply { writeText("hit") }
+        val link = File(repo, "link")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), first.toPath())
+        val last = File(repo, "last").apply { writeText("last") }
+        val backend = newBackend { command, input, _ -> runShell(command, input) }
+        val results = backend.readSearchBatch(listOf(first, File(repo, "missing"), repo, link, last)
+            .map { FileToolSearchRequest(it.path, 0, 64) })
+        assertEquals("hit", results[0].getOrThrow().bytes.decodeToString())
+        assertEquals("FILE_NOT_FOUND", (results[1].exceptionOrNull() as FileToolException).code)
+        assertEquals("STALE_CURSOR", (results[2].exceptionOrNull() as FileToolException).code)
+        assertEquals("STALE_CURSOR", (results[3].exceptionOrNull() as FileToolException).code)
+        assertEquals("last", results[4].getOrThrow().bytes.decodeToString())
+    }
+
+    @Test fun searchBatchRejectsTruncatedExtraAndMalformedFrames() {
+        val good = snapshotFrame()
+        for (output in listOf(good.dropLast(1), good + "extra", good.replaceFirst("7\u0000payload", "999999\u0000payload"),
+            good.replaceFirst("payload", "short"))) {
+            assertFailure("FILE_CHANGED") {
+                newBackend { _, _, _ -> result(output) }.readSearchBatch(listOf(FileToolSearchRequest("/a", 0, 7)))
+            }
+        }
+        assertFailure("FILE_OUTPUT_LIMIT") {
+            newBackend { _, _, _ -> result(good, truncated = true) }.readSearchBatch(listOf(FileToolSearchRequest("/a", 0, 7)))
+        }
+    }
+
+    @Test fun searchBatchChecksReadStatusAndBothMetadataVersions() {
+        for ((output, code) in listOf(snapshotFrame(after = metadata(version = "changed")) to "STALE_CURSOR",
+            snapshotFrame(readStatus = "1") to "FILE_COMMAND_FAILED", snapshotFrame(afterStatus = "41") to "STALE_CURSOR")) {
+            val read = newBackend { _, _, _ -> result(output) }.readSearchBatch(listOf(FileToolSearchRequest("/a", 0, 7))).single()
+            assertTrue(read.isFailure)
+            assertEquals(code, (read.exceptionOrNull() as FileToolException).code)
+        }
+    }
+
+    @Test fun snapshotValidationDetectsMutationAndBatchesChecks() {
+        val repo = temporaryFolder.newFolder("repo")
+        val files = List(4) { File(repo, "entry-$it").apply { writeText("hit") } }
+        var calls = 0
+        val backend = newBackend { command, input, _ -> calls++; runShell(command, input) }
+        val stats = backend.readSearchBatch(files.map { FileToolSearchRequest(it.path, 0, 64) }).map { it.getOrThrow().stat }
+        assertEquals(1, calls)
+        backend.verifySearchBatch(stats)
+        assertEquals(2, calls)
+        files[2].appendText("changed")
+        assertFailure("STALE_CURSOR") { backend.verifySearchBatch(stats) }
+        files[2].delete()
+        assertFailure("STALE_CURSOR") { backend.verifySearchBatch(stats) }
+    }
+
+    @Test fun realShellSearchMatchesLocalWithSpecialHiddenIgnoredBinaryAndLinkedFiles() {
+        val repo = temporaryFolder.newFolder("repo")
+        File(repo, ".gitignore").writeText("ignored.txt\n")
+        File(repo, "ignored.txt").writeText("literal[.*] 中文😀\nLITERAL[.*]\n")
+        File(repo, "line\n' \$(printf literal).txt").writeText("literal[.*]\n")
+        File(repo, ".hidden").mkdir()
+        File(repo, ".hidden/inside.txt").writeText("literal[.*]\n")
+        File(repo, "binary").writeBytes(byteArrayOf(0, 65))
+        java.nio.file.Files.createSymbolicLink(File(repo, "link").toPath(), File(repo, "ignored.txt").toPath())
+        val shell = newBackend { command, input, _ -> runShell(command, input) }
+        val local = LocalFileToolBackend(repo)
+        for (hidden in listOf(false, true)) for (sensitive in listOf(false, true)) {
+            val fast = org.json.JSONObject(AgentFileOperations(shell).grepFiles(repo.path, "literal[.*]", includeHidden = hidden, caseSensitive = sensitive))
+            val expected = org.json.JSONObject(AgentFileOperations(local).grepFiles(repo.path, "literal[.*]", includeHidden = hidden, caseSensitive = sensitive))
+            assertTrue(fast.toString(), fast.getBoolean("ok"))
+            assertEquals(expected.getInt("count"), fast.getInt("count"))
+            assertEquals(expected.getInt("total_skipped"), fast.getInt("total_skipped"))
+            val matches = fast.getJSONArray("matches")
+            val expectedMatches = expected.getJSONArray("matches")
+            val tuples = (0 until matches.length()).map { matches.getJSONObject(it).toString() }.toSet()
+            assertEquals((0 until expectedMatches.length()).map { expectedMatches.getJSONObject(it).toString() }.toSet(), tuples)
+        }
+    }
+
+    @Test fun searchFastPathWorksInBusyBoxAshWithoutRgOrGrep() {
+        // Run this portability check when a BusyBox binary is installed or supplied by the harness.
+        val busybox = System.getProperty("eta.test.busybox")?.let(::File)
+            ?: listOf(File("/bin/busybox"), File("/usr/bin/busybox")).firstOrNull { it.canExecute() }
+        org.junit.Assume.assumeTrue("BusyBox not available", busybox?.canExecute() == true)
+        val bin = temporaryFolder.newFolder("busybox-bin")
+        for (applet in listOf("sh", "stat", "dd", "find", "readlink")) {
+            java.nio.file.Files.createSymbolicLink(File(bin, applet).toPath(), busybox!!.toPath())
+        }
+        val repo = temporaryFolder.newFolder("repo")
+        File(repo, "a'\nfile.txt").writeText("needle 中文😀\nsecond NEEDLE\n")
+        val backend = newBackend { command, input, _ ->
+            runShell("PATH=${shellQuote(bin.path)} ${shellQuote(File(bin, "sh").path)} -c ${shellQuote(command)}", input)
+        }
+        val result = org.json.JSONObject(AgentFileOperations(backend).grepFiles(repo.path, "needle", caseSensitive = false))
+        assertTrue(result.toString(), result.getBoolean("ok"))
+        assertEquals(2, result.getInt("count"))
+        assertTrue(result.getBoolean("complete"))
+    }
+
+    @Test fun searchBatchBudgetsAndCancellationAreCheckedBeforeLaunchingShell() {
+        var calls = 0
+        val backend = newBackend { _, _, _ -> calls++; result(snapshotFrame()) }
+        for (requests in listOf(emptyList(), List(33) { FileToolSearchRequest("/a", 0, 1) },
+            List(5) { FileToolSearchRequest("/a", 0, 64_000) }, listOf(FileToolSearchRequest("/a", -1, 1)),
+            listOf(FileToolSearchRequest("/a", 0, 64_001)), listOf(FileToolSearchRequest("/bad\u0000path", 0, 1)))) {
+            org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { backend.readSearchBatch(requests) }
+        }
+        assertEquals(0, calls)
+        var cancelled = true
+        val cancellation = ShellFileToolBackend("linux", "user", "/", "/", ensureActive = {
+            if (cancelled) throw FileToolException("CANCELLED", "cancelled")
+        }) { _, _, _ -> calls++; cancelled = true; result(snapshotFrame()) }
+        assertFailure("CANCELLED") { cancellation.readSearchBatch(listOf(FileToolSearchRequest("/a", 0, 7))) }
+        assertEquals(0, calls)
+        cancelled = false
+        assertFailure("CANCELLED") { cancellation.readSearchBatch(listOf(FileToolSearchRequest("/a", 0, 7))) }
+        assertEquals(1, calls)
+    }
+
+    private fun snapshotFrame(after: String = metadata(), readStatus: String = "0", afterStatus: String = "0") =
+        "0\u0000${metadata()}\u00007\u0000payload\u0000$readStatus\u0000$afterStatus\u0000$after\u0000"
+
     private fun newBackend(execute: (String, ByteArray?, Int) -> OneShotShellResult) =
         ShellFileToolBackend("linux", "user", "/workspace", "/guest-home", execute = execute)
 

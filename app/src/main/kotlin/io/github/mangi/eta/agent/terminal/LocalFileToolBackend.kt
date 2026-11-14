@@ -19,7 +19,7 @@ internal class LocalFileToolBackend(
     override val environment: String = "android",
     override val identity: String = "user",
     private val isCancelled: () -> Boolean = { false },
-) : FileToolBackend {
+) : FileToolBackend, FileToolSearchBackend {
     private val workspace = workspace.canonicalFile
     private val home = home.canonicalFile
 
@@ -44,7 +44,48 @@ internal class LocalFileToolBackend(
         if (metadata(file.toPath()).kind != FileToolKind.FILE) {
             throw FileToolException("NOT_REGULAR_FILE", "目标不是普通文件")
         }
-        return RandomAccessFile(file, "r").use { input ->
+        return readResolvedBytes(file, offset, limit)
+    }
+
+    // Search already has a checked stat. Avoid resolving and stat-ing each 16K slice
+    // again; one bounded snapshot serves several decoder chunks, with a final check.
+    override fun readSearchBatch(requests: List<FileToolSearchRequest>): List<Result<FileToolSearchRead>> {
+        require(requests.size in 1..32 && requests.sumOf { it.limit.toLong() } <= 256 * 1024)
+        return requests.map { request -> runCatching {
+            checkActive()
+            require(request.offset >= 0 && request.limit in 1..SEARCH_READ_BYTES)
+            // Requests already belong to the resolved search root. Resolving again
+            // would follow a link substituted for an enumerated regular file.
+            val path = File(request.path).toPath()
+            val before = metadata(path)
+            if (before.kind != FileToolKind.FILE) throw FileToolException("STALE_CURSOR", "搜索文件类型已变化")
+            val bytes = Files.newByteChannel(path, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
+                input.position(request.offset)
+                val buffer = java.nio.ByteBuffer.allocate(minOf(request.limit.toLong(),
+                    (input.size() - request.offset).coerceAtLeast(0)).toInt())
+                while (buffer.hasRemaining()) {
+                    checkActive()
+                    if (input.read(buffer) < 0) break
+                }
+                buffer.array().copyOf(buffer.position())
+            }
+            if (metadata(path) != before) throw FileToolException("STALE_CURSOR", "搜索期间文件已变化")
+            checkActive()
+            FileToolSearchRead(before, request.offset, bytes)
+        } }
+    }
+
+    override fun verifySearchBatch(stats: List<FileToolStat>) {
+        require(stats.size in 1..32)
+        stats.forEach { before ->
+            checkActive()
+            val current = try { metadata(File(before.path).toPath()) } catch (_: NoSuchFileException) { null }
+            if (current != before) throw FileToolException("STALE_CURSOR", "搜索期间文件已变化")
+        }
+    }
+
+    private fun readResolvedBytes(file: File, offset: Long, limit: Int): ByteArray =
+        RandomAccessFile(file, "r").use { input ->
             input.seek(offset)
             val bytes = ByteArray(minOf(limit.toLong(), (input.length() - offset).coerceAtLeast(0)).toInt())
             var count = 0
@@ -56,7 +97,6 @@ internal class LocalFileToolBackend(
             }
             if (count == bytes.size) bytes else bytes.copyOf(count)
         }
-    }
 
     override fun list(path: String, offset: Int, limit: Int, expectedRevision: String?): FileToolDirectoryPage {
         require(offset >= 0 && limit in 1..MAX_DIRECTORY_PAGE)
@@ -208,6 +248,7 @@ internal class LocalFileToolBackend(
 
     private companion object {
         val writeLock = Any()
+        const val SEARCH_READ_BYTES = 64_000
         const val MAX_READ_BYTES = 16_384
         const val MAX_WRITE_BYTES = 512 * 1024
         const val MAX_DIRECTORY_PAGE = 200
