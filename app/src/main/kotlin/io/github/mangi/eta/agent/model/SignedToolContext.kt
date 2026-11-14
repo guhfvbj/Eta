@@ -6,7 +6,8 @@ import org.json.JSONArray
 internal object SignedToolContext {
     fun hasPendingResponse(messages: JSONArray): Boolean =
         AnthropicEphemeralState.hasPendingToolResponse(messages) ||
-            GeminiEphemeralState.hasPendingToolResponse(messages)
+            GeminiEphemeralState.hasPendingToolResponse(messages) ||
+            ResponsesEphemeralState.hasPendingToolResponse(messages)
 
     fun compactionFailure(messages: JSONArray): AgentModelFailure =
         if (GeminiEphemeralState.hasPendingToolResponse(messages)) {
@@ -15,6 +16,9 @@ internal object SignedToolContext {
                 false,
                 "当前 Gemini 工具链尚未完成，提交工具结果前无法压缩带签名的上下文。",
             )
+        } else if (ResponsesEphemeralState.hasPendingToolResponse(messages)) {
+            AgentModelFailure("RESPONSES_CONTEXT_LOCKED", false,
+                "当前 Responses 工具链尚未完成，提交工具结果前无法压缩上下文。")
         } else {
             AgentModelFailure(
                 "ANTHROPIC_THINKING_CONTEXT_LOCKED",

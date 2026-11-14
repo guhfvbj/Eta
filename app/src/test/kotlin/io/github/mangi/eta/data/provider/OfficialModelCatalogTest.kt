@@ -2,6 +2,7 @@ package io.github.mangi.eta.data.provider
 
 import io.github.mangi.eta.data.model.ModelSource
 import io.github.mangi.eta.data.model.Model
+import io.github.mangi.eta.agent.model.AgentModelClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -9,6 +10,27 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class OfficialModelCatalogTest {
+    @Test
+    fun deepseekPresetsAndUnconfiguredCustomFamilyUse128KWhileGeminiOverridesStayIntact() {
+        val models = BuiltinProviders.PROVIDERS.flatMap(OfficialModelCatalog::modelsForProvider)
+        val deepseek = models.filter { it.id in setOf("builtin-deepseek-flash", "builtin-deepseek-v4-pro",
+            "builtin-bailian-deepseek-v4-1-flash") }
+        assertEquals(3, deepseek.size)
+        assertTrue(deepseek.all { it.contextWindow == 131_072 })
+        fun config(model: String, window: Int? = null) = AgentModelClient.ModelConfig(
+            baseUrl = "https://fixture.invalid", apiKey = "fixture", model = model, systemPrompt = "", contextWindow = window)
+        assertEquals(131_072, config("DeepSeek-V4.1-Flash").knownContextWindow)
+        assertEquals(131_072, config("vendor/deepseek-flash").knownContextWindow)
+        assertEquals(64_000, config("deepseek-flash", 64_000).knownContextWindow)
+        assertNull(config("unrecognized-model").knownContextWindow)
+        assertNull(config("deepseek-flash", 0).knownContextWindow)
+        assertEquals(256_000, config("gemini-4-hydrogen").knownContextWindow)
+        assertEquals(256_000, config("gemini-4-argon-high", 256_000).knownContextWindow)
+        assertEquals(600_000, config("gemini-4-hydrogen", 600_000).knownContextWindow)
+        // Only DeepSeek catalog errors are repaired; Gemini catalog and user windows are retained.
+        assertTrue(models.filter { it.modelId.startsWith("gemini-4-") }.all { it.contextWindow!! >= 256_000 })
+    }
+
     @Test
     fun otherCatalogWindowsRemainMetadataUntilTheUserConfiguresAWindow() {
         val model = OfficialModelCatalog.modelsForProvider(BuiltinProviders.providerById(BuiltinProviders.DEEPSEEK_ID)!!).first()

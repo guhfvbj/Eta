@@ -184,6 +184,7 @@ internal interface ConversationDao : ChunkedTextDao {
     suspend fun restoreCheckpoint(row: ConversationContextCheckpointEntity) = row.copy(
         historyJson = restoreText("conversation_context_checkpoints", row.conversationId, "history", row.historyJson),
         journalJson = restoreText("conversation_context_checkpoints", row.conversationId, "journal", row.journalJson),
+        runtimeStateJson = restoreText("conversation_context_checkpoints", row.conversationId, "runtime", row.runtimeStateJson),
     )
 
     @Query("SELECT * FROM conversation_state WHERE id = :id")
@@ -230,6 +231,7 @@ internal interface ConversationDao : ChunkedTextDao {
             insertContextCheckpointRow(row.copy(
                 historyJson = storeText("conversation_context_checkpoints", row.conversationId, "history", row.historyJson),
                 journalJson = storeText("conversation_context_checkpoints", row.conversationId, "journal", row.journalJson),
+                runtimeStateJson = storeText("conversation_context_checkpoints", row.conversationId, "runtime", row.runtimeStateJson),
             ))
         }
     }
@@ -248,6 +250,16 @@ internal interface ConversationDao : ChunkedTextDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertState(state: ConversationStateEntity)
+
+    @Transaction
+    suspend fun updateRuntimeState(conversationId: String, state: String) {
+        // Do not resurrect a deleted conversation from a late child/cancellation callback.
+        if (conversationMetadataRow(conversationId) == null) return
+        val previous = contextCheckpointRow(conversationId)
+            ?: ConversationContextCheckpointEntity(conversationId, "[]")
+        insertContextCheckpointRow(previous.copy(runtimeStateJson =
+            storeText("conversation_context_checkpoints", conversationId, "runtime", state)))
+    }
 
     @Query("DELETE FROM conversations")
     suspend fun deleteConversations()

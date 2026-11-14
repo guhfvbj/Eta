@@ -1,11 +1,17 @@
 package io.github.mangi.eta.agent.runtime
 
+import android.app.Application
 import android.content.Context
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot
 import io.github.mangi.eta.data.db.EtaDatabase
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,8 +20,62 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [36], application = Application::class)
 class AgentRunCheckpointStoreTest {
+    @Test
+    fun parallelChildProgressKeepsEveryCheckpointEventAndTerminalActivity() {
+        val recorder = AgentRunCheckpointRecorder.create(context, request("parallel-progress"))!!
+        val workers = Executors.newFixedThreadPool(4)
+        try {
+            (1..8).map { child -> workers.submit {
+                recorder.accept(AgentEvent.ToolStarted(1, "call-$child", "subagent", "explore"))
+                recorder.accept(AgentEvent.SubagentProgress(1, "call-$child", "sub_$child", "explore",
+                    SubagentActivitySnapshot(subagentId = "sub_$child", currentAction = "正在执行").encode()))
+            } }.forEach { it.get(30, TimeUnit.SECONDS) }
+            recorder.seal("已中断", cancelled = true)
+            val events = AgentRunCheckpointStore.list(context).single().events
+            assertEquals(8, events.filterIsInstance<AgentEvent.ToolStarted>().size)
+            assertTrue(events.none { it is AgentEvent.SubagentProgress })
+            val finished = events.filterIsInstance<AgentEvent.ToolFinished>()
+            assertEquals(8, finished.size)
+            assertEquals(8, finished.map { it.toolCallId }.toSet().size)
+            finished.forEach { event ->
+                val snapshot = SubagentActivitySnapshot.decode(event.command)!!
+                assertEquals(event.toolCallId.removePrefix("call-"), snapshot.subagentId.removePrefix("sub_"))
+                assertEquals(SubagentActivitySnapshot.STATUS_CANCELLED, snapshot.status)
+                assertEquals("已中断", snapshot.currentAction)
+            }
+        } finally { workers.shutdownNow() }
+    }
+
+    @Test
+    fun cancellationSealsRunningSubagentAndToolActivitiesInCheckpoint() {
+        val request = request("cancel-running")
+        val recorder = AgentRunCheckpointRecorder.create(context, request)!!
+        recorder.accept(AgentEvent.ToolStarted(1, "child", "subagent", "explore"))
+        recorder.accept(AgentEvent.ToolStarted(1, "shell", "terminal", "command"))
+        val progress = AgentEvent.SubagentProgress(1, "child", "sub_1", "explore",
+            SubagentActivitySnapshot(subagentId = "sub_1", currentAction = "正在启动…", output = "已收集的部分证据").encode())
+        assertNull(progress.recoveryProjection())
+        assertEquals(progress, progress.replayProjection())
+        assertNull(AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(progress)))
+        recorder.accept(progress)
+        // Direct storage also keeps intermediate progress out of the durable journal.
+        AgentRunCheckpointStore.append(context, request.runId, 99, progress)
+        recorder.seal("已停止", cancelled = true)
+        recorder.seal("不能重复收尾", cancelled = true)
+        EtaDatabase.closeForTests()
+        val events = AgentRunCheckpointStore.list(context).single().events
+        val finished = events.filterIsInstance<AgentEvent.ToolFinished>()
+        assertEquals(2, finished.size)
+        assertTrue(finished.all { it.success == false && it.resultSummary == "已停止" })
+        val child = SubagentActivitySnapshot.decode(finished.single { it.name == "subagent" }.command)!!
+        assertEquals(SubagentActivitySnapshot.STATUS_CANCELLED, child.status)
+        assertEquals("已停止", child.currentAction)
+        assertEquals("已收集的部分证据", child.output)
+        assertTrue(events.none { it is AgentEvent.SubagentProgress })
+    }
+
     private lateinit var context: Context
 
     @Before
@@ -23,6 +83,11 @@ class AgentRunCheckpointStoreTest {
         context = RuntimeEnvironment.getApplication()
         EtaDatabase.closeForTests()
         context.deleteDatabase("eta.db")
+    }
+
+    @After
+    fun tearDown() {
+        EtaDatabase.closeForTests()
     }
 
     @Test

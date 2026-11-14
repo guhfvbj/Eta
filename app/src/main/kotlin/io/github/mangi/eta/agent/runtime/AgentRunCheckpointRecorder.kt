@@ -12,8 +12,12 @@ internal class AgentRunCheckpointRecorder private constructor(
     private var nextSortIndex = 0
     private var pendingDelta: AgentEvent.AssistantBlockDelta? = null
     private var lastFlushNanos = nanoTime()
+    private val toolActivities = AgentRunToolActivityState()
 
+    @Synchronized
     fun accept(event: AgentEvent) {
+        // Child progress is transient, but its latest snapshot must reach terminal ToolFinished.command.
+        toolActivities.accept(event)
         val checkpointEvent = event.recoveryProjection() ?: return
         if (checkpointEvent is AgentEvent.AssistantBlockDelta) {
             val pending = pendingDelta
@@ -46,10 +50,13 @@ internal class AgentRunCheckpointRecorder private constructor(
     }
 
     /** 把最后一段增量提交到日志；日志由结果 ACK 或中断恢复负责删除。 */
-    fun seal() {
+    @Synchronized
+    fun seal(reason: String = "工具执行已结束，未取得完整结果；请先核实执行状态。", cancelled: Boolean = false) {
         flushPendingDelta()
+        toolActivities.finish(reason, cancelled).forEach(::append)
     }
 
+    @Synchronized
     fun discard() {
         pendingDelta = null
         AgentRunCheckpointStore.remove(appContext, runId)

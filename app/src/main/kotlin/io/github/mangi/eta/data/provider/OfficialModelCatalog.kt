@@ -204,7 +204,7 @@ internal object OfficialModelCatalog {
                 toolCall = true,
                 reasoning = true,
                 structuredOutput = true,
-                contextWindow = 1_000_000,
+                contextWindow = 131_072,
             ),
             officialModel(
                 id = "builtin-bailian-kimi-k3",
@@ -247,7 +247,7 @@ internal object OfficialModelCatalog {
                 toolCall = true,
                 reasoning = true,
                 structuredOutput = true,
-                contextWindow = 1_048_576,
+                contextWindow = 131_072,
             ),
             officialModel(
                 id = "builtin-deepseek-flash",
@@ -258,7 +258,7 @@ internal object OfficialModelCatalog {
                 toolCall = true,
                 reasoning = true,
                 structuredOutput = true,
-                contextWindow = 1_048_576,
+                contextWindow = 131_072,
             ),
         ),
         ProviderSourceTypes.MOONSHOT to listOf(

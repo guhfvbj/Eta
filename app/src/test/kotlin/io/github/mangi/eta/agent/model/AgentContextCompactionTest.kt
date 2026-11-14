@@ -36,19 +36,25 @@ class AgentContextCompactionTest {
     )
 
     @Test
-    fun largeHistoryWithoutUsageDoesNotTriggerCompaction() {
+    fun largeResumedHistoryCompactsBeforeItsFirstRequestWithoutUsage() {
         val original = "历史事实".repeat(40_000)
+        var summaries = 0
         var requests = 0
         val result = AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
             history = listOf(AgentModelClient.ConversationMessage("assistant", original)),
             provider = provider { request, _ ->
-                requests++
-                assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
-                assertTrue(request.messages.toString().contains(original))
-                response("完成")
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    response("保留此前事实。")
+                } else {
+                    requests++
+                    assertTrue(summaries > 0)
+                    assertFalse(request.messages.toString().contains(original))
+                    response("完成")
+                }
             })
         assertEquals(1, requests)
-        assertNull(result.contextSnapshot)
+        assertNotNull(result.contextSnapshot!!.lastContextTokens)
     }
 
     @Test
@@ -254,11 +260,10 @@ class AgentContextCompactionTest {
     }
 
     @Test
-    fun explicitOverflowFailsWithoutCompactionOrReplay() {
+    fun explicitOverflowCompactsAndRetriesWithoutFailedAttemptReasoning() {
         var normalRequests = 0
         var summaryRequests = 0
-        val failure = assertThrows(AgentModelExecutionException::class.java) {
-            AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
+        val result = AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
             history = history(), provider = provider { request, emit ->
                 if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                     summaryRequests++
@@ -268,11 +273,11 @@ class AgentContextCompactionTest {
                     throw AgentModelFailure("CONTEXT_OVERFLOW", false, "fixture")
                 } else response("完成")
             })
-        }
-        assertEquals("CONTEXT_OVERFLOW", (failure.cause as AgentModelFailure).code)
-        assertEquals(1, normalRequests)
-        assertEquals(0, summaryRequests)
-        assertTrue(failure.transcript.isEmpty())
+        assertEquals("完成", result.content)
+        assertEquals(2, normalRequests)
+        assertEquals(1, summaryRequests)
+        assertEquals("", result.reasoningContent)
+        assertEquals(listOf("完成"), result.transcript.map { it.content })
     }
 
     @Test

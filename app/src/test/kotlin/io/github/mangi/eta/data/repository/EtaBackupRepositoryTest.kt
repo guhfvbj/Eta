@@ -214,6 +214,7 @@ class EtaBackupRepositoryTest {
                 ConversationContextCheckpointEntity(
                     conversationId = conversation.id,
                     historyJson = "[]",
+                    runtimeStateJson = """{"version":1,"tokenBaseline":null,"subagents":[]}""",
                 ),
             ),
             state = ConversationStateEntity(selectedConversationId = conversation.id),
@@ -249,6 +250,10 @@ class EtaBackupRepositoryTest {
         assertEquals(provider.models.first().id, restoredSettings.selectedModelId)
         assertEquals("sk-backup-test", ProviderRepository.providerById(provider.id)?.apiKey)
         assertEquals(ModelSource.CATALOG, ProviderRepository.providerById(provider.id)?.models?.first()?.source)
+        assertEquals(
+            """{"version":1,"tokenBaseline":null,"subagents":[]}""",
+            EtaDatabase.get(context).conversationDao().contextCheckpoint(conversation.id)!!.runtimeStateJson,
+        )
     }
 
     @Test(expected = EtaBackupException::class)

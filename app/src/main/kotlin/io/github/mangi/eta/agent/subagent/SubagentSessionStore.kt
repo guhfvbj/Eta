@@ -1,6 +1,10 @@
 package io.github.mangi.eta.agent.subagent
 
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentContextTokenBaseline
+import io.github.mangi.eta.agent.model.AgentConversationCodec
+import io.github.mangi.eta.agent.model.AgentToolBatchRecovery
+import kotlinx.serialization.Serializable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -10,7 +14,6 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal object SubagentSessionStore {
     private const val MAX_CONVERSATIONS = 16
-    private const val MAX_AGENTS_PER_CONVERSATION = 16
 
     class Entry(
         val subagentId: String,
@@ -20,21 +23,29 @@ internal object SubagentSessionStore {
     ) {
         // 与独立子上下文一起保留，resume 时复用，父 Agent 与其他 Subagent 不共享。
         val openedMcpGroups: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
+        @Volatile var tokenBaseline: AgentContextTokenBaseline? = null
     }
+
+    @Serializable
+    data class StoredSession(
+        val subagentId: String,
+        val profile: SubagentProfile,
+        val history: List<AgentModelClient.ConversationMessage>,
+        val openedMcpGroups: Set<String> = emptySet(),
+        val tokenBaseline: AgentContextTokenBaseline? = null,
+    )
 
     private class ConversationBucket {
         val sequence = AtomicInteger(0)
-        val entries = object : LinkedHashMap<String, Entry>(8, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>?): Boolean =
-                size > MAX_AGENTS_PER_CONVERSATION && eldest?.value?.running?.get() != true
-        }
+        // Completed sessions remain addressable by resume; evict whole inactive conversation caches only.
+        val entries = LinkedHashMap<String, Entry>(8, 0.75f, true)
     }
 
     private val lock = Any()
     private val buckets = object : LinkedHashMap<String, ConversationBucket>(8, 0.75f, true) {
         override fun removeEldestEntry(
             eldest: MutableMap.MutableEntry<String, ConversationBucket>?,
-        ): Boolean = size > MAX_CONVERSATIONS
+        ): Boolean = size > MAX_CONVERSATIONS && eldest?.value?.entries?.values?.none { it.running.get() } == true
     }
 
     fun create(conversationKey: String, profile: SubagentProfile): Entry = synchronized(lock) {
@@ -66,4 +77,29 @@ internal object SubagentSessionStore {
             buckets[conversationKey]?.entries?.get(subagentId)?.running?.set(false)
         }
     }
+
+    fun export(conversationKey: String): List<StoredSession> = synchronized(lock) {
+        buckets[conversationKey]?.entries?.values.orEmpty().map { entry ->
+            val safe = AgentConversationCodec.decodeTranscript(AgentConversationCodec.encodeTranscriptForStorage(entry.history))
+            StoredSession(entry.subagentId, entry.profile, AgentToolBatchRecovery.completeInterrupted(safe),
+                entry.openedMcpGroups.toSet(), entry.tokenBaseline)
+        }
+    }
+
+    fun restore(conversationKey: String, sessions: List<StoredSession>) = synchronized(lock) {
+        val bucket = buckets.getOrPut(conversationKey) { ConversationBucket() }
+        sessions.forEach { stored ->
+            if (stored.subagentId !in bucket.entries) {
+                bucket.entries[stored.subagentId] = Entry(stored.subagentId, stored.profile,
+                    AgentToolBatchRecovery.completeInterrupted(stored.history)).also {
+                    it.openedMcpGroups.addAll(stored.openedMcpGroups)
+                    it.tokenBaseline = stored.tokenBaseline
+                }
+            }
+            val sequence = stored.subagentId.removePrefix("sub_").toIntOrNull() ?: 0
+            bucket.sequence.set(maxOf(bucket.sequence.get(), sequence))
+        }
+    }
+
+    internal fun clearForTests() = synchronized(lock) { buckets.clear() }
 }

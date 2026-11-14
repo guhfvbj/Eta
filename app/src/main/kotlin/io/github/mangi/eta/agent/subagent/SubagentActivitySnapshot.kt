@@ -49,6 +49,15 @@ internal data class SubagentActivitySnapshot(
 
     fun encode(): String = json.encodeToString(this)
 
+    fun terminated(reason: String, cancelled: Boolean): SubagentActivitySnapshot =
+        if (status != STATUS_RUNNING) this else copy(
+            status = if (cancelled) STATUS_CANCELLED else STATUS_FAILED,
+            currentAction = reason,
+            error = reason,
+            steps = steps.map { if (it.status == SubagentStepSnapshot.STATUS_RUNNING)
+                it.copy(status = SubagentStepSnapshot.STATUS_FAILED) else it },
+        )
+
     companion object {
         const val STATUS_RUNNING = "running"
         const val STATUS_COMPLETED = "completed"

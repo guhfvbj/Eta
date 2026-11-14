@@ -42,6 +42,7 @@ internal class SubagentExecutor(
     private val nanoTime: () -> Long = System::nanoTime,
     private val providerFor: (AgentModelClient.ModelConfig) -> AgentProviderClient = ProviderClientFactory::getClient,
     private val maxToolRounds: Int = 48,
+    private val onSessionChanged: () -> Unit = {},
 ) {
     private val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
     private val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
@@ -186,9 +187,11 @@ internal class SubagentExecutor(
         var compactionFailure: String? = null
         var childProvider: AgentProviderClient? = null
         var sessionReleased = false
+        entry.history = initialHistory
         fun storeHistory(history: List<AgentModelClient.ConversationMessage>) {
             SubagentSessionStore.complete(conversationKey, subagentId, history)
             sessionReleased = true
+            onSessionChanged()
         }
         fun retainedHistory(
             transcript: List<AgentModelClient.ConversationMessage>,
@@ -232,6 +235,7 @@ internal class SubagentExecutor(
         }
 
         return try {
+            onSessionChanged()
             val provider = providerFor(subagentConfig)
             childProvider = provider
             val response = AgentModelClient.complete(
@@ -255,15 +259,19 @@ internal class SubagentExecutor(
                 mcpSearchEnabled = mcpSearchEnabled,
                 openedMcpGroupsProvider = { entry.openedMcpGroups.toSet() },
                 maxToolRounds = maxToolRounds.coerceAtLeast(1),
+                initialTokenBaseline = entry.tokenBaseline,
                 onContextSnapshot = { checkpoint ->
                     latestCheckpoint = checkpoint
+                    entry.tokenBaseline = checkpoint.tokenBaseline
                     entry.history = retainedHistory(latestTranscript)
+                    onSessionChanged()
                 },
                 onTranscript = { transcript ->
                     latestTranscript = transcript
                     // Keep the compacted checkpoint plus only its unconsumed delta.
                     // A failed later round must not restore priorHistory + full transcript.
                     entry.history = retainedHistory(transcript)
+                    onSessionChanged()
                 },
                 onEvent = { childEvent ->
                     if (childEvent is AgentEvent.ContextCompaction && childEvent.phase == "failed") {

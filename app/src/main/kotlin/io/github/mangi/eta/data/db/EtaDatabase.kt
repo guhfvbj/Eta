@@ -28,7 +28,7 @@ import androidx.room.migration.Migration
         AgentTaskEntity::class,
         AgentTaskRunEntity::class,
     ],
-    version = 26,
+    version = 27,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -72,6 +72,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_23_24,
                         MIGRATION_24_25,
                         MIGRATION_25_26,
+                        MIGRATION_26_27,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db); createAgentTaskTables(db) }
@@ -141,6 +142,14 @@ internal abstract class EtaDatabase : RoomDatabase() {
 
         internal val MIGRATION_25_26 = Migration(25, 26) { database ->
             createAgentTaskTables(database)
+        }
+
+        internal val MIGRATION_26_27 = Migration(26, 27) { database ->
+            database.execSQL("ALTER TABLE conversation_context_checkpoints ADD COLUMN runtime_state_json TEXT NOT NULL DEFAULT ''")
+            // Catalog metadata only: never overwrite an explicit user window override (including Gemini).
+            database.execSQL("UPDATE provider_models SET context_window = 131072 WHERE is_built_in = 1 " +
+                "AND id IN ('builtin-deepseek-flash', 'builtin-deepseek-v4-pro', 'builtin-bailian-deepseek-v4-1-flash') " +
+                "AND context_window IN (1048576, 1000000)")
         }
 
         private fun createAgentTaskTables(database: androidx.sqlite.db.SupportSQLiteDatabase) {

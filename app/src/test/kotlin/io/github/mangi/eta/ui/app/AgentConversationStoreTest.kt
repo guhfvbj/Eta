@@ -11,6 +11,7 @@ import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
 import io.github.mangi.eta.ui.model.AgentMessageUi
@@ -39,6 +40,31 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "en-rUS")
 class AgentConversationStoreTest {
+    @Test
+    fun reloadingInterruptedActivitiesHasTerminalStatusAndChildSnapshot() = runBlocking {
+        val child = SubagentActivitySnapshot(subagentId = "sub_1", currentAction = "正在启动…")
+        val messages = listOf(
+            ToolActivityMessageUi("child", "subagent", ToolActivityStatusUi.Running, "explore", command = child.encode()),
+            ToolActivityMessageUi("shell", "terminal", ToolActivityStatusUi.Running, "command"),
+            ToolActivityMessageUi("legacy", "subagent", ToolActivityStatusUi.Unknown, "explore", command = child.encode()),
+            ToolActivityMessageUi("failed", "subagent", ToolActivityStatusUi.Failed, "explore", command = child.encode(),
+                resultSummary = "SUBAGENT_NOT_FOUND"),
+        )
+        AgentConversationStore.save(context, "interrupted", mapOf("interrupted" to AgentChatHomeUiState(
+            messages = messages, input = "", isStreaming = true, thinkingEnabled = false)),
+            mapOf("interrupted" to "test"), mapOf("interrupted" to 1L))
+        EtaDatabase.closeForTests()
+        val loaded = AgentConversationStore.loadConversation(context, "interrupted")!!.messages.filterIsInstance<ToolActivityMessageUi>()
+        assertTrue(loaded.all { it.status == ToolActivityStatusUi.Failed && !it.resultSummary.isNullOrBlank() })
+        loaded.filter { it.toolName == "subagent" }.forEach {
+            val snapshot = SubagentActivitySnapshot.decode(it.command)!!
+            assertEquals(if (it.id == "failed") SubagentActivitySnapshot.STATUS_FAILED else SubagentActivitySnapshot.STATUS_CANCELLED,
+                snapshot.status)
+            assertFalse(snapshot.currentAction.contains("正在启动"))
+        }
+        assertTrue(EtaDatabase.get(context).conversationDao().messages().all { it.toolStatus == ToolActivityStatusUi.Failed.name })
+    }
+
     private lateinit var context: Context
 
     @Before

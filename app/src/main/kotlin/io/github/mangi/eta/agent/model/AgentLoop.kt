@@ -44,6 +44,7 @@ internal class AgentLoop(
     private val systemCountProvider: () -> Int = { systemCount },
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
     private val maxToolRounds: Int? = null,
+    initialTokenBaseline: AgentContextTokenBaseline? = null,
 ) {
     data class Result(
         val content: String,
@@ -64,14 +65,20 @@ internal class AgentLoop(
     private val turnMetrics = TurnMetricsAccumulator()
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
-        { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
+        { sensitiveToolCallIds }, onEvent, onContextSnapshot, {
+            AgentToolBatchRecovery.completeInterrupted(AgentConversationCodec.transcript(transcript, 0, sensitiveToolCallIds)).size
+        },
         roleplay = roleplayContext != null,
         systemCountProvider = systemCountProvider,
         dynamicMcpGroupsProvider = dynamicMcpGroupsProvider,
+        initialTokenBaseline = initialTokenBaseline,
+        requestProjection = { AssistantScreenContextProjection.project(roleplayContext?.projectMessages(it) ?: it) },
     )
     private var supplementIndex = initialSupplementIndex
 
     fun contextSnapshot(): AgentContextSnapshot? = context.snapshot()
+
+    fun checkpointContext() = context.checkpoint()
 
     private fun appendMessage(message: JSONObject) {
         messages.put(message)
@@ -99,6 +106,7 @@ internal class AgentLoop(
         var round = 1
         var toolRounds = 0
         var precedingTools: JSONArray? = null
+        var contextRecoveries = 0
 
         while (true) {
             runController.throwIfCancelled()
@@ -120,7 +128,9 @@ internal class AgentLoop(
                 roundTools.optJSONObject(index)?.optJSONObject("function")?.optString("name")
             }
             publishTranscript()
+            context.prepareRequest(roundTools)
             if (purpose.allowsTools) context.compact()
+            context.captureRequest()
             val requestMessages = AssistantScreenContextProjection.project(
                 roleplayContext?.projectMessages(messages) ?: messages,
             )
@@ -129,6 +139,9 @@ internal class AgentLoop(
             var stepStartedAtMs = monotonicNowMs()
             var firstTokenAtMs: Long? = null
             val reasoningLengthBeforeRound = accumulatedReasoning.length
+            var hostedToolStarted = false
+            var recoveringContext = false
+            var attemptRound = round
             val completedRound = try {
                 modelRetry.complete(
                     initialRound = round,
@@ -137,6 +150,8 @@ internal class AgentLoop(
                     controller = runController,
                     onEvent = { event ->
                         if (event is AgentEvent.RoundStarted) {
+                            attemptRound = event.round
+                            hostedToolStarted = false
                             roundInputTokens = null
                             roundUsage = null
                             stepStartedAtMs = monotonicNowMs()
@@ -145,6 +160,7 @@ internal class AgentLoop(
                         onEvent(event)
                     },
                     onProviderEvent = { attemptRound, providerEvent ->
+                        if (providerEvent is ProviderEvent.HostedToolStarted) hostedToolStarted = true
                         if (!purpose.allowsTools && (providerEvent is ProviderEvent.HostedToolStarted ||
                                 providerEvent is ProviderEvent.SearchSuggestions ||
                                 providerEvent is ProviderEvent.BlockStart && providerEvent.kind == AssistantBlockKind.TOOL_CALL)) {
@@ -178,15 +194,29 @@ internal class AgentLoop(
                     rejectContentFilter(response.response)
                     if (purpose == ProviderRequestPurpose.CHAT) validateChatResponse(response.response)
                 }
+            } catch (failure: AgentModelFailure) {
+                runController.throwIfCancelled()
+                if (purpose != ProviderRequestPurpose.CHAT || hostedToolStarted ||
+                    SignedToolContext.hasPendingResponse(messages) || contextRecoveries >= 2 ||
+                    !failure.canRecoverContext(context.effectiveTokens(), config.knownContextWindow)) throw failure
+                contextRecoveries++
+                accumulatedReasoning.setLength(reasoningLengthBeforeRound)
+                // Usage from the failed attempt is deliberately not observed or published.
+                context.compact(force = true, emergency = true)
+                onEvent(AgentEvent.ModelRetryScheduled(attemptRound, contextRecoveries, 2, 0, failure.code))
+                round = attemptRound + 1
+                recoveringContext = true
+                continue
             } finally {
                 // 同一回合的重试仍需原始观察；整个回合结束后才移除截图。
-                discardPendingToolImageMessage()
+                if (!recoveringContext) discardPendingToolImageMessage()
             }
             val completedAtMs = monotonicNowMs()
             val stepLlmMs = (completedAtMs - stepStartedAtMs).coerceAtLeast(0L)
             val stepTtftMs = firstTokenAtMs?.let { (it - stepStartedAtMs).coerceAtLeast(0L) }
             val stepDecodeMs = firstTokenAtMs?.let { (completedAtMs - it).coerceAtLeast(0L) }
             context.observeInputTokens(roundInputTokens)
+            if (purpose.allowsTools) context.checkpoint()
             round = completedRound.round
             val providerResponse = completedRound.response
 
@@ -233,6 +263,7 @@ internal class AgentLoop(
             }
 
             if (toolCalls.isNotEmpty()) {
+                publishTranscript() // Persist the call before entering a potentially interrupted tool batch.
                 val outcomes = executeToolBatch(round, toolCalls, providerResponse.stopReason)
                 outcomes.forEach { outcome ->
                     appendMessage(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))

@@ -17,4 +17,14 @@ internal object ResponsesEphemeralState {
     fun copyOutputItems(source: JSONObject, target: JSONObject) {
         outputItems(source)?.let { attachOutputItems(target, it) }
     }
+
+    fun hasPendingToolResponse(messages: JSONArray): Boolean {
+        for (index in messages.length() - 1 downTo 0) {
+            val message = messages.optJSONObject(index) ?: continue
+            if (message.optString("role") == "assistant") {
+                return outputItems(message) != null && AgentConversationCodec.parseToolCalls(message).isNotEmpty()
+            }
+        }
+        return false
+    }
 }

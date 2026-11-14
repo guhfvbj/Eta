@@ -38,11 +38,13 @@ internal object AgentConversationRevisionReducer {
             return source.filterNot { it.contextSummary && it.summaryThroughUserTurn >= turn }
         }
         val historyPrefix = prefix(state.history)
-        val journalPrefix = if (state.journal.isNotEmpty()) validPrefix(prefix(state.journal).orEmpty()) else null
+        val rawJournalPrefix = if (state.journal.isNotEmpty()) prefix(state.journal) else null
+        val journalPrefix = rawJournalPrefix?.let(::validPrefix)
         val targetTurn = historyPrefix.orEmpty().sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 } + 1
         val invalidatesSummary = state.history.any {
             it.contextSummary && (historyPrefix == null || it.summaryThroughUserTurn >= targetTurn)
         }
+        val canRebuildFromJournal = journalPrefix != null && rawJournalPrefix.none { it.contextSummary }
         val retainedHistory = if (state.history.isEmpty() || historyPrefix == null || invalidatesSummary) {
             journalPrefix ?: validPrefix(historyPrefix.orEmpty())
         } else historyPrefix
@@ -53,7 +55,8 @@ internal object AgentConversationRevisionReducer {
             historyPrefix = retainedHistory,
             journalPrefix = journalPrefix ?: retainedHistory,
             laterTurnCount = userMessageIndices.size - targetUserOrdinal - 1,
-            contextWasCompacted = historyPrefix == null || invalidatesSummary,
+            contextWasCompacted = !canRebuildFromJournal && (historyPrefix == null || invalidatesSummary) ||
+                historyPrefix != null && state.history.any { it.contextSummary && it.summaryThroughUserTurn >= targetTurn },
         )
     }
 

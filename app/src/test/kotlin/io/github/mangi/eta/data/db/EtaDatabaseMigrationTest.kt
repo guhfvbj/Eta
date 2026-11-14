@@ -1,5 +1,6 @@
 package io.github.mangi.eta.data.db
 
+import android.app.Application
 import android.content.Context
 import androidx.room.Room
 import androidx.room.migration.Migration
@@ -19,10 +20,51 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [36], application = Application::class)
 class EtaDatabaseMigrationTest {
     @Test
-    fun migration6To23PreservesDataAndMovesCompleteConversationContext() {
+    fun migration26To27AddsMetadataAndRepairsDeepseekWindows() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val name = "m26-${UUID.randomUUID().toString().take(8)}.db"
+        fun open(version: Int): SupportSQLiteOpenHelper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context).name(name)
+                .callback(object : SupportSQLiteOpenHelper.Callback(version) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("CREATE TABLE conversation_context_checkpoints (conversation_id TEXT PRIMARY KEY NOT NULL, history_json TEXT NOT NULL, journal_json TEXT NOT NULL DEFAULT '')")
+                        db.execSQL("INSERT INTO conversation_context_checkpoints VALUES ('conversation', 'history', 'journal')")
+                        db.execSQL("CREATE TABLE provider_models (id TEXT PRIMARY KEY NOT NULL, is_built_in INTEGER NOT NULL, context_window INTEGER, context_window_override INTEGER)")
+                        db.execSQL("INSERT INTO provider_models VALUES ('builtin-deepseek-flash',1,1048576,64000), ('builtin-deepseek-v4-pro',1,1048576,NULL), " +
+                            "('builtin-bailian-deepseek-v4-1-flash',1,1000000,NULL), ('gemini-4',0,NULL,256000), ('custom-deepseek',0,NULL,1000000)")
+                    }
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                        EtaDatabase.MIGRATION_26_27.migrate(db)
+                    }
+                }).build(),
+        )
+        open(26).use { it.writableDatabase }
+        val helper = open(27)
+        try {
+            val db = helper.writableDatabase
+            db.query("SELECT history_json, journal_json, runtime_state_json FROM conversation_context_checkpoints").use {
+                assertEquals(true, it.moveToFirst())
+                assertEquals("history", it.getString(0))
+                assertEquals("journal", it.getString(1))
+                assertEquals("", it.getString(2))
+            }
+            db.query("SELECT context_window, context_window_override FROM provider_models WHERE id = 'builtin-deepseek-flash'").use {
+                assertEquals(true, it.moveToFirst())
+                assertEquals(131_072, it.getInt(0))
+                assertEquals(64_000, it.getInt(1))
+            }
+            db.query("SELECT context_window_override FROM provider_models WHERE id = 'gemini-4'").use {
+                assertEquals(true, it.moveToFirst())
+                assertEquals(256_000, it.getInt(0))
+            }
+        } finally { helper.close(); context.deleteDatabase(name) }
+    }
+
+    @Test
+    fun migration6To27PreservesDataAndMovesCompleteConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -60,6 +102,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_23_24,
                 EtaDatabase.MIGRATION_24_25,
                 EtaDatabase.MIGRATION_25_26,
+                EtaDatabase.MIGRATION_26_27,
             )
             .build()
         try {
@@ -114,6 +157,7 @@ class EtaDatabaseMigrationTest {
             )
             assertEquals("[\"${"x".repeat(140_000)}\"]", oversizedCheckpoint?.historyJson)
             assertEquals(oversizedCheckpoint?.historyJson, oversizedCheckpoint?.journalJson)
+            assertEquals("", retainedCheckpoint?.runtimeStateJson)
             assertEquals("[]", clearedLegacyHistory)
             assertEquals("[]", conversations.first { it.id == "conv-1" }.appliedRuntimeRunIdsJson)
             assertEquals("", conversations.first { it.id == "conv-1" }.roleplayJson)
@@ -149,6 +193,7 @@ class EtaDatabaseMigrationTest {
         context: Context,
         databaseName: String,
     ) {
+        context.getDatabasePath(databaseName).parentFile?.mkdirs()
         val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(databaseName)
             .callback(

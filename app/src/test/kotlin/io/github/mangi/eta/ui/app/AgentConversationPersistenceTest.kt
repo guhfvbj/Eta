@@ -25,6 +25,22 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "en-rUS")
 class AgentConversationPersistenceTest {
+    @Test
+    fun contextAndJournalUpdatesPreserveIndependentRuntimeMetadata() = runBlocking {
+        val persistence = AgentConversationPersistence()
+        val initial = snapshot(mapOf("active" to state("active")))
+        persistence.save(context, initial)
+        val dao = EtaDatabase.get(context).conversationDao()
+        val metadata = """{"version":1,"tokenBaseline":null,"subagents":[]}"""
+        dao.updateRuntimeState("active", metadata)
+        persistence.save(context, initial.copy(conversationsById = mapOf("active" to state("active").copy(
+            history = listOf(AgentModelClient.ConversationMessage("assistant", "摘要", contextSummary = true))))))
+        assertEquals(metadata, dao.contextCheckpoint("active")!!.runtimeStateJson)
+        dao.deleteConversation("active")
+        dao.updateRuntimeState("active", metadata)
+        assertEquals(null, dao.contextCheckpoint("active"))
+    }
+
     private lateinit var context: Context
 
     @Before

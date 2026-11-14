@@ -6,6 +6,7 @@ import io.github.mangi.eta.agent.model.AgentPhoneToolCatalog
 import io.github.mangi.eta.agent.model.AgentTerminalToolCatalog
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.serialization.Serializable
 
 /**
  * Subagent 角色定义与工具白名单（涵盖内置 Profile 与用户在 `agents/<name>.md` 定义的自定义 Profile）。
@@ -13,6 +14,7 @@ import org.json.JSONObject
  * 所有 Subagent 均剥夺 `subagent` / `subagent_profile` 自身（禁止递归派发与自修改）
  * 以及独占式物理屏幕 GUI 与交互式浏览器工具，确保多个 Subagent 并发运行时互不干扰。
  */
+@Serializable
 internal data class SubagentProfile(
     val name: String,
     val summary: String,

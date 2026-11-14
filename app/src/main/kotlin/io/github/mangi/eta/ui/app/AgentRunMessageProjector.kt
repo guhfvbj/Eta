@@ -309,7 +309,7 @@ internal class AgentRunMessageProjector(
             }
         }
 
-    /** 终态不依赖各块结束事件全部到齐；缺少工具结果时只能标为未知，不能推断执行成功。 */
+    /** Missing results terminate the activity; the reason leaves external side effects unconfirmed. */
     fun finalizeRun(runId: String, messages: List<AgentChatMessageUi>): List<AgentChatMessageUi> =
         finalizeText(runId, finalizeThinking(runId, messages)).map { message ->
             if (
@@ -317,7 +317,7 @@ internal class AgentRunMessageProjector(
                 message.id.startsWith("$runId-tool-") &&
                 message.status == ToolActivityStatusUi.Running
             ) {
-                message.copy(status = ToolActivityStatusUi.Unknown)
+                message.terminated("工具执行已中断，未取得完整结果；请先核实执行状态。", cancelled = true)
             } else {
                 message
             }
@@ -455,7 +455,10 @@ internal class AgentRunMessageProjector(
                     command = event.command ?: message.command,
                     resultSummary = event.resultSummary,
                     imageCount = event.imageCount,
-                )
+                ).let { tool ->
+                    if (status == ToolActivityStatusUi.Failed) tool.terminated(event.resultSummary, cancelled = false)
+                    else tool
+                }
             } else {
                 message
             }
@@ -517,10 +520,7 @@ internal class AgentRunMessageProjector(
     ): List<AgentChatMessageUi> =
         messages.map { message ->
             if (message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running) {
-                message.copy(
-                    status = ToolActivityStatusUi.Failed,
-                    resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
-                )
+                message.terminated(reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS), cancelled = false)
             } else {
                 message
             }
@@ -532,10 +532,7 @@ internal class AgentRunMessageProjector(
     ): List<AgentChatMessageUi> =
         messages.map { message ->
             if (message is ToolActivityMessageUi && message.status == ToolActivityStatusUi.Running) {
-                message.copy(
-                    status = ToolActivityStatusUi.Unknown,
-                    resultSummary = reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS),
-                )
+                message.terminated(reason.take(MAX_TOOL_RESULT_PREVIEW_CHARS), cancelled = true)
             } else {
                 message
             }

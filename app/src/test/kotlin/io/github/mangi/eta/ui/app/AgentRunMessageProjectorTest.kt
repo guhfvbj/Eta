@@ -2,6 +2,8 @@ package io.github.mangi.eta.ui.app
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot
+import io.github.mangi.eta.agent.subagent.SubagentStepSnapshot
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.SystemNoticeCode
@@ -17,6 +19,42 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentRunMessageProjectorTest {
+    @Test
+    fun failedToolResultWithoutChildProgressTerminatesInitialSubagentSnapshot() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val initial = SubagentActivitySnapshot(subagentId = "missing", currentAction = "正在启动…")
+        val messages = projector.startTool("run", AgentEvent.ToolStarted(1, "child", "subagent", "resume",
+            command = initial.encode()), emptyList())
+        val tool = projector.finishTool("run", AgentEvent.ToolFinished(1, "child", "subagent", "SUBAGENT_NOT_FOUND", 0, 0,
+            success = false), messages).single() as ToolActivityMessageUi
+        val child = SubagentActivitySnapshot.decode(tool.command)!!
+        assertEquals(ToolActivityStatusUi.Failed, tool.status)
+        assertEquals(SubagentActivitySnapshot.STATUS_FAILED, child.status)
+        assertEquals("SUBAGENT_NOT_FOUND", child.currentAction)
+    }
+
+    @Test
+    fun terminationConvergesNestedChildSnapshotsAndPreservesCompletedChildren() {
+        val projector = AgentRunMessageProjector { 1_000L }
+        val child = SubagentActivitySnapshot(subagentId = "sub_1", currentAction = "正在启动…",
+            steps = listOf(SubagentStepSnapshot("step", "tool", status = SubagentStepSnapshot.STATUS_RUNNING)))
+        val running = ToolActivityMessageUi("run-tool-1-child", "subagent", ToolActivityStatusUi.Running,
+            "explore", command = child.encode())
+        val completed = running.copy(id = "run-tool-1-finished", status = ToolActivityStatusUi.Success,
+            command = child.copy(status = SubagentActivitySnapshot.STATUS_COMPLETED, currentAction = "完成").encode())
+        for (cancelled in listOf(false, true)) {
+            val result = if (cancelled) projector.interruptRunningTools("任务中断", listOf(running, completed))
+                else projector.failRunningTools("执行失败", listOf(running, completed))
+            val tool = result.first() as ToolActivityMessageUi
+            val snapshot = SubagentActivitySnapshot.decode(tool.command)!!
+            assertEquals(ToolActivityStatusUi.Failed, tool.status)
+            assertEquals(if (cancelled) SubagentActivitySnapshot.STATUS_CANCELLED else SubagentActivitySnapshot.STATUS_FAILED, snapshot.status)
+            assertTrue(snapshot.steps.none { it.status == SubagentStepSnapshot.STATUS_RUNNING })
+            assertFalse(snapshot.currentAction.contains("正在启动"))
+            assertEquals(completed, result.last())
+        }
+    }
+
     @Test
     fun searchSuggestionsBindToExactTextBlockAndDoNotPersistIntoAnotherRun() {
         val projector = AgentRunMessageProjector { 1_000L }
@@ -109,7 +147,7 @@ class AgentRunMessageProjectorTest {
     }
 
     @Test
-    fun runCompletionFinalizesUnclosedBlocksAndUnknownToolWithoutChangingOtherRuns() {
+    fun runCompletionTerminatesUnclosedToolsWithoutChangingOtherRuns() {
         val projector = AgentRunMessageProjector(nowElapsedRealtime = { 1_000L })
         val runId = "run-final"
         val knownTools = listOf(
@@ -161,7 +199,7 @@ class AgentRunMessageProjectorTest {
         val thinking = finalized.filterIsInstance<ThinkingMessageUi>().single { it.id.startsWith(runId) }
         assertFalse(thinking.isStreaming)
         assertTrue(thinking.collapsed)
-        assertEquals(unfinishedTool.copy(status = ToolActivityStatusUi.Unknown), finalized.last())
+        assertEquals(unfinishedTool.terminated("工具执行已中断，未取得完整结果；请先核实执行状态。", cancelled = true), finalized.last())
     }
 
     @Test
@@ -474,7 +512,7 @@ class AgentRunMessageProjectorTest {
     }
 
     @Test
-    fun interruptedToolBecomesUnknownInsteadOfFailed() {
+    fun interruptedToolHasClearTerminalFailure() {
         val projector = AgentRunMessageProjector(nowElapsedRealtime = { 1_000L })
         val runId = "run-interrupted"
         val running = projector.startTool(
@@ -491,7 +529,7 @@ class AgentRunMessageProjectorTest {
         val interrupted = projector.interruptRunningTools("任务中断", running)
         val tool = interrupted.filterIsInstance<ToolActivityMessageUi>().single()
 
-        assertEquals(ToolActivityStatusUi.Unknown, tool.status)
+        assertEquals(ToolActivityStatusUi.Failed, tool.status)
         assertEquals("任务中断", tool.resultSummary)
     }
 

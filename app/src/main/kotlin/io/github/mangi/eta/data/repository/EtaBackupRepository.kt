@@ -121,6 +121,8 @@ internal object EtaBackupRepository {
                     phase = "export_checkpoints"
                     writer.beginArray(EtaBackupJsonStreams.CHECKPOINTS)
                     exportRows({ dao.contextCheckpointRowsPage(EXPORT_PAGE_SIZE, it) }) { raw ->
+                        // Restore chunked runtime metadata too (token baseline and resumable child sessions).
+                        // The optional entity field keeps pre-v27 backups readable without a format bump.
                         writer.record(ConversationContextCheckpointEntity.serializer(), dao.restoreCheckpoint(raw))
                     }
                     writer.endArray()

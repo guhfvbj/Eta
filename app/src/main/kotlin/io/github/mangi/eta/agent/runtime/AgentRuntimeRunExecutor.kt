@@ -18,6 +18,7 @@ import io.github.mangi.eta.agent.roleplay.CharacterMemoryTools
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import io.github.mangi.eta.agent.subagent.AgentSubagentToolCatalog
 import io.github.mangi.eta.agent.subagent.SubagentExecutor
+import io.github.mangi.eta.agent.subagent.SubagentSessionStore
 import io.github.mangi.eta.agent.mcp.McpProgressiveLoader
 import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.mcp.McpToolExecutor
@@ -174,6 +175,8 @@ internal class AgentRuntimeRunExecutor(
             val openedMcpGroups = ConcurrentHashMap.newKeySet<String>()
             val mcpLoader = McpProgressiveLoader(mcpSnapshot, openedMcpGroups, mcpSearchEnabled)
             val browserKey = AgentConversationIdentity.fromHandoff(request.handoff, request.runId)
+            val runtimeState = conversationId?.let { AgentConversationRuntimeStore.load(appContext, it) }
+            if (runtimeState != null) SubagentSessionStore.restore(browserKey, runtimeState.subagents)
             browserBinding = BrowserSessionRegistry.acquireRun(browserKey, request.runId)
             guiRun = guiControl.openRun(request.runId, runController) { status ->
                 acceptEvent(
@@ -307,6 +310,11 @@ internal class AgentRuntimeRunExecutor(
                         checkpointRecorder,
                     )
                 },
+                onSessionChanged = {
+                    if (conversationId != null) AgentConversationRuntimeStore.update(appContext, conversationId) {
+                        it.copy(subagents = SubagentSessionStore.export(browserKey))
+                    }
+                },
             )
             val runTools = JSONArray().also { tools ->
                 if (!progressiveMcp) mcpSnapshot.appendModelTools(tools)
@@ -371,11 +379,15 @@ internal class AgentRuntimeRunExecutor(
                 roleplayContext = roleplayContext,
                 rewriteReply = request.operation == AgentRuntimeWire.OP_REWRITE_REPLY,
                 compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
+                initialTokenBaseline = runtimeState?.tokenBaseline,
                 onContextSnapshot = { snapshot ->
                     // 压缩会把历史里的记忆写入摘要掉，下一轮需要重新注入最新记忆。
                     ConversationMemoryPins.forget(conversationId)
                     val committed = snapshot.copy(operationId = request.runId)
                     AgentRunCheckpointStore.saveContext(appContext, request.runId, committed)
+                    if (conversationId != null) AgentConversationRuntimeStore.update(appContext, conversationId) {
+                        it.copy(tokenBaseline = committed.tokenBaseline)
+                    }
                     session.updateContext(committed)
                 },
                 onTranscript = { transcript ->
@@ -471,7 +483,16 @@ internal class AgentRuntimeRunExecutor(
             runCatching { browserBinding?.close() }
         }
 
+        val terminalReason = result.error?.takeIf { it.isNotBlank() }
+            ?: "工具执行已结束，未取得完整结果；请先核实执行状态。"
+        archivedEvents?.let { events ->
+            val activities = AgentRunToolActivityState()
+            events.forEach(activities::accept)
+            events.addAll(activities.finish(terminalReason, cancelled))
+        }
+
         if (cancelled && session.isTerminal) {
+            runCatching { checkpointRecorder?.seal(terminalReason, cancelled = true) }
             runCatching {
                 persistArtifacts(snapshotRequest(request), result, archivedEvents.orEmpty())
             }.onFailure { throwable ->
@@ -495,7 +516,7 @@ internal class AgentRuntimeRunExecutor(
                 request
             }
         val committed = session.complete(result) {
-            runCatching { checkpointRecorder?.seal() }
+            runCatching { checkpointRecorder?.seal(terminalReason, cancelled) }
                 .onFailure { throwable ->
                     AndroidAgentLogger.error(
                         "Agent runtime checkpoint seal failed: type=${throwable.safeLogType()}"
@@ -526,7 +547,7 @@ internal class AgentRuntimeRunExecutor(
     ) {
         checkpointRecorder?.accept(event)
         if (!session.emit(event)) return
-        if (event !is AgentEvent.GuiControlChanged) archivedEvents?.add(event)
+        if (event !is AgentEvent.GuiControlChanged) archivedEvents?.let { synchronized(it) { it.add(event) } }
         if (event is AgentEvent.ModelRetryScheduled) {
             AndroidAgentLogger.warn("Agent runtime event: ${event.toLogLine()}")
         } else if (event !is AgentEvent.AssistantBlockDelta) {

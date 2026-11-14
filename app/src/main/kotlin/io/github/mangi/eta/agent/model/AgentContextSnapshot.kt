@@ -14,7 +14,9 @@ internal data class AgentContextSnapshot(
     val consumedUserTurns: Int = 0,
     val consumedSupplementCount: Int = 0,
     val consumedTranscriptMessages: Int? = null,
+    val tokenBaseline: AgentContextTokenBaseline? = null,
 ) {
+    val lastContextTokens: Int? get() = tokenBaseline?.lastContextTokens
     fun encode(): String = codec.encodeToString(this)
 
     companion object {

@@ -25,6 +25,8 @@ import io.github.mangi.eta.agent.prompt.AgentToolPolicyStore
 import io.github.mangi.eta.agent.prompt.ToolPolicyMode
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
+import io.github.mangi.eta.agent.runtime.AgentConversationRuntimeState
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
@@ -42,6 +44,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,6 +55,45 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [36])
 class SubagentTest {
+    @Test
+    fun parentCancellationPreservesEarlierAndPartialChildSessionsAcrossProcessRestore() {
+        val key = UUID.randomUUID().toString()
+        val completed = executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { response() }))
+            .getString("subagent_id")
+        val controller = AgentRunController()
+        val progress = mutableListOf<AgentEvent.SubagentProgress>()
+        var persisted = AgentConversationRuntimeState()
+        val interrupted = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF,
+            provider { response(toolCall("read_file", id = "partial-read")) },
+            AgentModelClient.ToolExecutor {
+                controller.cancel()
+                controller.throwIfCancelled()
+                error("cancelled")
+            }, terminalTools = true, parentController = controller,
+            onProgress = progress::add, onSessionChanged = {
+                persisted = AgentConversationRuntimeState(subagents = SubagentSessionStore.export(key))
+            })
+        assertThrows(AgentRunCancelledException::class.java) {
+            executeSubagent(interrupted, SubagentProfile.TYPE_EXPLORE)
+        }
+        assertEquals(SubagentActivitySnapshot.STATUS_CANCELLED,
+            SubagentActivitySnapshot.decode(progress.last().snapshotJson)!!.status)
+        val snapshot = AgentConversationRuntimeState.decode(persisted.encode())
+        val partial = snapshot.subagents.single { it.subagentId != completed }
+        assertTrue(partial.history.any { it.toolCallId == "partial-read" && it.content.contains("TOOL_INTERRUPTED") })
+        assertEquals(1, partial.history.count { it.toolCallId == "partial-read" })
+        SubagentSessionStore.clearForTests()
+        SubagentSessionStore.restore(key, snapshot.subagents)
+        for (id in listOf(completed, partial.subagentId)) {
+            assertFalse(session(key, id).running.get())
+            val resumed = executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+                if (id == partial.subagentId) assertTrue(request.toolContents().any { it.contains("TOOL_INTERRUPTED") })
+                response()
+            }), type = null, resume = id)
+            assertEquals(id, resumed.getString("subagent_id"))
+        }
+    }
+
     private val first = mcpTool("one", "Calendar", "findEvents")
     private val sibling = mcpTool("one", "Calendar", "deleteEvent")
     private val second = mcpTool("two", "Documents", "readDocument")
@@ -704,9 +746,12 @@ class SubagentTest {
         },
         maxToolRounds: Int = 48,
         terminalTools: Boolean = false,
+        parentController: AgentRunController = AgentRunController(),
+        onProgress: (AgentEvent.SubagentProgress) -> Unit = {},
+        onSessionChanged: () -> Unit = {},
     ) = SubagentExecutor(
         conversationKey = conversationKey,
-        parentController = AgentRunController(),
+        parentController = parentController,
         configProvider = {
             AgentModelClient.ModelConfig(
                 baseUrl = "https://example.invalid/v1",
@@ -725,9 +770,10 @@ class SubagentTest {
         mcpSnapshot = mcpSnapshot,
         mcpLoadingMode = mode,
         executionContext = null,
-        onProgress = {},
+        onProgress = onProgress,
         providerFor = { provider },
         maxToolRounds = maxToolRounds,
+        onSessionChanged = onSessionChanged,
     )
 
     private fun executeSubagent(

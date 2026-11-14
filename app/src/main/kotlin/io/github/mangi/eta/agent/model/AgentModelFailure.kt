@@ -13,6 +13,11 @@ internal class AgentModelFailure(
     message: String,
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause) {
+    /** Context repair has its own bounded budget; it is not an ordinary network retry. */
+    fun canRecoverContext(contextTokens: Int, contextWindow: Int?): Boolean =
+        code == "CONTEXT_OVERFLOW" || code == "MODEL_EMPTY_RESPONSE" &&
+            (contextTokens >= 120_000 || contextWindow != null && contextTokens >= contextWindow * 0.65)
+
     companion object {
         private val transientStatus = setOf(408, 429, 500, 502, 503, 504, 524, 529)
         private val permanentCodes = setOf(

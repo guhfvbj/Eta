@@ -128,6 +128,7 @@ internal object AgentModelClient {
         mcpSearchEnabled: Boolean = true,
         openedMcpGroupsProvider: () -> Set<String> = { emptySet() },
         maxToolRounds: Int? = null,
+        initialTokenBaseline: AgentContextTokenBaseline? = null,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
         onEvent: (AgentEvent) -> Unit = {},
@@ -312,10 +313,12 @@ internal object AgentModelClient {
             initialSupplementIndex = initialSupplementIndex,
             toolsForRound = ::toolsForRound,
             maxToolRounds = maxToolRounds,
+            initialTokenBaseline = initialTokenBaseline,
         )
         val result = try {
             if (compactOnly) loop.compactOnly() else loop.run()
         } catch (throwable: Throwable) {
+            if (!rewriteReply) runCatching { loop.checkpointContext() }
             throw AgentModelExecutionException(
                 cause = throwable,
                 contextSnapshot = if (rewriteReply) null else loop.contextSnapshot(),
@@ -436,9 +439,16 @@ internal object AgentModelClient {
         val effectiveReasoningEffort: ReasoningEffort
             get() = reasoningEffort ?: ReasoningEffort.fromLegacy(thinkingEnabled)
 
-        /** 未知窗口不阻断对话：只关闭依赖窗口的自动压缩，手动压缩与服务商溢出错误照常可用。 */
+        /** Explicit windows win. Infer only clearly bounded families for older/custom presets. */
         val knownContextWindow: Int?
-            get() = contextWindow?.takeIf { it > 0 }
+            get() = contextWindow?.takeIf { it > 0 } ?: if (contextWindow == null) {
+                val family = model.substringAfterLast('/').lowercase()
+                when {
+                    family.startsWith("deepseek-") -> 131_072
+                    family.startsWith("gemini-4-") -> 256_000
+                    else -> null
+                }
+            } else null
     }
 
     @Serializable

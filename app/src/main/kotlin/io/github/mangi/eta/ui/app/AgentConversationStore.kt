@@ -307,8 +307,19 @@ internal object AgentConversationStore {
     private suspend fun loadMessagePage(dao: ConversationDao, conversationId: String, before: Int): MessagePage {
         val rows = dao.messagesBefore(conversationId, before, MESSAGE_LOAD_PAGE_SIZE)
         val startIndex = rows.firstOrNull()?.sortIndex ?: 0
-        return MessagePage(rows.mapNotNull { it.toMessageOrNull() }, startIndex, dao.hasMessagesBefore(conversationId, startIndex))
+        return MessagePage(convergeStoredMessages(dao, rows), startIndex, dao.hasMessagesBefore(conversationId, startIndex))
     }
+
+    private suspend fun convergeStoredMessages(dao: ConversationDao, rows: List<ConversationMessageEntity>): List<AgentChatMessageUi> =
+        rows.mapNotNull { row ->
+            row.toMessageOrNull()?.also { message ->
+                if (message is ToolActivityMessageUi && (row.toolStatus != message.status.name ||
+                    row.content != message.command.orEmpty() || row.resultSummary != message.resultSummary)) {
+                    dao.insertMessages(listOf(row.copy(content = message.command.orEmpty(),
+                        toolStatus = message.status.name, resultSummary = message.resultSummary)))
+                }
+            }
+        }
 
     suspend fun loadAllMessages(context: Context, conversationId: String): List<AgentChatMessageUi> =
         withContext(Dispatchers.IO) {
@@ -319,7 +330,7 @@ internal object AgentConversationStore {
                     var offset = 0
                     while (true) {
                         val page = dao.messagesPage(conversationId, MESSAGE_LOAD_PAGE_SIZE, offset)
-                        page.mapNotNullTo(this) { it.toMessageOrNull() }
+                        addAll(convergeStoredMessages(dao, page))
                         if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
                         offset += page.size
                     }
@@ -536,7 +547,15 @@ internal object AgentConversationStore {
                 command = content.takeIf(String::isNotBlank),
                 resultSummary = resultSummary,
                 imageCount = imageCount,
-            )
+            ).let { tool ->
+                if (toolStatus == ToolActivityStatusUi.Running.name ||
+                    toolStatus == ToolActivityStatusUi.Unknown.name && tool.toolName == "subagent") {
+                    tool.terminated("工具执行已中断，未取得完整结果；请先核实执行状态。", cancelled = true)
+                } else if (tool.status == ToolActivityStatusUi.Failed && tool.toolName == "subagent") {
+                    tool.terminated(tool.resultSummary?.takeIf(String::isNotBlank) ?: "Subagent 执行失败，未取得完整结果。",
+                        cancelled = false)
+                } else tool
+            }
 
             TYPE_TOOL_SUMMARY -> ToolSummaryMessageUi(
                 id = id,
@@ -549,7 +568,7 @@ internal object AgentConversationStore {
     private fun String.toToolStatus(): ToolActivityStatusUi =
         runCatching { ToolActivityStatusUi.valueOf(this) }.getOrNull()
             ?.let { status ->
-                if (status == ToolActivityStatusUi.Running) ToolActivityStatusUi.Unknown else status
+                if (status == ToolActivityStatusUi.Running) ToolActivityStatusUi.Failed else status
             }
             ?: ToolActivityStatusUi.Unknown
 
