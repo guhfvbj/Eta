@@ -11,6 +11,7 @@ internal object AgentTerminalToolCatalog {
             AgentToolSchema.function(
                 name = "terminal",
                 description = "执行 Shell 命令，直接提供 command 即可。默认环境、身份和工作目录见本次运行上下文。" +
+                    "开发命令（python3/git/node/rg 等）请显式传 environment=linux；Android 的 BusyBox ash 不提供完整开发工具。exit=127 时查看 environment_hint，已有 session_id 不会因 environment 参数切换环境。" +
                     "需要保留 cd、环境变量等 Shell 状态时，先 action=open，再通过 session_id 执行命令，最后 action=close。" +
                     "单次命令结束后进程会回收，勿用 & 挂后台；耗时或后台命令使用 terminal_job，跨运行的后台服务使用 terminal_daemon。" +
                     "已知文件的读写、编辑和搜索优先使用对应文件工具。",
@@ -69,7 +70,7 @@ internal object AgentTerminalToolCatalog {
 
     private fun commandProperties(): JSONObject = executionProperties()
         .put("command", text("要执行的命令，使用实际环境支持的 Shell 语法。"))
-        .put("timeout_ms", integer("命令超时毫秒，默认 30000，最多 180000。超时会终止命令；会话命令超时也会关闭会话。"))
+        .put("timeout_ms", integer("命令超时毫秒，默认 30000，最多 180000。安装、构建或长脚本请用 terminal_job，或显式提高此上限。超时会终止进程树；会话命令超时也会关闭会话。检查 timed_out/code；exit 143 可能是 SIGTERM，单凭退出码不代表工具超时。"))
         .put("merge_stderr", bool("是否把 stderr 合并到 stdout，默认 false。"))
 
     private fun parameters(properties: JSONObject, vararg required: String): JSONObject = JSONObject()

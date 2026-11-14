@@ -77,6 +77,52 @@ class FileToolSearchTest {
         assertEquals(listOf(1L, 2L, 3L), lines)
     }
 
+    @Test fun explicitFileSearchKeepsCaseLineNumbersAndPagination() {
+        val file = temporary.newFile(".one.txt").apply { writeText("中 Hit\nmiss\nhit two\nhit three\n") }
+        temporary.newFile("unrelated.txt").writeText("hit must not be searched")
+        val lines = mutableListOf<Int>()
+        var cursor: String? = null
+        do {
+            val page = JSONObject(operations().grepFiles(file.name, "hit", limit = 1, cursor = cursor, caseSensitive = false))
+            assertTrue(page.toString(), page.getBoolean("ok"))
+            val matches = page.getJSONArray("matches")
+            for (i in 0 until matches.length()) {
+                val match = matches.getJSONObject(i)
+                assertEquals(file.canonicalPath, match.getString("path"))
+                assertEquals(file.name, match.getString("relative_path"))
+                lines += match.getInt("line")
+            }
+            cursor = page.optString("next_cursor").takeUnless { page.isNull("next_cursor") }
+        } while (cursor != null)
+        assertEquals(listOf(1, 3, 4), lines)
+        assertEquals(2, JSONObject(operations().grepFiles(file.name, "hit")).getInt("count"))
+        assertEquals(0, JSONObject(operations().grepFiles(file.name, "hit", glob = "*.kt")).getInt("count"))
+        assertEquals("NOT_DIRECTORY", JSONObject(operations().globFiles(file.name, "**/*")).getString("code"))
+    }
+
+    @Test fun explicitFileSearchResumesByteBudgetAndRejectsChangedFilesAndQueries() {
+        val file = temporary.newFile("large-single.txt").apply { writeText("x".repeat(300_000) + "target\n") }
+        val first = JSONObject(operations().grepFiles(file.name, "target"))
+        assertEquals("byte_limit", first.getString("stop_reason"))
+        val cursor = first.getString("next_cursor")
+        val second = JSONObject(operations().grepFiles(file.name, "target", cursor = cursor))
+        assertEquals(300_000, second.getJSONArray("matches").getJSONObject(0).getInt("match_offset_bytes"))
+        assertTrue(second.getBoolean("complete"))
+        assertEquals("INVALID_CURSOR", JSONObject(operations().grepFiles(file.name, "different", cursor = cursor)).getString("code"))
+        file.appendText("updated")
+        assertEquals("STALE_CURSOR", JSONObject(operations().grepFiles(file.name, "target", cursor = cursor)).getString("code"))
+    }
+
+    @Test fun explicitBinaryFileIsReportedAsSkippedWithoutTraversingItsParent() {
+        val file = temporary.newFile("binary.dat").apply { writeBytes(byteArrayOf(65, 0, 66)) }
+        val result = JSONObject(operations().grepFiles(file.name, "A"))
+        assertTrue(result.getBoolean("ok"))
+        assertFalse(result.getBoolean("complete"))
+        assertEquals(1, result.getInt("total_skipped"))
+        assertEquals("BINARY_FILE", result.getJSONArray("skipped").getJSONObject(0).getString("reason"))
+        assertEquals(file.name, result.getJSONArray("skipped").getJSONObject(0).getString("relative_path"))
+    }
+
     @Test fun skippedBinaryAndSymlinkAreReportedAsIncompleteCoverage() {
         temporary.newFile("binary.dat").writeBytes(byteArrayOf(1, 0, 2))
         val file = temporary.newFile("text.txt").apply { writeText("needle") }

@@ -47,7 +47,7 @@ internal object AgentBrowserToolCatalog {
                                 "selector",
                                 JSONObject()
                                     .put("type", "string")
-                                    .put("description", "click、type、get_text、find_elements 或 wait_for_selector 使用的 CSS selector。")
+                                    .put("description", "click、type、get_text、find_elements 或 wait_for_selector 使用的 CSS selector。click/type 会先滚动目标并等待布局，仍被遮挡时请检查 screenshot/find_elements。")
                             )
                             .put(
                                 "text",
@@ -108,7 +108,7 @@ internal object AgentBrowserToolCatalog {
                                 "timeout_ms",
                                 JSONObject()
                                     .put("type", "integer")
-                                    .put("description", "navigate 或 wait_for_selector 的超时毫秒数。")
+                                    .put("description", "navigate 加载超时默认 45000，最多 120000；click/type/go_back/go_forward/reload 的后续加载默认 25000，最多 60000；wait_for_selector 默认 5000，最多 30000。动作后的加载超时不代表点击或提交未执行，重试前先检查页面。")
                             )
                     )
                     .put("required", JSONArray().put("action"))

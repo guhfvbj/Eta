@@ -195,6 +195,23 @@ internal object BrowserDomScripts {
             if (!target) throw new Error('TARGET_NOT_FOUND');
             return target;
           }
+          function interactionPoint(target) {
+            if (!target.isConnected || !visible(target)) throw new Error('TARGET_NOT_VISIBLE');
+            if (!enabled(target)) throw new Error('TARGET_DISABLED');
+            var rect = target.getBoundingClientRect();
+            var left = Math.max(0, rect.left), right = Math.min(window.innerWidth, rect.right);
+            var top = Math.max(0, rect.top), bottom = Math.min(window.innerHeight, rect.bottom);
+            if (right <= left || bottom <= top) throw new Error('TARGET_NOT_VISIBLE');
+            // Try exposed points as a sticky header may cover only part of a large target.
+            var points = [[0.5,0.5],[0.25,0.25],[0.75,0.75],[0.25,0.75],[0.75,0.25]];
+            for (var i = 0; i < points.length; i++) {
+              var x = left + (right - left) * points[i][0];
+              var y = top + (bottom - top) * points[i][1];
+              var hit = document.elementFromPoint(x, y);
+              if (hit && (hit === target || target.contains(hit))) return { x: x, y: y };
+            }
+            throw new Error('TARGET_OCCLUDED');
+          }
           function markdownEscape(value) {
             return boundedString(value, 4000).replace(/([\\`*_[\]<>])/g, '\\${'$'}1');
           }
@@ -453,12 +470,9 @@ internal object BrowserDomScripts {
     fun click(selector: String?, x: Int?, y: Int?): String =
         targeted(selector, x, y) +
             """
-            target.scrollIntoView({ block: 'center', inline: 'center' });
-            var rect = target.getBoundingClientRect();
-            var cx = rect.left + rect.width / 2;
-            var cy = rect.top + rect.height / 2;
+            var point = interactionPoint(target);
             ['mousemove','mouseover','mousedown','mouseup'].forEach(function(kind) {
-              target.dispatchEvent(new MouseEvent(kind, { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+              target.dispatchEvent(new MouseEvent(kind, { bubbles: true, cancelable: true, clientX: point.x, clientY: point.y }));
             });
             target.click();
             return { matched_element: describe(target) };
@@ -468,8 +482,8 @@ internal object BrowserDomScripts {
         targeted(selector, x, y) +
             """
             if (!editable(target)) throw new Error('TARGET_NOT_EDITABLE');
-            target.scrollIntoView({ block: 'center', inline: 'center' });
-            target.focus();
+            interactionPoint(target);
+            target.focus({ preventScroll: true });
             var value = ${JSONObject.quote(text)};
             if (target.isContentEditable) {
               target.textContent = value;
@@ -487,6 +501,19 @@ internal object BrowserDomScripts {
               else target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
             }
             return { matched_element: describe(target), typed_chars: value.length, submitted: $submit };
+            """.trimIndent()
+
+    /** Separate evaluation lets WebView apply scrolling/layout before the side effect. */
+    fun prepareInteraction(selector: String?, x: Int?, y: Int?): String =
+        targeted(selector, x, y) +
+            """
+            if (${selector != null}) target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            try {
+              interactionPoint(target);
+              return { interaction_ready: true };
+            } catch (error) {
+              return { interaction_ready: false, reason: String(error.message || 'TARGET_NOT_VISIBLE') };
+            }
             """.trimIndent()
 
     fun scroll(selector: String?, direction: String, amount: Int): String {

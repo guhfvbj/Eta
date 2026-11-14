@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.subagent
 
 import io.github.mangi.eta.agent.model.AgentToolSchema
+import io.github.mangi.eta.data.model.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -64,7 +65,7 @@ internal object AgentSubagentToolCatalog {
                     .put("maxLength", 48)
                     .put(
                         "description",
-                        "Preset type (\"explore\", \"coder\", \"plan\", or a saved custom profile) OR any ad-hoc kebab-case role name (e.g. \"bill-analyzer\", \"apk-inspector\") to spawn an ephemeral specialized subagent on the fly. Defaults to \"explore\" when omitted. Do not set when `resume` is provided.",
+                        "Preset type (\"explore\", \"coder\", \"plan\", or a saved custom profile) OR any ad-hoc kebab-case role name (e.g. \"bill-analyzer\", \"apk-inspector\") to spawn an ephemeral specialized subagent on the fly. Defaults to \"explore\" when omitted. Ignored when non-blank `resume` is provided; the existing profile and tools are retained.",
                     ),
             )
             .put(
@@ -95,8 +96,14 @@ internal object AgentSubagentToolCatalog {
                     .put("maxLength", 64)
                     .put(
                         "description",
-                        "Optional subagent_id from a previous `subagent` result in this conversation to continue its existing context.",
+                        "Optional subagent_id from a previous `subagent` result in this conversation to continue its existing context. A non-blank resume takes precedence over subagent_type, role, and tools.",
                     ),
+            )
+            .put(
+                "reasoning_effort",
+                JSONObject().put("type", "string")
+                    .put("enum", JSONArray(ReasoningEffort.entries.map { it.wireValue }))
+                    .put("description", "Optional reasoning level for this call. Unsupported levels are downgraded to a supported level or provider default; models without reasoning capabilities use provider default. Omit to use the configured subagent effort."),
             )
         val parameters = JSONObject()
             .put("type", "object")

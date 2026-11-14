@@ -33,6 +33,8 @@ import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.McpServerSetting
 import io.github.mangi.eta.data.model.McpToolDefinition
+import io.github.mangi.eta.data.model.ModelReasoningCapabilities
+import io.github.mangi.eta.data.model.ReasoningEffort
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -109,6 +111,73 @@ class SubagentTest {
     @After
     fun tearDown() {
         Prefs.localAgentPreferences()!!.edit().clear().commit()
+    }
+
+    @Test
+    fun unsupportedEffortIsNormalizedBeforeCallingTheProvider() {
+        val ranked = ModelReasoningCapabilities(supportedEfforts = listOf(ReasoningEffort.LOW, ReasoningEffort.HIGH), canDisable = true)
+        val cases = listOf(
+            Triple(null, ReasoningEffort.HIGH, ReasoningEffort.DEFAULT),
+            Triple(ModelReasoningCapabilities(), ReasoningEffort.MAX, ReasoningEffort.DEFAULT),
+            Triple(ranked, ReasoningEffort.MAX, ReasoningEffort.HIGH),
+            Triple(ranked, ReasoningEffort.MEDIUM, ReasoningEffort.LOW),
+            Triple(ranked, ReasoningEffort.LOW, ReasoningEffort.LOW),
+            Triple(ranked, ReasoningEffort.OFF, ReasoningEffort.OFF),
+            Triple(ranked.copy(mandatory = true), ReasoningEffort.OFF, ReasoningEffort.DEFAULT),
+            Triple(ModelReasoningCapabilities(canDisable = true), ReasoningEffort.HIGH, ReasoningEffort.DEFAULT),
+        )
+        for ((capabilities, requested, expected) in cases) {
+            for (explicit in listOf(false, true)) {
+                var calls = 0
+                val executor = subagentExecutor(UUID.randomUUID().toString(), Prefs.Keys.MCP_LOADING_MODE_OFF,
+                    provider { request ->
+                        calls++
+                        assertEquals(expected, request.config.reasoningEffort)
+                        assertEquals(expected.enablesReasoning, request.config.thinkingEnabled)
+                        response()
+                    }, configTransform = { it.copy(reasoningCapabilities = capabilities,
+                        reasoningEffort = if (explicit) ReasoningEffort.DEFAULT else requested) })
+                executeSubagent(executor, effort = if (explicit) requested.wireValue else null)
+                assertEquals(1, calls)
+            }
+        }
+    }
+
+    @Test
+    fun unknownEffortFailsBeforeCreatingASessionOrLoadingConfig() {
+        val key = UUID.randomUUID().toString()
+        val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { error("must not launch") },
+            configTransform = { error("must not load config") })
+        for (effort in listOf("turbo", "", JSONObject.NULL, 3)) {
+            val args = JSONObject().put("prompt", "task").put("description", "invalid effort").put("reasoning_effort", effort)
+            val result = JSONObject(executor.execute(1, toolCall("subagent", args.toString())).content)
+            assertEquals("INVALID_ARGUMENTS", result.getString("code"))
+        }
+        assertTrue(SubagentSessionStore.export(key).isEmpty())
+    }
+
+    @Test
+    fun nonBlankResumeIgnoresTheTypeAndRetainsTheOriginalToolPermissions() {
+        val key = UUID.randomUUID().toString()
+        val original = executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { response() }),
+            type = SubagentProfile.TYPE_EXPLORE).getString("subagent_id")
+        val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+            assertFalse("terminal" in request.tools.toolNames())
+            response()
+        }, terminalTools = true)
+        val resumed = executeSubagent(executor, type = SubagentProfile.TYPE_CODER, tools = listOf("*"), resume = " $original ")
+        assertEquals(original, resumed.getString("subagent_id"))
+        assertEquals(SubagentProfile.TYPE_EXPLORE, resumed.getString("subagent_type"))
+        assertFalse(session(key, original).profile.isToolAllowed("terminal"))
+        assertEquals(1, SubagentSessionStore.export(key).size)
+        val missing = JSONObject(executor.execute(1, toolCall("subagent", JSONObject().put("prompt", "task")
+            .put("description", "missing").put("resume", "missing").put("subagent_type", "coder").toString())).content)
+        assertEquals("SUBAGENT_NOT_FOUND", missing.getString("code"))
+        assertEquals(1, SubagentSessionStore.export(key).size)
+        val fresh = executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { response() }),
+            type = "coder", resume = "  ")
+        assertFalse(original == fresh.getString("subagent_id"))
+        assertEquals("coder", fresh.getString("subagent_type"))
     }
 
     @Test
@@ -749,6 +818,7 @@ class SubagentTest {
         parentController: AgentRunController = AgentRunController(),
         onProgress: (AgentEvent.SubagentProgress) -> Unit = {},
         onSessionChanged: () -> Unit = {},
+        configTransform: (AgentModelClient.ModelConfig) -> AgentModelClient.ModelConfig = { it },
     ) = SubagentExecutor(
         conversationKey = conversationKey,
         parentController = parentController,
@@ -761,7 +831,7 @@ class SubagentTest {
                 contextWindow = 128_000,
                 terminalTools = terminalTools,
                 browserTools = false,
-            )
+            ).let(configTransform)
         },
         capabilitiesProvider = { AgentToolCapabilities(rootAvailable = false) },
         baseToolExecutor = baseToolExecutor,
@@ -781,11 +851,13 @@ class SubagentTest {
         type: String? = "custom-worker",
         tools: List<String>? = null,
         resume: String? = null,
+        effort: String? = null,
     ): JSONObject {
         val args = JSONObject().put("prompt", "use MCP").put("description", "MCP regression")
         if (type != null) args.put("subagent_type", type)
         if (tools != null) args.put("tools", JSONArray(tools))
         if (resume != null) args.put("resume", resume)
+        if (effort != null) args.put("reasoning_effort", effort)
         val result = JSONObject(executor.execute(1, toolCall("subagent", args.toString())).content)
         assertTrue(result.toString(), result.optBoolean("ok"))
         return result

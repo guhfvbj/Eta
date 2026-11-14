@@ -418,6 +418,7 @@ internal class RootShellTerminalController(
             .put("stderr_truncated", !mergeStderr && result.stderr.length > MAX_OUTPUT_CHARS)
             .put("output_truncated", rawStdout.length > MAX_OUTPUT_CHARS || (!mergeStderr && result.stderr.length > MAX_OUTPUT_CHARS))
             .put("session_closed", result.timedOut || session.closed)
+            .let { TerminalCommandDiagnostics.apply(it, executionContext.linuxReady, timeout) }
             .toString()
     }
 
@@ -459,8 +460,8 @@ internal class RootShellTerminalController(
                 )
             }
 
-            val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(1_000, MAX_TIMEOUT_SECONDS * 1000)
-            while (System.currentTimeMillis() < deadline) {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(1_000, MAX_TIMEOUT_SECONDS * 1000).toLong())
+            while (System.nanoTime() < deadline) {
                 val stdoutDelta = session.stdout.text().drop(stdoutStart)
                 if (session.closed || !session.process.isAlive) {
                     return SessionCommandResult(
@@ -569,6 +570,7 @@ internal class RootShellTerminalController(
             .put("stdout_truncated", result.outputTruncated || rawStdout.length > MAX_OUTPUT_CHARS || (mergeStderr && result.stderrTruncated))
             .put("stderr_truncated", !mergeStderr && (result.stderrTruncated || result.stderr.length > MAX_OUTPUT_CHARS))
             .put("output_truncated", result.outputTruncated || result.stderrTruncated || rawStdout.length > MAX_OUTPUT_CHARS || result.stderr.length > MAX_OUTPUT_CHARS)
+            .let { TerminalCommandDiagnostics.apply(it, executionContext.linuxReady, timeout * 1000) }
             .toString()
     }
 
@@ -579,7 +581,12 @@ internal class RootShellTerminalController(
             val identity = args.optString("identity").ifBlank {
                 defaultIdentity(environment)
             }.let(::normalizeIdentity)
-            environmentPreflight(identity, environment, rootfsPath)?.let { return it }
+            environmentPreflight(identity, environment, rootfsPath)?.let { error ->
+                val json = JSONObject(error)
+                FileToolDispatcher.pathEnvironmentHint(args.optString("path").ifEmpty { args.optString("cwd") },
+                    if (environment.isLinux) "linux" else "android")?.let { json.put("environment_hint", it) }
+                return json.toString()
+            }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
             fun checkActive() {
                 if (processSupervisor.isClosing) throw FileToolException("CANCELLED", "文件操作已取消")

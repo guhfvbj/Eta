@@ -2,6 +2,8 @@ package io.github.mangi.eta.agent.terminal
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class OneShotShellTest {
@@ -42,6 +44,17 @@ class OneShotShellTest {
         val result = execute("sleep 30", ByteArray(512 * 1024), timeoutSeconds = 1)
 
         assertEquals(-2, result.exitCode)
+    }
+
+    @Test
+    fun timeoutPreservesStderrCollectedBeforeTermination() {
+        // This regression needs a real POSIX shell; Windows JVMs still compile it.
+        assumeTrue(java.io.File("/bin/sh").canExecute())
+        val result = execute("printf 'before timeout' >&2; sleep 30", null, timeoutSeconds = 1)
+
+        assertEquals(-2, result.exitCode)
+        assertTrue(result.stderr.decodeToString().contains("before timeout"))
+        assertTrue(result.stderr.decodeToString().contains("命令执行超时"))
     }
 
     private fun execute(command: String, input: ByteArray?, timeoutSeconds: Long = 5): OneShotShellResult =

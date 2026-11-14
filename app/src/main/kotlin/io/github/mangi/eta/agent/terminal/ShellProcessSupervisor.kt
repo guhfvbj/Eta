@@ -582,7 +582,8 @@ internal fun runOneShotShell(
             stderrThread.join(500)
             stdinThread.join(500)
             processSupervisor.reapProcess(process)
-            return OneShotShellResult(-2, output.bytes(), "命令执行超时".toByteArray(), output.isTruncated(), stderr.isTruncated())
+            val diagnostic = stderr.bytes() + "\n命令执行超时".toByteArray()
+            return OneShotShellResult(-2, output.bytes(), diagnostic, output.isTruncated(), stderr.isTruncated())
         }
 
         outputThread.join(500)

@@ -25,10 +25,15 @@ internal class AgentWebTools(
         val decodingLossy: Boolean,
         val provider: String = "builtin_local",
         val fallbackFrom: String? = null,
-    )
+    ) {
+        fun retainedChars(): Int = document.content.length + document.title.orEmpty().length +
+            document.links.sumOf { it.text.length + it.url.length } + requestedUrl.length + document.url.length
+    }
+
+    private data class CachedSnapshot(val snapshot: Snapshot, var lastAccess: Instant)
 
     private val closed = AtomicBoolean(false)
-    private val documents = LinkedHashMap<String, Snapshot>(8, 0.75f, true)
+    private val documents = LinkedHashMap<String, CachedSnapshot>(MAX_DOCUMENTS, 0.75f, true)
 
     fun execute(name: String, args: JSONObject): String = try {
         ensureActive()
@@ -111,7 +116,7 @@ internal class AgentWebTools(
         if (args.has("url") == args.has("document_id")) throw WebRequestException("INVALID_ARGUMENT", "url 与 document_id 必须且只能提供一个")
         val offset = args.optInt("offset_chars", 0)
         val maxChars = args.optInt("max_chars", 12_000)
-        if (offset < 0 || maxChars !in 1_000..16_000) throw WebRequestException("INVALID_ARGUMENT", "网页分页范围无效")
+        if (offset < 0 || maxChars !in 1_000..16_000) throw WebRequestException("INVALID_ARGUMENT", "offset_chars 必须 >= 0；max_chars 必须在 1000..16000，续页使用 next_offset_chars")
         val id: String
         val snapshot: Snapshot
         if (args.has("url")) {
@@ -163,17 +168,22 @@ internal class AgentWebTools(
             }
             id = "web_" + UUID.randomUUID().toString()
         } else {
-            id = args.getString("document_id")
-            if (id.isEmpty() || id.length > 128) throw WebRequestException("INVALID_ARGUMENT", "文档 ID 无效")
-            snapshot = synchronized(documents) { documents[id] }
-                ?: throw WebRequestException("WEB_DOCUMENT_EXPIRED", "网页快照已失效或不属于本次运行，请重新提供 URL")
+            id = args.getString("document_id").trim()
+            if (id.isEmpty() || id.length > 128) throw WebRequestException("INVALID_ARGUMENT", "document_id 必须是本次运行返回的非空文档 ID（最多 128 字符）")
+            snapshot = synchronized(documents) {
+                val accessTime = now()
+                removeExpiredDocuments(accessTime)
+                documents[id]?.also { it.lastAccess = accessTime }?.snapshot
+            } ?: throw WebRequestException("WEB_DOCUMENT_EXPIRED", "快照不属于本次运行、闲置超过 60 分钟，或已被有界缓存淘汰；请重新提供原 url 获取新 document_id，并从 offset_chars=0 读取")
         }
         val document = snapshot.document
         val page = WebPageContent.page(document, offset, maxChars)
         if (args.has("url")) synchronized(documents) {
             ensureActive()
-            documents[id] = snapshot
-            while (documents.size > MAX_DOCUMENTS || documents.values.sumOf { it.document.content.length } > MAX_RETAINED_CHARS) {
+            val accessTime = now()
+            removeExpiredDocuments(accessTime)
+            documents[id] = CachedSnapshot(snapshot, accessTime)
+            while (documents.size > MAX_DOCUMENTS || documents.values.sumOf { it.snapshot.retainedChars() } > MAX_RETAINED_CHARS) {
                 documents.remove(documents.keys.first())
             }
         }
@@ -253,6 +263,12 @@ internal class AgentWebTools(
         transport.ensureActive()
     }
 
+    /** Called only while holding documents' lock; active pagination renews the idle window. */
+    private fun removeExpiredDocuments(accessTime: Instant) {
+        val cutoff = accessTime.minusSeconds(DOCUMENT_IDLE_TTL_SECONDS)
+        documents.entries.removeAll { !it.value.lastAccess.isAfter(cutoff) }
+    }
+
     private fun base(tool: String) = JSONObject().put("ok", true).put("tool", tool)
 
     private fun failure(tool: String, code: String, message: String, status: Int? = null): JSONObject =
@@ -269,8 +285,9 @@ internal class AgentWebTools(
     }
 
     private companion object {
-        const val MAX_DOCUMENTS = 4
-        const val MAX_RETAINED_CHARS = 600_000
+        const val MAX_DOCUMENTS = 32
+        const val MAX_RETAINED_CHARS = 4_000_000
+        const val DOCUMENT_IDLE_TTL_SECONDS = 60 * 60L
         val LINK_ID = Regex("\\[(\\d{1,3})]")
     }
 }

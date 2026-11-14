@@ -41,12 +41,16 @@ class AgentWebToolsTest {
         }
     }
 
-    @Test fun snapshotIdsExpireAcrossRunsAndAfterEviction() {
+    @Test fun snapshotsSurviveMultiStepExplorationAndEvictTheLeastRecentlyUsedEntry() {
         WebFixtureServer { WebFixtureResponse(body = "text".toByteArray()) }.use { server ->
             tools().use { tools ->
                 val first = call(tools, "fetch_url", JSONObject().put("url", server.url("/0"))).getString("document_id")
-                repeat(4) { call(tools, "fetch_url", JSONObject().put("url", server.url("/${it + 1}"))) }
-                assertEquals("WEB_DOCUMENT_EXPIRED", call(tools, "fetch_url", JSONObject().put("document_id", first)).getString("code"))
+                val second = call(tools, "fetch_url", JSONObject().put("url", server.url("/1"))).getString("document_id")
+                repeat(30) { call(tools, "fetch_url", JSONObject().put("url", server.url("/${it + 2}"))) }
+                assertTrue(call(tools, "fetch_url", JSONObject().put("document_id", first)).getBoolean("ok"))
+                call(tools, "fetch_url", JSONObject().put("url", server.url("/32")))
+                assertTrue(call(tools, "fetch_url", JSONObject().put("document_id", first)).getBoolean("ok"))
+                assertEquals("WEB_DOCUMENT_EXPIRED", call(tools, "fetch_url", JSONObject().put("document_id", second)).getString("code"))
                 tools().use { other -> assertEquals("WEB_DOCUMENT_EXPIRED", call(other, "fetch_url", JSONObject().put("document_id", first)).getString("code")) }
             }
         }
@@ -56,10 +60,40 @@ class AgentWebToolsTest {
         WebFixtureServer { WebFixtureResponse(body = "text".toByteArray()) }.use { server ->
             tools().use { tools ->
                 val first = call(tools, "fetch_url", JSONObject().put("url", server.url("/0"))).getString("document_id")
-                repeat(3) { call(tools, "fetch_url", JSONObject().put("url", server.url("/${it + 1}"))) }
+                repeat(31) { call(tools, "fetch_url", JSONObject().put("url", server.url("/${it + 1}"))) }
                 val invalid = call(tools, "fetch_url", JSONObject().put("url", server.url("/invalid")).put("offset_chars", 100))
                 assertEquals("INVALID_CONTENT_RANGE", invalid.getString("code"))
                 assertTrue(call(tools, "fetch_url", JSONObject().put("document_id", first)).getBoolean("ok"))
+            }
+        }
+    }
+
+    @Test fun snapshotIdleExpiryIsRenewedByPaginationAndNeverRefetchesSilently() {
+        var now = Instant.parse("2026-11-14T08:00:00Z")
+        WebFixtureServer { WebFixtureResponse(body = "text".toByteArray()) }.use { server ->
+            tools(now = { now }).use { tools ->
+                val id = call(tools, "fetch_url", JSONObject().put("url", server.url())).getString("document_id")
+                repeat(2) {
+                    now = now.plusSeconds(59 * 60)
+                    assertTrue(call(tools, "fetch_url", JSONObject().put("document_id", id)).getBoolean("ok"))
+                }
+                now = now.plusSeconds(60 * 60)
+                val expired = call(tools, "fetch_url", JSONObject().put("document_id", id))
+                assertEquals("WEB_DOCUMENT_EXPIRED", expired.getString("code"))
+                assertTrue(expired.getString("message").contains("offset_chars=0"))
+                assertEquals(1, server.requests.size)
+            }
+        }
+    }
+
+    @Test fun retainedCharacterBudgetEvictsLargeSnapshotsBeforeTheEntryLimit() {
+        WebFixtureServer { WebFixtureResponse(body = "x".repeat(200_000).toByteArray()) }.use { server ->
+            tools().use { tools ->
+                val first = call(tools, "fetch_url", JSONObject().put("url", server.url("/0"))).getString("document_id")
+                var last = first
+                repeat(20) { last = call(tools, "fetch_url", JSONObject().put("url", server.url("/${it + 1}"))).getString("document_id") }
+                assertEquals("WEB_DOCUMENT_EXPIRED", call(tools, "fetch_url", JSONObject().put("document_id", first)).getString("code"))
+                assertTrue(call(tools, "fetch_url", JSONObject().put("document_id", last)).getBoolean("ok"))
             }
         }
     }
@@ -135,6 +169,10 @@ class AgentWebToolsTest {
     @Test fun invalidParametersAndClosedToolsHaveStableErrors() {
         val tools = tools()
         assertEquals("INVALID_ARGUMENT", call(tools, "fetch_url", JSONObject().put("url", "https://example.test").put("document_id", "id")).getString("code"))
+        assertEquals("INVALID_ARGUMENT", call(tools, "fetch_url", JSONObject()).getString("code"))
+        assertEquals("INVALID_ARGUMENT", call(tools, "fetch_url", JSONObject().put("document_id", "   ")).getString("code"))
+        assertEquals("INVALID_ARGUMENT", call(tools, "fetch_url", JSONObject().put("document_id", "id").put("max_chars", 999)).getString("code"))
+        assertEquals("INVALID_ARGUMENT", call(tools, "fetch_url", JSONObject().put("document_id", "id").put("offset_chars", -1)).getString("code"))
         tools.close()
         assertEquals("WEB_CANCELLED", call(tools, "fetch_url", JSONObject().put("url", "https://example.test")).getString("code"))
     }
@@ -313,6 +351,6 @@ class AgentWebToolsTest {
         }
     }
 
-    private fun tools() = AgentWebTools(WebHttpTransport(OkHttpClient()), now = { Instant.parse("2026-10-05T08:00:00Z") })
+    private fun tools(now: () -> Instant = { Instant.parse("2026-10-05T08:00:00Z") }) = AgentWebTools(WebHttpTransport(OkHttpClient()), now = now)
     private fun call(tools: AgentWebTools, name: String, args: JSONObject): JSONObject = JSONObject(tools.execute(name, args))
 }

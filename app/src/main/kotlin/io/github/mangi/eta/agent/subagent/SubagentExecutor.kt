@@ -20,6 +20,7 @@ import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.data.model.ReasoningEffort
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,17 +69,15 @@ internal class SubagentExecutor(
         if (description.isEmpty()) {
             return errorResult("INVALID_ARGUMENTS", "description 不能为空")
         }
+        val requestedEffort = if (args.has("reasoning_effort")) {
+            val value = args.opt("reasoning_effort") as? String
+            ReasoningEffort.fromWireValue(value)
+                ?: return errorResult("INVALID_ARGUMENTS", "reasoning_effort 必须是 off/default/minimal/low/medium/high/xhigh/max")
+        } else null
 
         val resumeId = args.optString("resume").trim()
         val requestedType = args.optString("subagent_type").trim().lowercase()
         val isResume = resumeId.isNotEmpty()
-
-        if (isResume && requestedType.isNotEmpty()) {
-            return errorResult(
-                "RESUME_WITH_TYPE_UNAVAILABLE",
-                "resume 续接已有 Subagent 时不得同时指定 subagent_type；请仅传递 resume 与 prompt。",
-            )
-        }
 
         val entry: SubagentSessionStore.Entry
         val priorHistory: List<AgentModelClient.ConversationMessage>
@@ -174,10 +173,18 @@ internal class SubagentExecutor(
             }
         }
 
+        // Capabilities are authoritative; never send an inherited level to a model
+        // that cannot accept it. DEFAULT leaves unsupported/unknown reasoning to
+        // the provider, including mandatory and toggle-only reasoning models.
+        val effort = resolvedConfig.reasoningCapabilities
+            ?.normalize(requestedEffort ?: resolvedConfig.effectiveReasoningEffort)
+            ?: ReasoningEffort.DEFAULT
         val subagentConfig = resolvedConfig.copy(
             systemPrompt = profile.buildSystemPrompt(),
             subagentTools = false,
             supportsSearchSuggestions = false,
+            reasoningEffort = effort,
+            thinkingEnabled = effort.enablesReasoning,
         )
 
         val initialHistory = priorHistory + AgentModelClient.buildUserHistoryMessage(prompt, emptyList())

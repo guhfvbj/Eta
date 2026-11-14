@@ -6,6 +6,7 @@ import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -140,6 +141,76 @@ class AgentFileOperationsTest {
             throw AssertionError("digest mismatch accepted")
         } catch (error: FileToolException) { assertEquals("FILE_CHANGED", error.code) }
         assertEquals("different", file.readText())
+    }
+
+    @Test fun editsPreserveMalformedBytesAndUtf8AcrossReadBoundaries() {
+        val prefix = "a".repeat(15_999).toByteArray() + byteArrayOf(0xc3.toByte(), 0x28) + "\r\n中文😀\n".toByteArray()
+        val suffix = "\r\n".toByteArray() + byteArrayOf(0xff.toByte()) + "z".repeat(100).toByteArray()
+        val file = temporary.newFile("mixed.txt").apply { writeBytes(prefix + "target".toByteArray() + suffix) }
+        val local = LocalFileToolBackend(temporary.root)
+        val original = file.readBytes()
+        var digestChecked = false
+        val backend = object : FileToolBackend by local {
+            override fun write(path: String, bytes: ByteArray, append: Boolean, expectedRevision: String?, expectedSha256: String?): FileToolWriteResult {
+                val hash = java.security.MessageDigest.getInstance("SHA-256").digest(original)
+                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                assertEquals(hash, expectedSha256)
+                digestChecked = true
+                return local.write(path, bytes, append, expectedRevision, expectedSha256)
+            }
+        }
+        val result = JSONObject(AgentFileOperations(backend).editFile(file.name, "target", "替换😀"))
+        assertTrue(result.toString(), result.getBoolean("ok"))
+        assertTrue(digestChecked)
+        assertArrayEquals(prefix + "替换😀".toByteArray() + suffix, file.readBytes())
+    }
+
+    @Test fun replacementCharactersNeverMatchMalformedBytesAndFailuresLeaveBytesUntouched() {
+        val original = "text ".repeat(30).toByteArray() + byteArrayOf(0xff.toByte()) + "\nreal �\n".toByteArray()
+        val file = temporary.newFile("replacement.txt").apply { writeBytes(original) }
+        assertEquals("MATCH_NOT_FOUND", JSONObject(operations().editFile(file.name, "�\nreal", "bad")).getString("code"))
+        assertEquals("AMBIGUOUS_MATCH", JSONObject(operations().editFile(file.name, "text", "bad")).getString("code"))
+        assertArrayEquals(original, file.readBytes())
+        val result = JSONObject(operations().editFile(file.name, "�", "valid"))
+        assertEquals(1, result.getInt("replacements"))
+        assertArrayEquals("text ".repeat(30).toByteArray() + byteArrayOf(0xff.toByte()) + "\nreal valid\n".toByteArray(), file.readBytes())
+    }
+
+    @Test fun binaryAndMostlyInvalidFilesAreNeverEdited() {
+        val cases = listOf("target\u0000text".toByteArray(), "target".toByteArray() + ByteArray(100) { 1 },
+            "target".toByteArray() + ByteArray(100) { 0xff.toByte() })
+        val file = temporary.newFile("binary.dat")
+        cases.forEach { bytes ->
+            file.writeBytes(bytes)
+            assertEquals("BINARY_FILE", JSONObject(operations().editFile(file.name, "target", "changed")).getString("code"))
+            assertArrayEquals(bytes, file.readBytes())
+        }
+    }
+
+    @Test fun malformedAndControlByteToleranceStopsAboveFivePercent() {
+        val file = temporary.newFile("threshold.txt")
+        for (suspicious in listOf(0xff.toByte(), 1.toByte())) {
+            val allowed = "target".toByteArray() + "a".repeat(13).toByteArray() + suspicious
+            file.writeBytes(allowed)
+            val edited = JSONObject(operations().editFile(file.name, "target", "change"))
+            assertTrue(edited.toString(), edited.getBoolean("ok"))
+            assertArrayEquals("change".toByteArray() + allowed.copyOfRange(6, allowed.size), file.readBytes())
+            val rejected = allowed.copyOfRange(1, allowed.size)
+            file.writeBytes(rejected)
+            assertEquals("BINARY_FILE", JSONObject(operations().editFile(file.name, "arget", "change")).getString("code"))
+            assertArrayEquals(rejected, file.readBytes())
+        }
+    }
+
+    @Test fun malformedBytesArePreservedDuringReplaceAllAndOversizeOutputIsRejected() {
+        val prefix = "a".repeat(100).toByteArray() + byteArrayOf(0xff.toByte())
+        val file = temporary.newFile("all.txt").apply { writeBytes(prefix + "hit hit".toByteArray()) }
+        val result = JSONObject(operations().editFile(file.name, "hit", "中", replaceAll = true))
+        assertEquals(2, result.getInt("replacements"))
+        assertArrayEquals(prefix + "中 中".toByteArray(), file.readBytes())
+        val before = file.readBytes()
+        assertEquals("CONTENT_TOO_LARGE", JSONObject(operations().editFile(file.name, "中", "x".repeat(300_000), replaceAll = true)).getString("code"))
+        assertArrayEquals(before, file.readBytes())
     }
 
     @Test fun atomicOverwriteRetainsExistingPosixPermissions() {

@@ -130,34 +130,38 @@ internal class AgentFileOperations(private val backend: FileToolBackend) {
         expectedRevision: String? = null,
     ): String = fileToolOperation("edit_file") {
         if (oldText.isEmpty()) throw FileToolException("EMPTY_MATCH", "old_text 不能为空；创建文件请使用 write_file")
-        encodeBounded(oldText)
-        encodeBounded(newText)
+        val oldBytes = encodeBounded(oldText)
+        val newBytes = encodeBounded(newText)
         val stat = regularFile(path, expectedRevision)
-        if (stat.sizeBytes > MAX_EDIT_BYTES) throw FileToolException("FILE_TOO_LARGE", "精确编辑仅支持不超过 512 KiB 的文本文件")
-        val buffer = ByteArrayOutputStream(stat.sizeBytes.toInt())
-        var offset = 0L
-        while (offset < stat.sizeBytes) {
-            val chunk = textReader.read(stat, offset, minOf(16_000L, stat.sizeBytes - offset).toInt())
-            val bytes = chunk.text.toByteArray(Charsets.UTF_8)
-            buffer.write(bytes)
-            offset += chunk.bytesConsumed
-        }
-        val originalBytes = buffer.toByteArray()
-        val original = originalBytes.toString(Charsets.UTF_8)
-        var count = 0
+        val originalBytes = textReader.readEditableBytes(stat)
+        // Latin-1 here is a one-byte index view, not a guessed file encoding.
+        // All comparisons still use the caller's exact UTF-8 bytes.
+        val byteIndex = originalBytes.toString(Charsets.ISO_8859_1)
+        val matchBytes = oldBytes.toString(Charsets.ISO_8859_1)
+        val matches = mutableListOf<Int>()
         var position = 0
         while (true) {
             backend.checkActive()
-            val found = original.indexOf(oldText, position)
+            val found = byteIndex.indexOf(matchBytes, position)
             if (found < 0) break
-            count++
-            if (!replaceAll && count > 1) throw FileToolException("AMBIGUOUS_MATCH", "old_text 命中多处，请提供更多上下文或明确 replace_all=true")
-            position = found + oldText.length
+            matches += found
+            if (!replaceAll && matches.size > 1) throw FileToolException("AMBIGUOUS_MATCH", "old_text 命中多处，请提供更多上下文或明确 replace_all=true")
+            position = found + oldBytes.size
         }
+        val count = matches.size
         if (count == 0) throw FileToolException("MATCH_NOT_FOUND", "未找到 old_text，文件未修改；请重新读取并使用原文")
-        val estimatedChars = original.length.toLong() + count.toLong() * (newText.length - oldText.length)
-        if (estimatedChars > MAX_EDIT_BYTES) throw FileToolException("CONTENT_TOO_LARGE", "替换后的文本超过编辑大小限制")
-        val replacement = encodeBounded(original.replace(oldText, newText))
+        val replacementSize = originalBytes.size.toLong() + count.toLong() * (newBytes.size - oldBytes.size)
+        if (replacementSize > MAX_EDIT_BYTES) throw FileToolException("CONTENT_TOO_LARGE", "替换后的文本超过编辑大小限制")
+        val buffer = ByteArrayOutputStream(replacementSize.toInt())
+        position = 0
+        matches.forEach { found ->
+            backend.checkActive()
+            buffer.write(originalBytes, position, found - position)
+            buffer.write(newBytes)
+            position = found + oldBytes.size
+        }
+        buffer.write(originalBytes, position, originalBytes.size - position)
+        val replacement = buffer.toByteArray()
         verifyUnchanged(stat)
         val sha256 = MessageDigest.getInstance("SHA-256").digest(originalBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }

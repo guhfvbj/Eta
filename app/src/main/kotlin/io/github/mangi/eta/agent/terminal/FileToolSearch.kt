@@ -33,13 +33,19 @@ internal class FileToolSearch(
         }
         val root = backend.resolve(path)
         val rootStat = backend.stat(root)
-        if (rootStat.kind != FileToolKind.DIRECTORY) throw FileToolException("NOT_DIRECTORY", "搜索范围必须是目录")
+        val singleFile = query != null && rootStat.kind == FileToolKind.FILE
+        if (!singleFile && rootStat.kind != FileToolKind.DIRECTORY) throw FileToolException("NOT_DIRECTORY", "glob_files 需要目录；grep_files 可使用目录或普通文件")
         val matcher = FileToolGlob(pattern)
         val signature = digest(JSONObject().put("tool", if (query == null) "glob_files" else "grep_files")
             .put("root", root).put("pattern", pattern).put("query", query ?: JSONObject.NULL)
             .put("include_hidden", includeHidden).put("case_sensitive", caseSensitive)
             .put("environment", backend.environment).put("identity", backend.identity).toString())
-        val state = if (cursor.isNullOrBlank()) State(mutableListOf(Frame("", 0, rootStat.revision))) else decodeCursor(cursor, signature)
+        val state = if (!cursor.isNullOrBlank()) decodeCursor(cursor, signature) else if (singleFile) {
+            State(mutableListOf(), if (matcher.matches(rootStat.name)) Pending("", 0, 1, rootStat.revision) else null)
+        } else State(mutableListOf(Frame("", 0, rootStat.revision)))
+        if (singleFile && (state.frames.isNotEmpty() || state.pending?.relative?.isNotEmpty() == true)) {
+            throw FileToolException("INVALID_CURSOR", "单文件搜索游标无效")
+        }
         state.frames.forEach { frame ->
             if (backend.stat(join(root, frame.relative)).revision != frame.revision) {
                 throw FileToolException("STALE_CURSOR", "搜索目录已变化，请重新开始搜索")
@@ -83,6 +89,7 @@ internal class FileToolSearch(
             if (timeExpired() && entryBudget < MAX_ENTRIES) { stopReason = "time_limit"; break }
             if (byteBudget < 4) { stopReason = "byte_limit"; break }
             val filePath = join(root, pending.relative)
+            val displayPath = if (singleFile) rootStat.name else pending.relative
             try {
                 val stat = backend.stat(filePath)
                 if (stat.revision != pending.revision) throw FileToolException("STALE_CURSOR", "搜索中的文件已变化，请重新开始搜索")
@@ -101,7 +108,7 @@ internal class FileToolSearch(
                     if (found >= 0) {
                         val snippetStart = (found - 100).coerceAtLeast(0)
                         val snippetEnd = (found + query.length + 100).coerceAtMost(combined.length)
-                        val item = JSONObject().put("path", filePath).put("relative_path", pending.relative)
+                        val item = JSONObject().put("path", filePath).put("relative_path", displayPath)
                             .put("line", pending.line).put("text", safeSubstring(combined, snippetStart, snippetEnd))
                             .put("match_offset_bytes", pending.offset - pending.tail.toByteArray(Charsets.UTF_8).size + combined.substring(0, found).toByteArray(Charsets.UTF_8).size)
                             .put("line_truncated", pending.tail.isNotEmpty() || snippetStart > 0 || snippetEnd < combined.length || (newline < 0 && !chunk.eof))
@@ -135,15 +142,15 @@ internal class FileToolSearch(
             } catch (error: FileToolException) {
                 backend.checkActive()
                 if (error.isGlobalFailure()) throw error
-                skip(state, skipped, pending.relative, error.code)
+                skip(state, skipped, displayPath, error.code)
                 state.pending = null
             } catch (_: IOException) {
                 backend.checkActive()
-                skip(state, skipped, pending.relative, "FILE_UNREADABLE")
+                skip(state, skipped, displayPath, "FILE_UNREADABLE")
                 state.pending = null
             } catch (_: SecurityException) {
                 backend.checkActive()
-                skip(state, skipped, pending.relative, "FILE_ACCESS_DENIED")
+                skip(state, skipped, displayPath, "FILE_ACCESS_DENIED")
                 state.pending = null
             }
         }

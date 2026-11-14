@@ -383,9 +383,9 @@ internal class AgentBrowserSession(
                         "scroll" -> scroll(args)
                         "screenshot" -> screenshot(args)
                         "get_page_info" -> pageInfo()
-                        "go_back" -> historyNavigation(action, backwards = true)
-                        "go_forward" -> historyNavigation(action, backwards = false)
-                        "reload" -> reload()
+                        "go_back" -> historyNavigation(action, backwards = true, postActionTimeout(args))
+                        "go_forward" -> historyNavigation(action, backwards = false, postActionTimeout(args))
+                        "reload" -> reload(postActionTimeout(args))
                         "wait_for_selector" -> waitForSelector(args)
                         else -> throw BrowserFailure("INVALID_ACTION", "浏览器 action 无效")
                     }
@@ -409,7 +409,7 @@ internal class AgentBrowserSession(
         val waiter = LoadWaiter()
         currentLoadWaiter = waiter
         val timeout = args.optLong("timeout_ms", NAVIGATION_TIMEOUT_MS)
-            .coerceIn(500L, NAVIGATION_TIMEOUT_MS)
+            .coerceIn(500L, MAX_NAVIGATION_TIMEOUT_MS)
         val generation = navigationGeneration.incrementAndGet()
         callOnMain {
             requireActiveOperation(epoch)
@@ -437,7 +437,7 @@ internal class AgentBrowserSession(
                     currentError = "页面加载超时"
                     publishSnapshotOnMain()
                 }
-                throw BrowserFailure("NAVIGATION_TIMEOUT", "页面加载超时", status = "timeout")
+                throw BrowserFailure("NAVIGATION_TIMEOUT", "页面在 ${timeout}ms 内未完成加载；可提高 timeout_ms（最多 120000），或用 get_page_info/get_text 检查已加载内容", status = "timeout")
             }
         } finally {
             if (currentLoadWaiter === waiter) currentLoadWaiter = null
@@ -487,8 +487,9 @@ internal class AgentBrowserSession(
     private fun click(args: JSONObject): BrowserToolResult {
         val target = targetFrom(args)
         val view = requirePage()
+        prepareInteraction(view, target)
         val value = evaluateObject(view, BrowserDomScripts.click(target.selector, target.x, target.y))
-        waitForPostAction()
+        waitForPostAction(postActionTimeout(args))
         return toolResult(
             mergeValue(baseEnvelope("click", true, "ok"), value)
                 .put("side_effect", "possible")
@@ -500,6 +501,7 @@ internal class AgentBrowserSession(
         val submit = args.optBoolean("submit", false)
         val target = targetFrom(args)
         val view = requirePage()
+        prepareInteraction(view, target)
         val value = evaluateObject(
             view,
             BrowserDomScripts.type(
@@ -510,7 +512,7 @@ internal class AgentBrowserSession(
                 submit = submit,
             )
         )
-        waitForPostAction()
+        waitForPostAction(postActionTimeout(args))
         return toolResult(
             mergeValue(baseEnvelope("type", true, "ok"), value)
                 .put("side_effect", if (submit) "possible" else "local_input")
@@ -547,7 +549,7 @@ internal class AgentBrowserSession(
         return toolResult(mergeValue(baseEnvelope("get_page_info", true, "ok"), value))
     }
 
-    private fun historyNavigation(action: String, backwards: Boolean): BrowserToolResult {
+    private fun historyNavigation(action: String, backwards: Boolean, timeoutMs: Long): BrowserToolResult {
         val view = requirePage()
         val hasTarget = callOnMain {
             val history = view.copyBackForwardList()
@@ -566,11 +568,11 @@ internal class AgentBrowserSession(
             publishSnapshotOnMain()
             if (backwards) view.goBack() else view.goForward()
         }
-        waitForPostAction()
+        waitForPostAction(timeoutMs)
         return toolResult(baseEnvelope(action, true, "ok"))
     }
 
-    private fun reload(): BrowserToolResult {
+    private fun reload(timeoutMs: Long): BrowserToolResult {
         val view = requirePage()
         val epoch = activeOperationEpoch
         val generation = navigationGeneration.incrementAndGet()
@@ -583,7 +585,7 @@ internal class AgentBrowserSession(
             publishSnapshotOnMain()
             view.reload()
         }
-        waitForPostAction()
+        waitForPostAction(timeoutMs)
         return toolResult(baseEnvelope("reload", true, "ok"))
     }
 
@@ -591,9 +593,9 @@ internal class AgentBrowserSession(
         val view = requirePage()
         val selector = validatedSelector(args, required = true)!!
         val timeout = args.optLong("timeout_ms", 5_000L).coerceIn(500L, 30_000L)
-        val deadline = System.currentTimeMillis() + timeout
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout)
         var state = JSONObject().put("found", false).put("visible", false)
-        while (System.currentTimeMillis() < deadline) {
+        while (System.nanoTime() < deadline) {
             throwIfInterrupted()
             state = evaluateObject(view, BrowserDomScripts.selectorState(selector))
             if (state.optBoolean("found")) {
@@ -656,17 +658,41 @@ internal class AgentBrowserSession(
         return view
     }
 
-    private fun waitForPostAction() {
+    private fun prepareInteraction(view: WebView, target: BrowserTarget) {
+        val generation = navigationGeneration.get()
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(INTERACTION_LAYOUT_TIMEOUT_MS)
+        var reason: String
+        do {
+            throwIfInterrupted()
+            val state = evaluateObject(view, BrowserDomScripts.prepareInteraction(target.selector, target.x, target.y))
+            reason = state.optString("reason")
+            // Wait on the worker, never inside JavaScript or the Android main thread.
+            Thread.sleep(100L)
+            throwIfInterrupted()
+            if (navigationGeneration.get() != generation) {
+                throw BrowserFailure("NAVIGATION_SUPERSEDED", "页面已变化，请重新查找目标元素")
+            }
+            if (state.optBoolean("interaction_ready")) return
+        } while (System.nanoTime() < deadline && reason != "TARGET_DISABLED")
+        throw BrowserFailure("SCRIPT_FAILED", if (reason == "TARGET_DISABLED") "目标网页元素当前不可操作" else
+            "滚动后目标仍不可见或被遮挡；请用 find_elements/screenshot 检查遮挡层或更精确的 selector")
+    }
+
+    private fun postActionTimeout(args: JSONObject): Long =
+        args.optLong("timeout_ms", POST_ACTION_TIMEOUT_MS).coerceIn(500L, MAX_POST_ACTION_TIMEOUT_MS)
+
+    private fun waitForPostAction(timeoutMs: Long) {
+        throwIfInterrupted()
         Thread.sleep(250L)
-        val deadline = System.currentTimeMillis() + POST_ACTION_TIMEOUT_MS
-        while (snapshots.value.isLoading && System.currentTimeMillis() < deadline) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (snapshots.value.isLoading && System.nanoTime() < deadline) {
             throwIfInterrupted()
             Thread.sleep(100L)
         }
         if (snapshots.value.isLoading) {
             navigationGeneration.incrementAndGet()
             mainHandler.post { runCatching { webView?.stopLoading() } }
-            throw BrowserFailure("ACTION_TIMEOUT", "网页操作后的页面加载超时", "timeout")
+            throw BrowserFailure("ACTION_TIMEOUT", "操作已执行，但后续页面在 ${timeoutMs}ms 内未完成加载；请先用 get_page_info/get_text 检查结果，避免重复点击或提交。可设置 timeout_ms（最多 60000）。", "timeout")
         }
     }
 
@@ -780,6 +806,7 @@ internal class AgentBrowserSession(
             if (isDataClearing() || webView !== view || interrupted.get() || activeOperationEpoch != epoch || epoch == 0L) {
                 future.completeExceptionally(BrowserFailure("CANCELLED", "操作已取消", "cancelled"))
             } else {
+                if (future.isCancelled) return@post
                 runCatching {
                     view.evaluateJavascript(BrowserDomScripts.wrap(body)) { raw ->
                         if (!isDataClearing() && !interrupted.get() && activeOperationEpoch == epoch) {
@@ -801,7 +828,7 @@ internal class AgentBrowserSession(
                 activeOperationEpoch = 0L
             }
             mainHandler.post { runCatching { view.stopLoading() } }
-            throw BrowserFailure("SCRIPT_TIMEOUT", "网页响应超时", "timeout")
+            throw BrowserFailure("SCRIPT_TIMEOUT", "网页脚本在 ${JAVASCRIPT_TIMEOUT_MS}ms 内未响应；请检查页面状态后再重试，点击或输入可能已执行", "timeout")
         } catch (error: ExecutionException) {
             throw error.cause ?: error
         }
@@ -823,7 +850,7 @@ internal class AgentBrowserSession(
             val message = when {
                 code.contains("TARGET_NOT_FOUND") ||
                     code.contains("TARGET_NOT_VISIBLE") ||
-                    code.contains("TARGET_OCCLUDED") -> "目标网页元素不可见或被其他内容遮挡"
+                    code.contains("TARGET_OCCLUDED") -> "目标网页元素滚动后仍不可见或被遮挡；请用 find_elements/screenshot 检查遮挡层或更新 selector"
                 code.contains("TARGET_DISABLED") -> "目标网页元素当前不可操作"
                 code.contains("TARGET_NOT_EDITABLE") -> "目标网页元素不可输入"
                 code.contains("not a valid selector", ignoreCase = true) -> "CSS selector 无效"
@@ -995,6 +1022,7 @@ internal class AgentBrowserSession(
         if (Looper.myLooper() == Looper.getMainLooper()) return block()
         val future = CompletableFuture<T>()
         mainHandler.post {
+            if (future.isCancelled) return@post
             runCatching(block)
                 .onSuccess(future::complete)
                 .onFailure(future::completeExceptionally)
@@ -1147,9 +1175,12 @@ internal class AgentBrowserSession(
         private const val TOOL_NAME = "browser_use"
         private const val DEFAULT_TEXT_CHARS = 8_000
         private const val MAX_TEXT_CHARS = 12_000
-        private const val NAVIGATION_TIMEOUT_MS = 25_000L
+        private const val NAVIGATION_TIMEOUT_MS = 45_000L
+        private const val MAX_NAVIGATION_TIMEOUT_MS = 120_000L
         private const val JAVASCRIPT_TIMEOUT_MS = 8_000L
-        private const val POST_ACTION_TIMEOUT_MS = 10_000L
+        private const val POST_ACTION_TIMEOUT_MS = 25_000L
+        private const val MAX_POST_ACTION_TIMEOUT_MS = 60_000L
+        private const val INTERACTION_LAYOUT_TIMEOUT_MS = 1_500L
         private const val OFFSCREEN_VIEWPORT_MAX_WIDTH = 1_280
         private const val OFFSCREEN_VIEWPORT_MAX_HEIGHT = 2_400
         private const val PREVIEW_MAX_WIDTH = 480

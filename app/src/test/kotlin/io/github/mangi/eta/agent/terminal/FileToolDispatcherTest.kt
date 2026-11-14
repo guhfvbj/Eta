@@ -70,4 +70,32 @@ class FileToolDispatcherTest {
             assertTrue(failure.message.orEmpty(), failure.message.orEmpty().contains(key))
         }
     }
+
+    @Test fun mappedPathFailuresGiveGuidanceWithoutRewritingPathsOrChangingIdentity() {
+        val cases = listOf(
+            Triple("android", "/workspace/projects/Eta", "environment=linux"),
+            Triple("android", "/workspace/mounts/private/file", "只在 Linux"),
+            Triple("linux", "/data/data/app/files/config", "environment=android"),
+            Triple("linux", "/data/user/0/app/files/config", "environment=android"),
+            Triple("linux", "/data/local/tmp/eta/code.kt", "PRoot"),
+            Triple("linux", "/sdcard/Documents/note", "/storage/emulated/0"),
+        )
+        for ((environment, path, guidance) in cases) {
+            var resolved: String? = null
+            val backend = object : FileToolBackend by LocalFileToolBackend(temporary.root) {
+                override val environment = environment
+                override val identity = "user"
+                override fun resolve(path: String): String { resolved = path; return path }
+                override fun stat(path: String): FileToolStat = throw FileToolException("FILE_NOT_FOUND", "missing")
+            }
+            val result = JSONObject(FileToolDispatcher.execute(backend, "read_file", JSONObject().put("path", path)))
+            assertEquals("FILE_NOT_FOUND", result.getString("code"))
+            assertTrue(result.toString(), result.getString("environment_hint").contains(guidance))
+            assertEquals(path, resolved)
+            assertEquals("user", backend.identity)
+        }
+        assertEquals(null, FileToolDispatcher.pathEnvironmentHint("/workspace-other/file", "android"))
+        assertEquals(null, FileToolDispatcher.pathEnvironmentHint("/data/database/file", "linux"))
+        assertEquals(null, FileToolDispatcher.pathEnvironmentHint("/workspace/projects/Eta", "linux"))
+    }
 }
