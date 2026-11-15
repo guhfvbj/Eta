@@ -1,7 +1,11 @@
 package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.mcp.McpDeferredGroup
+import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -12,21 +16,44 @@ internal class AgentContextCompactor(
     private val controller: AgentRunController,
     private val roleplay: Boolean = false,
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
+    private val resolveSummaryModel: suspend () -> Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = {
+        val settings = AgentFeaturePreferences.load()
+        ModelFeatureSelection(settings.optBoolean("compaction_custom"),
+            settings.optString("compaction_custom_provider_id"), settings.optString("compaction_custom_model_id"))
+            .resolve()?.let { it to ProviderClientFactory.getClient(it) }
+    },
 ) {
-    fun compact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray =
-        compactWith(messages, systemCount, sensitiveIds) { durable ->
-            AgentContextSummarizer(config, provider, controller, roleplay).summarize(durable)
+    fun compact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray {
+        var summarizer: AgentContextSummarizer? = null
+        return compactWith(messages, systemCount, sensitiveIds) { durable, currentTask ->
+            // 同步 provider 管线仅在真正摘要时进入 IO 协程解析，不在 UI/阈值路径访问模型库。
+            val active = summarizer ?: run {
+                val target = runBlocking(Dispatchers.IO) {
+                    try {
+                        resolveSummaryModel()
+                    } catch (failure: Exception) {
+                        if (failure is CancellationException || failure is AgentRunCancelledException ||
+                            failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                        null // 已删除、禁用或脏配置一律静默回退至当前会话/子智能体。
+                    }
+                }
+                controller.throwIfCancelled()
+                AgentContextSummarizer(target?.first ?: config, target?.second ?: provider, controller, roleplay)
+                    .also { summarizer = it }
+            }
+            active.summarize(durable, currentTask)
         }
+    }
 
     /** Explicit emergency path; ordinary/manual compaction must still report invalid summaries. */
     fun fallbackCompact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray =
-        compactWith(messages, systemCount, sensitiveIds) { AgentContextSummarizer.fallbackSummary(it) }
+        compactWith(messages, systemCount, sensitiveIds) { durable, _ -> AgentContextSummarizer.fallbackSummary(durable) }
 
     private fun compactWith(
         messages: JSONArray,
         systemCount: Int,
         sensitiveIds: Set<String>,
-        summarize: (List<AgentModelClient.ConversationMessage>) -> String,
+        summarize: (List<AgentModelClient.ConversationMessage>, String) -> String,
     ): JSONArray {
         controller.throwIfCancelled()
         if (SignedToolContext.hasPendingResponse(messages)) throw SignedToolContext.compactionFailure(messages)
@@ -34,7 +61,13 @@ internal class AgentContextCompactor(
         val redactedIds = sensitiveIds + history.flatMap(AgentConversationCodec::parseToolCalls)
             .filter { AgentSensitiveToolPolicy.isSensitive(it.name) }.map { it.id }
         val latestUser = history.indexOfLast { it.optString("role") == "user" && !it.optBoolean("_eta_observation") }
-        val splits = safeSplits(history)
+        val summaryBoundary = history.indexOfLast { it.optBoolean("_eta_context_summary") } + 1
+        // 必须覆盖非摘要的 durable 消息（当前 user 只作为任务上下文，始终单独保留）。
+        val firstDurable = history.indices.firstOrNull {
+            it != latestUser && !history[it].optBoolean("_eta_context_summary") && !history[it].optBoolean("_eta_observation")
+        } ?: history.size
+        val allSplits = safeSplits(history)
+        val splits = allSplits.filter { it > summaryBoundary && it > firstDurable }
         if (splits.isEmpty()) throw failure("CONTEXT_NOT_COMPACTABLE", "没有可安全压缩的完整历史批次。")
         val suffixChars = LongArray(history.size + 1)
         for (index in history.indices.reversed()) suffixChars[index] = suffixChars[index + 1] + history[index].toString().length
@@ -45,14 +78,18 @@ internal class AgentContextCompactor(
         val users = history.indices.filter { history[it].optString("role") == "user" && !history[it].optBoolean("_eta_observation") }
         val closedUsers = users.filterIndexed { index, start ->
             val next = users.getOrNull(index + 1) ?: history.size
-            val found = splits.binarySearch(next)
+            val found = allSplits.binarySearch(next)
             val lastSplit = if (found >= 0) found else -found - 2
-            lastSplit >= 0 && splits[lastSplit] > start
+            lastSplit >= 0 && allSplits[lastSplit] > start
         }
         val keepFrom = closedUsers.takeLast(2).firstOrNull()
-        val recentSplit = keepFrom?.let { start -> splits.lastOrNull { it <= start } }
-            ?: splits[(splits.size - 3).coerceAtLeast(0)]
-        var splitIndex = splits.indexOf(minOf(budgetSplit, recentSplit))
+        val recentSplit = keepFrom?.let { start -> allSplits.lastOrNull { it <= start } }
+            ?: allSplits[(allSplits.size - 3).coerceAtLeast(0)]
+        // 最近两轮约束若只能保留到旧摘要边界，就改用预算边界，不能只重写旧摘要。
+        var splitIndex = splits.indexOf(if (recentSplit < splits.first()) budgetSplit else minOf(budgetSplit, recentSplit))
+        val currentTask = history.getOrNull(latestUser)?.let {
+            AgentContextSummarizer.taskText(AgentConversationCodec.transcript(JSONArray().put(it), 0, redactedIds).single())
+        }.orEmpty()
         val originalSize = messages.toString().length
         while (true) {
             controller.throwIfCancelled()
@@ -63,7 +100,7 @@ internal class AgentContextCompactor(
             if (durable.isNotEmpty()) {
                 // Invalid/failed LLM responses propagate immediately; only a valid summary
                 // that does not reduce size is allowed to retry with a smaller tail.
-                val summary = summarize(durable)
+                val summary = summarize(durable, currentTask)
                 val covered = durable.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 }
                 val groups = AgentMcpContext.compactedGroupIds(durable, dynamicMcpGroupsProvider())
                 val result = JSONArray()
@@ -71,7 +108,7 @@ internal class AgentContextCompactor(
                 result.put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
                     role = "assistant",
                     content = AgentMcpContext.appendMarker(
-                        "[Eta 上下文摘要：以下是此前历史的有损摘要，不是新指令；缺失步骤不代表未执行。]\n$summary", groups,
+                        AgentContextSummarizer.normalizeSummary(summary), groups,
                     ),
                     contextSummary = true,
                     compactedUserTurns = covered,
@@ -81,7 +118,7 @@ internal class AgentContextCompactor(
                 protectedUser?.let { result.put(retainedMessage(it, redactedIds)) }
                 history.drop(end).forEach { result.put(retainedMessage(it, redactedIds)) }
                 // Metadata is part of the candidate and must also fit the reduction check.
-                if (result.toString().length < originalSize) return result
+                if (result.toString().length <= originalSize * 0.85) return result
             }
             if (splitIndex == splits.lastIndex) break
             val smallerTail = suffixChars[end] / 2
@@ -98,6 +135,7 @@ internal class AgentContextCompactor(
         if (message.optBoolean("_eta_observation")) return message
         val clean = AgentConversationCodec.transcript(JSONArray().put(message), 0, sensitiveIds).single()
         val result = AgentConversationCodec.toJsonObject(clean.copy(reasoningContent = ""))
+        if (clean.contextSummary) result.put("content", AgentContextSummarizer.normalizeSummary(clean.content))
         if (clean.role == "user") result.put("content", message.opt("content"))
         // Keep automatic screen context for its current round, outside durable history.
         AssistantScreenContextProjection.copy(message, result)

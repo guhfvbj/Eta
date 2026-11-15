@@ -30,6 +30,9 @@ internal class AgentContextSession(
     private var baseline = initialTokenBaseline
     private var tools = JSONArray()
     private var requestBaseline: AgentContextTokenBaseline? = null
+    private var requestLocalTokens: Int? = null
+    private var noProgressCount = initialTokenBaseline?.compactionNoProgressCount?.coerceIn(0, 8) ?: 0
+    private var cooldownRemaining = initialTokenBaseline?.compactionCooldownRemaining?.coerceIn(0, 64) ?: 0
     private var consumedSupplementCount = 0
     private var consumedUserTurns = (systemCount until messages.length()).sumOf {
         val message = messages.getJSONObject(it)
@@ -42,21 +45,41 @@ internal class AgentContextSession(
     fun prepareRequest(roundTools: JSONArray) {
         tools = roundTools
         requestBaseline = null
-        if (AgentToolOutputFolder.fold(messages, systemCount) > 0) {
-            // Observed usage described a different prefix; estimate the folded request
-            // locally until a successful response establishes its new exact baseline.
-            baseline = null
+        requestLocalTokens = null
+        val previous = tokenBaseline(messages)
+        val folded = AgentToolOutputFolder.fold(messages, systemCount)
+        if (folded.changedMessages > 0) {
+            val history = durableHistory(messages)
+            // 折叠仅减去已知改动的本地成本，不丢弃服务端 usage 锚点。
+            baseline = previous.copy(
+                lastContextTokens = (previous.lastContextTokens - folded.savedTokens).coerceAtLeast(0),
+                messageCount = history.size,
+                fingerprint = AgentTokenEstimator.fingerprint(history),
+            )
         }
     }
 
-    fun captureRequest() { requestBaseline = tokenBaseline(messages) }
+    fun captureRequest() {
+        val captured = tokenBaseline(messages)
+        requestBaseline = captured
+        requestLocalTokens = AgentTokenEstimator.bounded(captured.prefixTokens.toLong() +
+            AgentTokenEstimator.messages(durableHistory(messages)))
+    }
 
     fun effectiveTokens(): Int = tokenBaseline(messages).lastContextTokens
 
     /** Called only after a complete, validated provider round, never for failed attempts. */
     fun observeInputTokens(tokens: Int?) {
         if (tokens == null || tokens < 0) return
-        baseline = (requestBaseline ?: tokenBaseline(messages)).copy(lastContextTokens = tokens)
+        val captured = requestBaseline ?: tokenBaseline(messages)
+        val local = requestLocalTokens ?: AgentTokenEstimator.bounded(captured.prefixTokens.toLong() +
+            AgentTokenEstimator.messages(durableHistory(messages)))
+        val ratio = tokens.toDouble() / local.coerceAtLeast(1)
+        // 旧版本系数的观测值不可比，直接采用本次真实比例，避免升级后先低估一轮。
+        val scale = (if (captured.estimatorVersion >= AgentTokenEstimator.VERSION) {
+            (captured.boundedEstimateScale + ratio) / 2
+        } else ratio).coerceIn(0.1, 2.0)
+        baseline = captured.copy(lastContextTokens = tokens, estimateScale = scale)
     }
 
     fun userAppended() {
@@ -76,16 +99,26 @@ internal class AgentContextSession(
     private fun tokenBaseline(candidate: JSONArray): AgentContextTokenBaseline {
         val history = durableHistory(candidate)
         val localHistory = AgentTokenEstimator.messages(history)
-        val localRequest = AgentTokenEstimator.messages(requestProjection(candidate))
+        val projected = requestProjection(candidate)
+        val localRequest = AgentTokenEstimator.messages(projected)
         val prefix = AgentTokenEstimator.bounded((localRequest.toLong() - localHistory).coerceAtLeast(0) +
             AgentTokenEstimator.json(tools))
         val known = baseline?.takeIf { it.matches(history, config) }
-        val tokens = if (known == null) prefix.toLong() + localHistory else {
-            known.lastContextTokens.toLong() + (prefix - known.prefixTokens) +
+        // 估算权重变更后旧校准系数不再适用，直接按新算法从 1.0 重新学习。
+        val scale = baseline?.takeIf { it.estimatorVersion >= AgentTokenEstimator.VERSION }
+            ?.boundedEstimateScale ?: 1.0
+        // 老库的 prefixTokens 使用双倍中文权重，不能把估算算法差异误当作提示词删除。
+        val comparablePrefix = if (known != null && known.estimatorVersion < AgentTokenEstimator.VERSION) {
+            AgentTokenEstimator.bounded((AgentTokenEstimator.messages(projected, legacy = true).toLong() -
+                AgentTokenEstimator.messages(history, legacy = true)).coerceAtLeast(0) + AgentTokenEstimator.json(tools, legacy = true))
+        } else prefix
+        val tokens = if (known == null) ((prefix.toLong() + localHistory) * scale).toLong() else {
+            known.lastContextTokens.toLong() + (comparablePrefix - known.prefixTokens) +
                 AgentTokenEstimator.messages(history.drop(known.messageCount))
         }
         return AgentContextTokenBaseline(AgentTokenEstimator.bounded(tokens), history.size,
-            AgentTokenEstimator.fingerprint(history), prefix, AgentTokenEstimator.modelKey(config))
+            AgentTokenEstimator.fingerprint(history), prefix, AgentTokenEstimator.modelKey(config),
+            scale, noProgressCount, cooldownRemaining, estimatorVersion = AgentTokenEstimator.VERSION)
     }
 
     private fun createSnapshot(candidate: JSONArray): AgentContextSnapshot {
@@ -117,6 +150,11 @@ internal class AgentContextSession(
             checkpoint()
             return
         }
+        if (!force && cooldownRemaining > 0) {
+            cooldownRemaining--
+            checkpoint()
+            return
+        }
         val operation = java.util.UUID.randomUUID().toString()
         onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
@@ -132,7 +170,14 @@ internal class AgentContextSession(
             }
             runController.throwIfCancelled()
             val previousBaseline = baseline
-            baseline = null // A changed prefix invalidates observed usage.
+            val previousNoProgress = noProgressCount
+            val previousCooldown = cooldownRemaining
+            // 压缩改变前缀，仅失效指纹；保留 usage 学到的校准系数。
+            baseline = baseline?.copy(messageCount = -1)
+            if (tokenBaseline(candidate).lastContextTokens > before * 0.95) recordNoProgress() else {
+                noProgressCount = 0
+                cooldownRemaining = 0
+            }
             val snapshot = try {
                 createSnapshot(candidate).also {
                     it.encode()
@@ -140,6 +185,8 @@ internal class AgentContextSession(
                 }
             } catch (failure: Exception) {
                 baseline = previousBaseline
+                noProgressCount = previousNoProgress
+                cooldownRemaining = previousCooldown
                 throw failure
             }
             while (messages.length() > 0) messages.remove(messages.length() - 1)
@@ -151,9 +198,19 @@ internal class AgentContextSession(
             runController.throwIfCancelled()
             onEvent(AgentEvent.ContextCompaction(operation, "failed", before,
                 reasonCode = (failure as? AgentModelFailure)?.code ?: "CONTEXT_SUMMARY_FAILED"))
+            if (failure is AgentModelFailure && failure.code in setOf("CONTEXT_NO_REDUCTION", "CONTEXT_NOT_COMPACTABLE")) {
+                recordNoProgress()
+                checkpoint()
+                if (!force) return
+            }
             if (!final) throw failure
             committedSnapshot = createSnapshot(messages)
         }
+    }
+
+    private fun recordNoProgress() {
+        noProgressCount = (noProgressCount + 1).coerceAtMost(8)
+        cooldownRemaining = (noProgressCount * 8).coerceAtMost(64)
     }
 
     private fun durableHistory(source: JSONArray): List<AgentModelClient.ConversationMessage> {

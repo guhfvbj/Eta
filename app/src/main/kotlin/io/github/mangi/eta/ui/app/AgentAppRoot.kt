@@ -819,6 +819,9 @@ fun AgentAppRoot(
             entry<AppRoute.TitleModel>(swipeDismiss = swipeDismiss) {
                 io.github.mangi.eta.ui.screens.models.TitleModelSettingsScreen(::popRoute)
             }
+            entry<AppRoute.CompactionModel>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.models.CompactionModelSettingsScreen(onBack = ::popRoute)
+            }
             entry<AppRoute.Tasks>(swipeDismiss = swipeDismiss) {
                 io.github.mangi.eta.ui.screens.tasks.AgentTasksScreen(onBack = ::popRoute)
             }

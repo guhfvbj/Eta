@@ -1768,4 +1768,11 @@
     <string name="mcp_loading_mode_off">關閉（全量常駐）</string>
     <string name="tool_tools_use_group">載入 MCP 伺服器</string>
     <string name="tool_tools_search">搜尋 MCP 工具</string>
+    <string name="compaction_model_title">壓縮模型</string>
+    <string name="compaction_model_description">自動壓縮會用這裡選擇的模型產生上下文摘要；關閉自訂時跟隨目前對話模型。</string>
+    <string name="compaction_model_custom">使用自訂壓縮模型</string>
+    <string name="compaction_model_custom_summary">關閉後跟隨目前對話模型，保留上次自訂選擇。</string>
+    <string name="compaction_model_follow_current">跟隨目前對話模型</string>
+    <string name="compaction_model_search">搜尋模型或供應商</string>
+    <string name="compaction_model_empty">沒有可用的文字模型</string>
 </resources>

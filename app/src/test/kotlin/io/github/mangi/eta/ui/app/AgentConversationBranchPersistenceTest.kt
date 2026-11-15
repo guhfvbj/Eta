@@ -2,7 +2,15 @@ package io.github.mangi.eta.ui.app
 
 import android.content.Context
 import io.github.mangi.eta.agent.model.AgentConversationCodec
+import io.github.mangi.eta.agent.model.AgentContextSession
+import io.github.mangi.eta.agent.model.AgentContextTokenBaseline
+import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentModelClient.ConversationMessage
+import io.github.mangi.eta.agent.model.AgentTokenEstimator
+import io.github.mangi.eta.agent.runtime.AgentConversationRuntimeState
+import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.agent.subagent.SubagentProfile
+import io.github.mangi.eta.agent.subagent.SubagentSessionStore
 import io.github.mangi.eta.agent.roleplay.CharacterCardCodec
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageLink
@@ -18,6 +26,7 @@ import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -94,6 +103,54 @@ class AgentConversationBranchPersistenceTest {
         EtaDatabase.closeForTests()
         assertEquals(child.history, AgentConversationStore.loadConversation(context, "child")!!.history)
         assertEquals(child.journal, AgentConversationStore.loadConversation(context, "child")!!.journal)
+    }
+
+    @Test
+    fun branchCopiesRuntimeUsageAndReanchorsFingerprintAfterMessageIdRemapping() = runBlocking {
+        val source = conversation(10)
+        val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "fixture",
+            model = "fixture", systemPrompt = "", contextWindow = 256_000)
+        val baseline = AgentContextTokenBaseline(77_655, source.history.size,
+            AgentTokenEstimator.fingerprint(source.history), AgentTokenEstimator.json(JSONArray()),
+            AgentTokenEstimator.modelKey(config), estimateScale = 0.7, compactionNoProgressCount = 2,
+            compactionCooldownRemaining = 16)
+        val runtime = AgentConversationRuntimeState(tokenBaseline = baseline, subagents = listOf(
+            SubagentSessionStore.StoredSession("sub_1", SubagentProfile("fixture", "", "", emptyList(), ""),
+                listOf(ConversationMessage("assistant", "子任务记录".repeat(6_000)))),
+        ))
+        val persistence = AgentConversationPersistence()
+        persistence.save(context, snapshot(source))
+        dao.updateRuntimeState("source", runtime.encode())
+        assertTrue(dao.contextCheckpointRow("source")!!.runtimeStateJson.startsWith(ChunkedTextDao.REFERENCE_PREFIX))
+
+        val child = persistence.branch(context, "source", "assistant-8-0", "child", "分支", 2L)
+        val checkpoint = dao.contextCheckpoint("child")!!
+        assertTrue(checkpoint.runtimeStateJson.isNotBlank())
+        val copiedRuntime = AgentConversationRuntimeState.decode(checkpoint.runtimeStateJson)
+        // 子智能体会话属于父对话，复制进分支会让分支误认领父对话的子任务，只继承 token 基线。
+        assertTrue(copiedRuntime.subagents.isEmpty())
+        val copied = copiedRuntime.tokenBaseline!!
+        assertTrue(copied.lastContextTokens in 1..77_655)
+        assertEquals(child.history.size, copied.messageCount)
+        assertEquals(baseline.prefixTokens, copied.prefixTokens)
+        assertEquals(baseline.modelKey, copied.modelKey)
+        assertEquals(0.7, copied.estimateScale, 0.0)
+        assertEquals(16, copied.compactionCooldownRemaining)
+        assertNotEquals(baseline.fingerprint, copied.fingerprint)
+        assertTrue(copied.matches(child.history, config))
+        val messages = JSONArray(child.history.map(AgentConversationCodec::toJsonObject))
+        messages.put(AgentConversationCodec.userTextMessage("分支首条新消息"))
+        val expected = copied.lastContextTokens + AgentTokenEstimator.messages(
+            AgentConversationCodec.transcript(messages, 0).drop(copied.messageCount),
+        )
+        val session = AgentContextSession(config, messages, 0, "branch", io.github.mangi.eta.agent.model.OpenAiChatCompletionsProvider,
+            AgentRunController(), { emptySet() }, {}, {}, initialTokenBaseline = copied)
+        session.prepareRequest(JSONArray())
+        assertEquals(expected, session.effectiveTokens())
+        assertTrue(session.effectiveTokens() > AgentTokenEstimator.messages(messages))
+        dao.deleteConversation("source")
+        EtaDatabase.closeForTests()
+        assertEquals(copiedRuntime, AgentConversationRuntimeState.decode(dao.contextCheckpoint("child")!!.runtimeStateJson))
     }
 
     @Test

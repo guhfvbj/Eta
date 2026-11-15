@@ -3,6 +3,8 @@ package io.github.mangi.eta.ui.app
 import android.content.Context
 import androidx.room.withTransaction
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentTokenEstimator
+import io.github.mangi.eta.agent.runtime.AgentConversationRuntimeStore
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.data.model.ReasoningEffort
@@ -41,6 +43,15 @@ internal class AgentConversationPersistence(initial: AgentConversationStore.Snap
         val state = database.withTransaction {
             ConversationBranchRepository.create(database, sourceId, targetMessageId, branchId, title, now)
             checkNotNull(AgentConversationStore.loadConversation(context, branchId))
+        }
+        // 指纹必须按分支实际加载的历史重建：checkpoint 与消息表的重建路径可能不同，
+        // 只按源会话重映射会留下永不命中的基线，分支首条消息又退回字符估算。
+        AgentConversationRuntimeStore.update(context, branchId) { runtime ->
+            val baseline = runtime.tokenBaseline ?: return@update runtime
+            runtime.copy(tokenBaseline = baseline.copy(
+                messageCount = state.history.size,
+                fingerprint = AgentTokenEstimator.fingerprint(state.history),
+            ))
         }
         val content = Content(state, title, now)
         saved = saved + (branchId to content)

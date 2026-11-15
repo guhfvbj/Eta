@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui
 
 import io.github.mangi.eta.ui.screens.models.rememberFeatureSettings
+import io.github.mangi.eta.agent.model.AgentFeaturePreferences
 import androidx.compose.material.icons.rounded.AutoAwesome
 import android.content.ComponentName
 import android.content.Context
@@ -292,6 +293,14 @@ private fun SettingsPageContent(
         } else summary
     }
 
+    val compactionProvider = providers.firstOrNull { it.id == titleSettings.optString("compaction_custom_provider_id") && it.isEnabled }
+    val compactionModel = compactionProvider?.models?.firstOrNull {
+        it.id == titleSettings.optString("compaction_custom_model_id") && it.isEnabled && AgentFeaturePreferences.isTextModel(it)
+    }
+    val compactionModelSummary = if (titleSettings.optBoolean("compaction_custom") && compactionProvider != null && compactionModel != null) {
+        "${compactionProvider.name} · ${compactionModel.displayName}"
+    } else stringResource(R.string.compaction_model_follow_current)
+
     // prefs 绑定到 XposedService：service 到达时切换到 RemotePreferences（跨进程提交到
     // LSPosed 数据库）；未就绪时保持 null，UI 禁止修改。
     var prefs by remember { mutableStateOf(Prefs.remotePreferencesForUi(EtaApp.serviceInstance)) }
@@ -402,6 +411,13 @@ private fun SettingsPageContent(
                         summary = titleModelSummary,
                         icon = { CouiSettingsIcon(Icons.Rounded.AutoAwesome, SettingsIconColors.Orange) },
                         onClick = { onNavigate(AppRoute.TitleModel) },
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
+                        title = stringResource(R.string.compaction_model_title),
+                        summary = compactionModelSummary,
+                        icon = { CouiSettingsIcon(Icons.Rounded.Layers, SettingsIconColors.Blue) },
+                        onClick = { onNavigate(AppRoute.CompactionModel) },
                     )
                     CouiIconDivider()
                     SwitchPref(
@@ -842,6 +858,12 @@ private fun SettingsPageContent(
                             summary = titleModelSummary,
                             startAction = { SettingsIcon(Icons.Rounded.AutoAwesome, tint = SettingsIconColors.Orange) },
                             onClick = { onNavigate(AppRoute.TitleModel) },
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.compaction_model_title),
+                            summary = compactionModelSummary,
+                            startAction = { SettingsIcon(Icons.Rounded.Layers, tint = SettingsIconColors.Blue) },
+                            onClick = { onNavigate(AppRoute.CompactionModel) },
                         )
                         SwitchPref(
                             context = context,

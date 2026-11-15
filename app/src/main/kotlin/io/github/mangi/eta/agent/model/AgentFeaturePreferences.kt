@@ -22,6 +22,12 @@ internal object AgentFeaturePreferences {
             context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE).edit().clear().apply()
         }
         var normalized = false
+        if (settings.optBoolean("compaction_custom") &&
+            (settings.optString("compaction_custom_provider_id").isBlank() ||
+                settings.optString("compaction_custom_model_id").isBlank())) {
+            settings.put("compaction_custom", false)
+            normalized = true
+        }
         settings.keys().asSequence().toList().filter { it.startsWith("review_") }.forEach {
             settings.remove(it)
             normalized = true
@@ -99,7 +105,7 @@ internal object AgentFeaturePreferences {
 
 internal data class ModelFeatureSelection(val custom: Boolean, val providerId: String, val modelId: String) {
     suspend fun resolve(): AgentModelClient.ModelConfig? {
-        if (providerId.isBlank() || modelId.isBlank()) return null
+        if (!custom || providerId.isBlank() || modelId.isBlank()) return null
         val provider = ProviderRepository.providerById(providerId)?.takeIf { it.isEnabled } ?: return null
         val model = provider.models.firstOrNull { it.id == modelId && it.isEnabled && AgentFeaturePreferences.isTextModel(it) } ?: return null
         return RuntimeConfigRepository.buildRuntimeConfig(provider, model)

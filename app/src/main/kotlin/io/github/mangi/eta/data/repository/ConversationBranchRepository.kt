@@ -3,6 +3,8 @@ package io.github.mangi.eta.data.repository
 import androidx.room.withTransaction
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient.ConversationMessage
+import io.github.mangi.eta.agent.model.AgentTokenEstimator
+import io.github.mangi.eta.agent.runtime.AgentConversationRuntimeState
 import io.github.mangi.eta.agent.roleplay.RoleplayHistoryProjection
 import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.data.db.ConversationDao
@@ -70,10 +72,31 @@ internal object ConversationBranchRepository {
             revisionsJson = if (source.roleplayJson.isBlank()) "" else json.encodeToString(remappedRoleplay),
             createdAt = now, updatedAt = now,
         )))
+        val branchHistory = history.map { it.copy(messageId = remap(it.messageId)) }
+        val runtime = AgentConversationRuntimeState.decode(dao.restoreText(
+            "conversation_context_checkpoints", sourceId, "runtime", checkpoint.runtimeStateJson,
+        ))
+        // 指纹包含 messageId，必须按分支重建；保留父 usage 锚点，分支首轮响应后再观测校准。
+        // 只继承 tokenBaseline：subagents 属于父会话，复制进分支会让分支误认领父会话的子智能体。
+        // 分支可能建在会话中段，父锚点含被裁掉的后半段，按本地估算差值扣回，避免分支首轮就判定越线。
+        val branchBaseline = runtime.tokenBaseline?.let { baseline ->
+            val parentHistory = if (baseline.messageCount in 1..history.size) {
+                history.take(baseline.messageCount)
+            } else history
+            val dropped = (AgentTokenEstimator.messages(parentHistory) -
+                AgentTokenEstimator.messages(branchHistory)).coerceAtLeast(0)
+            baseline.copy(
+                lastContextTokens = (baseline.lastContextTokens - dropped).coerceAtLeast(0),
+                messageCount = branchHistory.size,
+                fingerprint = AgentTokenEstimator.fingerprint(branchHistory),
+            )
+        }
+        val branchRuntime = AgentConversationRuntimeState(tokenBaseline = branchBaseline)
         dao.updateContextCheckpoint(
             branchId,
-            AgentConversationCodec.encodeConversationCheckpoint(history.map { it.copy(messageId = remap(it.messageId)) }),
+            AgentConversationCodec.encodeConversationCheckpoint(branchHistory),
             AgentConversationCodec.encodeTranscriptForStorage(journal.map { it.copy(messageId = remap(it.messageId)) }),
+            branchRuntime.encode(),
         )
         var after = -1
         var index = 0

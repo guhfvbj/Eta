@@ -709,6 +709,7 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.AppearanceSettings -> stringResource(R.string.appearance_title)
     is AppRoute.DataBackup -> stringResource(R.string.data_backup_title)
     is AppRoute.TitleModel -> stringResource(R.string.title_model_title)
+    is AppRoute.CompactionModel -> stringResource(R.string.compaction_model_title)
     is AppRoute.PromptStudio -> stringResource(R.string.prompt_studio_title)
     is AppRoute.PromptEditor -> stringResource(R.string.prompt_studio_editor_title)
     is AppRoute.PromptVersions -> stringResource(R.string.prompt_studio_versions_title)

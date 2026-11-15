@@ -1856,4 +1856,11 @@
     <string name="mcp_loading_mode_off">Off (always load all)</string>
     <string name="tool_tools_use_group">Load MCP server</string>
     <string name="tool_tools_search">Search MCP tools</string>
+    <string name="compaction_model_title">Compaction model</string>
+    <string name="compaction_model_description">Automatic compaction uses the selected model to summarize context. Turn off customization to follow the current conversation model.</string>
+    <string name="compaction_model_custom">Use a custom compaction model</string>
+    <string name="compaction_model_custom_summary">Turning this off keeps your last selection and follows the current conversation model.</string>
+    <string name="compaction_model_follow_current">Follow the current conversation model</string>
+    <string name="compaction_model_search">Search models or providers</string>
+    <string name="compaction_model_empty">No available text models</string>
 </resources>

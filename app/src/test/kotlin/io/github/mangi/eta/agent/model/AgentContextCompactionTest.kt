@@ -264,7 +264,10 @@ class AgentContextCompactionTest {
         var normalRequests = 0
         var summaryRequests = 0
         val result = AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
-            history = history(), provider = provider { request, emit ->
+            history = history(), initialTokenBaseline = AgentContextTokenBaseline(
+                1_000, history().size, AgentTokenEstimator.fingerprint(history()), 0,
+                AgentTokenEstimator.modelKey(config), compactionCooldownRemaining = 64,
+            ), provider = provider { request, emit ->
                 if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                     summaryRequests++
                     response("之前的任务已完成。")
@@ -302,7 +305,8 @@ class AgentContextCompactionTest {
         val result = AgentContextCompactor(config, provider { request, _ ->
             requests++
             val historyText = request.messages.getJSONObject(1).getString("content")
-            seen += historyText
+            seen += historyText.substringAfter("待整理的历史：\n")
+            assertTrue(historyText.substringBefore("待整理的历史：").contains("问题 6"))
             response("之前的工作已完成。")
         }, AgentRunController()).compact(jsonHistory(), 1, emptySet())
         assertEquals(1, requests)
@@ -516,6 +520,145 @@ class AgentContextCompactionTest {
             .fallbackCompact(original, 1, emptySet())
         assertTrue(result.toString().length < before.length)
         assertEquals(before, original.toString())
+    }
+
+    @Test
+    fun singleUserToolHeavyHistoryNeverCompactsOnlyItsOldSummaryAndHeadersStayUnique() {
+        val header = AgentContextSummarizer.SUMMARY_HEADER
+        var requests = 0
+        val compactor = AgentContextCompactor(config, provider { request, _ ->
+            requests++
+            val input = request.messages.getJSONObject(1).getString("content")
+            assertFalse(input.contains("[Eta 上下文摘要"))
+            assertTrue(input.contains("当前任务"))
+            assertTrue(input.contains("现在直接修改 Kotlin，不要再等待确认"))
+            assertTrue(input.substringAfter("待整理的历史：").contains("read_file"))
+            response("$header\n$header\n已经读取文件，下一步按当前指令修改。")
+        }, AgentRunController())
+        val original = JSONArray().put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
+            "assistant", "$header\n[Eta 上下文摘要 · 2026-10-01]\n等待上一轮确认。", contextSummary = true,
+        ))).put(AgentConversationCodec.userTextMessage("现在直接修改 Kotlin，不要再等待确认"))
+        repeat(200) { index ->
+            val call = AgentModelClient.ToolCall("read-$index", "read_file", """{"path":"File.kt"}""")
+            original.put(AgentConversationCodec.assistantHistoryMessage(JSONObject().put("content", ""), listOf(call)))
+            original.put(AgentConversationCodec.toolResultMessage(call, AgentModelClient.ToolResult("代码 $index\n".repeat(800))))
+        }
+        var previous = original
+        repeat(2) {
+            val result = compactor.compact(previous, 0, emptySet())
+            assertTrue(result.toString().length <= previous.toString().length * 0.85)
+            val oldTools = (0 until previous.length()).count { previous.getJSONObject(it).optString("role") == "tool" }
+            val newTools = (0 until result.length()).count { result.getJSONObject(it).optString("role") == "tool" }
+            assertTrue(newTools < oldTools) // end 不能退化为 1，只改旧摘要。
+            assertEquals(1, Regex("\\[Eta 上下文摘要").findAll(result.getJSONObject(0).getString("content")).count())
+            assertEquals("现在直接修改 Kotlin，不要再等待确认", result.getJSONObject(1).getString("content"))
+            val retained = (2 until result.length()).map { result.getJSONObject(it).optString("tool_call_id") }.filter { it.isNotBlank() }.toSet()
+            val source = (0 until previous.length()).map(previous::getJSONObject)
+            val end = source.indexOfFirst { it.optString("role") == "assistant" &&
+                AgentConversationCodec.parseToolCalls(it).any { call -> call.id in retained } }
+                .let { if (it < 0) source.size else it }
+            assertTrue(end > 1)
+            assertTrue(AgentContextCompactor.canSplit(source, end))
+            assertNotEquals(previous.toString(), result.toString())
+            previous = result
+        }
+        assertTrue(requests >= 2)
+    }
+
+    @Test
+    fun tinyCharacterSavingsAreNoProgressAndAutomaticCooldownSurvivesRestart() {
+        val messages = JSONArray().put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
+            "assistant", AgentContextSummarizer.normalizeSummary("旧".repeat(900)), contextSummary = true,
+        ))).put(AgentConversationCodec.userTextMessage("当前任务"))
+            .put(JSONObject().put("role", "assistant").put("content", "完成"))
+        val before = messages.toString()
+        var requests = 0
+        val noProgressProvider = provider { _, _ -> requests++; response("旧".repeat(899)) }
+        assertEquals("CONTEXT_NO_REDUCTION", assertThrows(AgentModelFailure::class.java) {
+            AgentContextCompactor(config, noProgressProvider, AgentRunController()).compact(messages, 0, emptySet())
+        }.code)
+        // 摘要模型预算需容纳 899 字；用正常窗口生成，再以真实 usage 触发自动压缩。
+        val automatic = AgentContextSession(config, messages, 0, "cooldown", noProgressProvider,
+            AgentRunController(), { emptySet() }, {}, {})
+        automatic.observeInputTokens(100_000)
+        automatic.compact()
+        val saved = AgentContextSnapshot.decode(automatic.snapshot()!!.encode())!!
+        assertTrue(saved.tokenBaseline!!.compactionNoProgressCount > 0)
+        assertTrue(saved.tokenBaseline!!.compactionCooldownRemaining > 0)
+        assertEquals(before, messages.toString())
+        val calls = requests
+        automatic.compact()
+        val restored = AgentContextSession(config, JSONArray(messages.toString()), 0, "restored", noProgressProvider,
+            AgentRunController(), { emptySet() }, {}, {}, initialTokenBaseline = saved.tokenBaseline)
+        restored.compact()
+        assertEquals(calls, requests)
+        // 强制操作绕过退避，纯摘要历史则在发请求前就判定不可压缩。
+        assertEquals("CONTEXT_NO_REDUCTION", assertThrows(AgentModelFailure::class.java) { restored.compact(force = true) }.code)
+        assertEquals("CONTEXT_NOT_COMPACTABLE", assertThrows(AgentModelFailure::class.java) {
+            AgentContextCompactor(config, noProgressProvider, AgentRunController())
+                .compact(JSONArray().put(messages.getJSONObject(0)), 0, emptySet())
+        }.code)
+    }
+
+    @Test
+    fun compactionResolvesCustomTargetLazilyInCoroutineAndUsesItsOwnBudgetAndReasoning() {
+        var resolutions = 0
+        val custom = config.copy(model = "small-summary-model", contextWindow = 8_192,
+            thinkingEnabled = false, reasoningCapabilities = null, reasoningEffort = ReasoningEffort.HIGH)
+        val customProvider = provider { request, _ ->
+            assertEquals(custom.model, request.config.model)
+            assertEquals(ReasoningEffort.DEFAULT, request.config.effectiveReasoningEffort)
+            assertFalse(request.config.thinkingEnabled)
+            assertTrue(request.messages.toString().length < 8_192)
+            assertEquals(2_048, request.outputLimit)
+            val body = JSONObject()
+            ProviderReasoning.applyOpenAiCompatibleRequest(body, request.effectiveConfig)
+            assertFalse(body.has("reasoning_effort"))
+            response("已经完成前面的检查。")
+        }
+        val compactor = AgentContextCompactor(config, provider { _, _ -> error("must use custom provider") },
+            AgentRunController(), resolveSummaryModel = {
+                assertNotNull(kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job])
+                resolutions++
+                custom to customProvider
+            })
+        assertEquals(0, resolutions)
+        compactor.compact(jsonHistory(), 1, emptySet())
+        assertEquals(1, resolutions) // 滚动摘要只解析一次。
+    }
+
+    @Test
+    fun smallEffectiveTokenReductionEntersCooldownEvenWhenCharacterReductionSucceeds() {
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", "固定规则".repeat(3_000)))
+            .put(AgentConversationCodec.userTextMessage("当前任务"))
+            .put(JSONObject().put("role", "assistant").put("content", "x".repeat(12_000)))
+        var calls = 0
+        val session = AgentContextSession(config.copy(contextWindow = 1_000), messages, 1, "test",
+            provider { _, _ -> calls++; response("完成检查。") }, AgentRunController(), { emptySet() }, {}, {})
+        session.observeInputTokens(1_000)
+        session.compact()
+        val saved = session.snapshot()!!
+        assertTrue(saved.messages.first().contextSummary)
+        assertTrue(saved.tokenBaseline!!.compactionCooldownRemaining > 0)
+        session.compact()
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun missingOrFailedCompactionSelectionFallsBackToEachCurrentModel() {
+        for (current in listOf(config, config.copy(model = "subagent-model"))) {
+            for (throws in listOf(false, true)) {
+                var requests = 0
+                AgentContextCompactor(current, provider { request, _ ->
+                    assertEquals(current.model, request.config.model)
+                    requests++
+                    response("保留事实。")
+                }, AgentRunController(), resolveSummaryModel = {
+                    if (throws) error("deleted provider") else null
+                }).compact(jsonHistory(), 1, emptySet())
+                assertTrue(requests > 0)
+            }
+        }
     }
 
     private fun history() = (1..6).flatMap { turn -> listOf(

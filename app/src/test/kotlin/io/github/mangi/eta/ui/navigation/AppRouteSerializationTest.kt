@@ -44,6 +44,7 @@ class AppRouteSerializationTest {
             AppRoute.DataBackup,
             AppRoute.Memory,
             AppRoute.TitleModel,
+            AppRoute.CompactionModel,
             AppRoute.Tasks,
             AppRoute.PromptStudio,
             AppRoute.PromptEditor,

@@ -12,36 +12,51 @@ class AgentToolOutputFolderTest {
         val journal = JSONArray((0 until messages.length()).map(messages::getJSONObject))
         val original = journal.toString()
         val pairing = AgentConversationCodec.transcript(messages, 1).map { it.role to it.toolCallId }
-        assertTrue(AgentToolOutputFolder.fold(messages, 1) > 0)
+        assertTrue(AgentToolOutputFolder.fold(messages, 1).changedMessages > 0)
         assertEquals(original, journal.toString())
         assertEquals(pairing, AgentConversationCodec.transcript(messages, 1).map { it.role to it.toolCallId })
-        assertTrue(messages.getJSONObject(3).getString("content").length <= AgentToolOutputFolder.MAX_FOLDED_CHARS)
+        assertTrue(messages.getJSONObject(3).getString("content").length <= AgentToolOutputFolder.MAX_READ_FILE_FOLDED_CHARS)
         for (i in 6..8) assertEquals(journal.getJSONObject(i * 2 + 1).toString(), messages.getJSONObject(i * 2 + 1).toString())
         for (i in 0 until messages.length()) if (messages.getJSONObject(i).getString("role") != "tool") {
             assertSame(journal.getJSONObject(i), messages.getJSONObject(i))
         }
-        assertEquals(0, AgentToolOutputFolder.fold(messages, 1))
+        assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
     }
 
-    @Test fun aSingleUserTaskCanAgeOutReadsButThreeRecentExchangesStayProtected() {
-        val messages = history()
-        assertEquals(1, (0 until messages.length()).count { messages.getJSONObject(it).optString("role") == "user" })
-        assertTrue(AgentToolOutputFolder.fold(messages, 1) > 0)
-        assertTrue(messages.getJSONObject(3).getString("content").contains("older_tool_output_folded"))
-        val short = history(rounds = 3, output = "x".repeat(30_000))
-        val before = short.toString()
-        assertEquals(0, AgentToolOutputFolder.fold(short, 1))
-        assertEquals(before, short.toString())
+    @Test fun currentUserTurnIsNeverFoldedEvenAfterHundredsOfTools() {
+        val messages = history(rounds = 200, endTurn = false)
+        val before = messages.toString()
+        assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
+        assertEquals(before, messages.toString())
+    }
+
+    @Test fun readFileKeepsThreeThousandCharactersAndRangeMetadata() {
+        val content = JSONObject().put("tool", "read_file").put("path", "src/File.kt")
+            .put("start_line", 10).put("end_line", 900).put("offset", 9).put("limit", 891)
+            .put("content", "CODE".repeat(3_000)).toString()
+        val messages = history(output = content)
+        val before = AgentTokenEstimator.messages(messages)
+        val folded = AgentToolOutputFolder.fold(messages, 1)
+        assertTrue(folded.changedMessages > 0)
+        assertEquals(before - AgentTokenEstimator.messages(messages), folded.savedTokens)
+        val result = JSONObject(messages.getJSONObject(3).getString("content"))
+        assertEquals("src/File.kt", result.getString("path"))
+        assertEquals(10, result.getInt("start_line"))
+        assertEquals(900, result.getInt("end_line"))
+        assertEquals(9, result.getInt("offset"))
+        assertEquals(891, result.getInt("limit"))
+        assertTrue(result.getString("preview").length >= 3_000)
+        assertTrue(result.getString("preview").contains("offset/limit 分段重读"))
     }
 
     @Test fun protectsAtLeast24KOfTailAndDoesNotFoldSmallOrStructuredContent() {
         val short = history(output = "x".repeat(3_001))
-        assertEquals(0, AgentToolOutputFolder.fold(short, 1))
+        assertEquals(0, AgentToolOutputFolder.fold(short, 1).changedMessages)
         val messages = history(rounds = 12)
         val structured = JSONArray().put(JSONObject().put("type", "text").put("text", "image/text".repeat(2_000)))
         messages.getJSONObject(3).put("content", structured)
         messages.getJSONObject(5).put("content", "s".repeat(3_000))
-        assertTrue(AgentToolOutputFolder.fold(messages, 1) > 0)
+        assertTrue(AgentToolOutputFolder.fold(messages, 1).changedMessages > 0)
         assertSame(structured, messages.getJSONObject(3).getJSONArray("content"))
         assertEquals("s".repeat(3_000), messages.getJSONObject(5).getString("content"))
     }
@@ -54,7 +69,7 @@ class AgentToolOutputFolderTest {
         val messages = history(output = content)
         AgentToolOutputFolder.fold(messages, 1)
         val raw = messages.getJSONObject(3).getString("content")
-        assertTrue(raw.length <= 1_500)
+        assertTrue(raw.length <= AgentToolOutputFolder.MAX_READ_FILE_FOLDED_CHARS)
         val folded = JSONObject(raw)
         assertEquals("opaque-exact", folded.getString("revision"))
         assertEquals("opaque-cursor", folded.getString("next_cursor"))
@@ -75,7 +90,7 @@ class AgentToolOutputFolderTest {
         val messages = history(output = content)
         AgentToolOutputFolder.fold(messages, 1)
         val raw = messages.getJSONObject(3).getString("content")
-        assertTrue(raw.length <= 1_500)
+        assertTrue(raw.length <= AgentToolOutputFolder.MAX_READ_FILE_FOLDED_CHARS)
         assertFalse(JSONObject(raw).has("revision"))
         assertFalse(JSONObject(raw).has("path"))
     }
@@ -93,6 +108,7 @@ class AgentToolOutputFolderTest {
                 }
             }
             appendExchange(messages, 9 + turn, "z".repeat(8_000))
+            messages.put(AgentConversationCodec.userTextMessage("next $turn"))
         }
         assertTrue(folded.size >= 8)
     }
@@ -119,14 +135,14 @@ class AgentToolOutputFolderTest {
 
     @Test fun incompleteOrMalformedToolBatchesDisableFolding() {
         for (kind in listOf("missing", "orphan", "interleaved")) {
-            val messages = history()
+            val messages = history(endTurn = false)
             when (kind) {
                 "missing" -> messages.remove(messages.length() - 1)
                 "orphan" -> messages.getJSONObject(3).put("tool_call_id", "not-a-call")
                 else -> messages.getJSONObject(3).put("role", "user")
             }
             val before = messages.toString()
-            assertEquals(kind, 0, AgentToolOutputFolder.fold(messages, 1))
+            assertEquals(kind, 0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
             assertEquals(before, messages.toString())
         }
     }
@@ -134,6 +150,7 @@ class AgentToolOutputFolderTest {
     @Test fun allSignedProviderChainsLockTheWholePrefixUntilTheChainEnds() {
         for (provider in 0..2) {
             val messages = history()
+            messages.remove(messages.length() - 1) // 签名工具链仍在当前用户轮次
             val signed = messages.getJSONObject(messages.length() - 2)
             when (provider) {
                 0 -> AnthropicEphemeralState.attachContentBlocks(signed, JSONArray().put(JSONObject()
@@ -145,16 +162,17 @@ class AgentToolOutputFolderTest {
             }
             val before = messages.toString()
             val signedBefore = signed.toString()
-            assertEquals(0, AgentToolOutputFolder.fold(messages, 1))
+            assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
             assertEquals(before, messages.toString())
             messages.put(JSONObject().put("role", "assistant").put("content", "done"))
-            assertTrue(AgentToolOutputFolder.fold(messages, 1) > 0)
+            messages.put(AgentConversationCodec.userTextMessage("next"))
+            assertTrue(AgentToolOutputFolder.fold(messages, 1).changedMessages > 0)
             assertEquals(signedBefore, signed.toString())
         }
     }
 
-    @Test fun sessionInvalidatesObservedUsageOnlyWhenFoldingChangesHistoryAndSavesFoldedHistory() {
-        val messages = history(rounds = 3)
+    @Test fun sessionRetainsObservedUsageWhenFoldingAndSavesAMatchingBaseline() {
+        val messages = history(rounds = 3, endTurn = false)
         val journal = JSONArray((0 until messages.length()).map(messages::getJSONObject))
         val journalBefore = journal.toString()
         val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "key", model = "fixture", systemPrompt = "",
@@ -173,10 +191,15 @@ class AgentToolOutputFolderTest {
         session.prepareRequest(JSONArray())
         assertEquals(90_000, session.effectiveTokens())
         for (i in 4..8) appendExchange(messages, i, "x".repeat(8_000))
-        val rawTokens = AgentTokenEstimator.messages(messages)
+        messages.put(AgentConversationCodec.userTextMessage("next"))
+        val expected = JSONArray(messages.toString())
+        val saved = AgentToolOutputFolder.fold(expected, 1).savedTokens
+        val beforeFold = session.effectiveTokens()
         session.prepareRequest(JSONArray())
-        assertTrue(session.effectiveTokens() < rawTokens)
-        assertTrue(session.effectiveTokens() < 90_000)
+        assertEquals(beforeFold - saved, session.effectiveTokens())
+        session.checkpoint()
+        assertTrue(session.snapshot()!!.tokenBaseline!!.matches(session.snapshot()!!.messages, config))
+        assertTrue(session.effectiveTokens() > AgentTokenEstimator.messages(messages))
         session.captureRequest()
         session.observeInputTokens(12_345)
         session.prepareRequest(JSONArray())
@@ -191,10 +214,11 @@ class AgentToolOutputFolderTest {
         assertEquals(journal.length(), snapshot.consumedTranscriptMessages)
     }
 
-    private fun history(rounds: Int = 8, output: String = "x".repeat(8_000)) = JSONArray()
+    private fun history(rounds: Int = 8, output: String = "x".repeat(8_000), endTurn: Boolean = true) = JSONArray()
         .put(JSONObject().put("role", "system").put("content", "fixed"))
         .put(AgentConversationCodec.userTextMessage("one task")).also { messages ->
             for (i in 1..rounds) appendExchange(messages, i, output)
+            if (endTurn) messages.put(AgentConversationCodec.userTextMessage("next task"))
         }
 
     private fun appendExchange(messages: JSONArray, round: Int, output: String) {

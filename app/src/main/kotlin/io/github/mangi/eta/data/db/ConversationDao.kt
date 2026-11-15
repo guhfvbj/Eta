@@ -237,7 +237,7 @@ internal interface ConversationDao : ChunkedTextDao {
     }
 
     @Transaction
-    suspend fun updateContextCheckpoint(conversationId: String, historyJson: String?, journalJson: String?) {
+    suspend fun updateContextCheckpoint(conversationId: String, historyJson: String?, journalJson: String?, runtimeStateJson: String? = null) {
         val previous = contextCheckpointRow(conversationId)
             ?: ConversationContextCheckpointEntity(conversationId, "[]")
         insertContextCheckpointRow(previous.copy(
@@ -245,6 +245,8 @@ internal interface ConversationDao : ChunkedTextDao {
                 ?: previous.historyJson,
             journalJson = journalJson?.let { storeText("conversation_context_checkpoints", conversationId, "journal", it) }
                 ?: previous.journalJson,
+            runtimeStateJson = runtimeStateJson?.let { storeText("conversation_context_checkpoints", conversationId, "runtime", it) }
+                ?: previous.runtimeStateJson,
         ))
     }
 

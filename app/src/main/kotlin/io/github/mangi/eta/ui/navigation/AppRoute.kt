@@ -110,6 +110,9 @@ sealed interface AppRoute : NavKey {
     data object TitleModel : AppRoute
 
     @Serializable
+    data object CompactionModel : AppRoute
+
+    @Serializable
     data object Tasks : AppRoute
 
     @Serializable
