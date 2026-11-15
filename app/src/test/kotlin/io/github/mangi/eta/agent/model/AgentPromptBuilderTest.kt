@@ -61,6 +61,7 @@ class AgentPromptBuilderTest {
         assertTrue(terminal.contains("environment=\"linux\""))
         assertTrue(terminal.contains("同一个物理文件夹"))
         assertTrue(terminal.contains("禁止在两个环境之间重复复制"))
+        assertTrue(terminal.contains("web_search、fetch_url"))
         assertFalse(terminal.contains("async=true"))
         assertFalse(terminal.contains("read_async_result"))
     }

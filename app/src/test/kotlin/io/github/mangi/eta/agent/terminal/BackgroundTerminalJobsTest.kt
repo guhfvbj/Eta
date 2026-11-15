@@ -28,6 +28,30 @@ class BackgroundTerminalJobsTest {
 
     @After fun closeHosts() { hosts.forEach { it.close() } }
 
+    @Test fun statusViewsIncludeBoundedTailAndElapsedTimeWithoutChangingReadOutput() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val started = JSONObject(jobs.start(supervisor,
+            "head -c 4000 /dev/zero | tr '\\000' x; printf THE_END", temporary.root.path,
+            "user", TerminalEnvironment.ANDROID, "尾部预览", 5000))
+        assertTrue(started.getLong("elapsed_ms") >= 0L)
+        val id = started.getString("job_id")
+        val waited = JSONObject(jobs.waitFor(id, 5000) { false })
+        assertFalse(waited.getBoolean("running"))
+        assertEquals(waited.getLong("completed_at") - waited.getLong("started_at"), waited.getLong("elapsed_ms"))
+        assertTrue(waited.getString("output_tail").endsWith("THE_END"))
+        assertTrue(waited.getString("output_tail").length <= 1024)
+        val listed = JSONObject(jobs.list(false)).getJSONArray("tasks").getJSONObject(0)
+        assertEquals(waited.getLong("elapsed_ms"), listed.getLong("elapsed_ms"))
+        assertEquals(waited.getString("output_tail"), listed.getString("output_tail"))
+        val read = JSONObject(jobs.read(id, 2048))
+        assertEquals(2048, read.getString("output").length)
+        assertTrue(read.getBoolean("output_truncated"))
+        assertFalse(read.has("output_tail"))
+        val stopped = JSONObject(jobs.stop(id))
+        assertEquals(waited.getString("output_tail"), stopped.getString("output_tail"))
+    }
+
     @Test fun commandContinuesAfterReplyAndItsResultIsVisibleToTheNextRun() {
         val supervisor = supervisor()
         val jobs = host(supervisor)

@@ -20,6 +20,67 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentParallelFileReadTest {
+    @Test fun duplicateReadCallIdentifiersKeepStableSerialExecution() {
+        val owner = Thread.currentThread()
+        val executed = mutableListOf<String>()
+        val harness = Harness(listOf(call("duplicate", "device_status"), call("duplicate", "web_search")), execute = {
+            assertSame(owner, Thread.currentThread())
+            executed += it.id
+            AgentModelClient.ToolResult("ok")
+        })
+        harness.loop.run()
+        assertEquals(listOf("duplicate", "duplicate_1"), executed)
+    }
+
+    @Test fun mixedDeviceWebAndFileReadsShareTheFourWorkerLimit() {
+        val names = listOf("device_status", "web_search", "read_file", "get_current_context",
+            "fetch_url", "skills_read", "get_display_state", "search_calendar_events")
+        val active = AtomicInteger()
+        val peak = AtomicInteger()
+        val waves = List(2) { CountDownLatch(4) }
+        val owner = Thread.currentThread()
+        val harness = Harness(names.mapIndexed { index, name -> call("mixed-$index", name) }, execute = {
+            assertNotSame(owner, Thread.currentThread())
+            val count = active.incrementAndGet()
+            peak.accumulateAndGet(count, ::maxOf)
+            try {
+                val wave = waves[it.id.removePrefix("mixed-").toInt() / 4]
+                wave.countDown()
+                assertTrue(wave.await(5, TimeUnit.SECONDS))
+                AgentModelClient.ToolResult("ok-${it.id}")
+            } finally { active.decrementAndGet() }
+        }, event = { assertSame(owner, Thread.currentThread()) })
+        harness.loop.run()
+        assertEquals(4, peak.get())
+        assertEquals(0, active.get())
+        assertEquals(names.size, harness.events.filterIsInstance<AgentEvent.ToolFinished>().size)
+    }
+
+    @Test fun sessionAndMutationToolsRemainBarriersForMixedReadBatches() {
+        val barriers = listOf("write_file", "edit_file", "terminal", "terminal_job", "terminal_daemon",
+            "tap", "tap_area", "observe_screen", "get_clipboard", "set_clipboard", "browser_use",
+            "memory_get", "character_memory_get", "tasks_list", "skills_install_from_github",
+            "conversation_history", "read_image", "mcp_server_read")
+        val calls = barriers.flatMapIndexed { index, barrier ->
+            listOf(call("device-$index", "device_status"), call("web-$index", "web_search"), call("barrier-$index", barrier))
+        }
+        val active = AtomicInteger()
+        val completed = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val owner = Thread.currentThread()
+        val harness = Harness(calls, execute = { current ->
+            if (current.id.startsWith("barrier-")) {
+                assertSame(owner, Thread.currentThread())
+                assertEquals(0, active.get())
+                assertTrue(calls.takeWhile { it.id != current.id }.all { it.id in completed })
+            }
+            active.incrementAndGet()
+            try { AgentModelClient.ToolResult("ok") }
+            finally { active.decrementAndGet(); completed += current.id }
+        })
+        harness.loop.run()
+        assertEquals(calls.size, completed.size)
+    }
+
     @Test fun allFiveReadToolsRunAtMostFourWideWithOrderedResultsAndSerializedUiEvents() {
         val names = listOf("read_file", "stat_file", "list_directory", "glob_files", "grep_files")
         val calls = List(10) { call("read-$it", names[it % names.size]) }

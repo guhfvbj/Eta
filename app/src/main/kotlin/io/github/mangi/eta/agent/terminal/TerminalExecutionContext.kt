@@ -33,24 +33,50 @@ internal data class TerminalExecutionContext(
         get() = LinuxEnvironmentPaths.rootfsReady(linuxRootfsPath)
 
     val linuxCommonToolsReady: Boolean
-        get() = AlpineEnvironmentPaths.commonToolsReady(linuxRootfsPath)
+        get() = linuxInventory().commonTools
 
     val linuxInstalledProfiles: List<String>
-        get() {
-            if (!linuxReady || linuxRootfsPath.isNullOrBlank()) return emptyList()
+        get() = linuxInventory().profiles
+
+    private data class LinuxInventory(val commonTools: Boolean, val profiles: List<String>)
+    private var inventory: LinuxInventory? = null
+    private var inventoryMarkers: List<Long> = emptyList()
+    private var inventoryCapturedAt = 0L
+    private val readinessMarkers by lazy {
+        if (linuxRootfsPath.isNullOrBlank()) emptyList() else
+            (listOf(LinuxEnvironmentPaths.READY_MARKER, AlpineEnvironmentPaths.COMMON_TOOLS_MARKER,
+                AlpineEnvironmentPaths.APK_ANALYSIS_MARKER) + LinuxPackageProfiles.ALL.map { it.markerName })
+                .map { File(linuxRootfsPath, it) }
+    }
+
+    /** 只 stat 完成标记；内容不变时不重复打开 profile 文件，TTL 兜底同时间戳替换。 */
+    @Synchronized
+    private fun linuxInventory(): LinuxInventory {
+        val markers = readinessMarkers.map { it.lastModified() }
+        val now = System.nanoTime()
+        inventory?.takeIf { markers == inventoryMarkers && now - inventoryCapturedAt in 0 until 2_000_000_000L }
+            ?.let { return it }
+        val profiles = if (!linuxReady || linuxRootfsPath.isNullOrBlank()) emptyList() else {
             val rootfs = File(linuxRootfsPath)
-            return buildList {
+            buildList {
                 LinuxPackageProfiles.ALL.forEach { profile ->
                     if (linuxPackageProfileReady(rootfs, profile)) add(profile.id)
                 }
                 if (linuxApkAnalysisReady(rootfs)) add(APK_ANALYSIS_PROFILE_ID)
             }
         }
+        return LinuxInventory(AlpineEnvironmentPaths.commonToolsReady(linuxRootfsPath), profiles).also {
+            inventory = it
+            inventoryMarkers = markers
+            inventoryCapturedAt = now
+        }
+    }
 
     fun identityFor(environment: TerminalEnvironment, rootAvailable: Boolean): String =
         if (environment.isLinux) linuxIdentity else if (rootAvailable) "root" else "user"
 
     fun description(rootAvailable: Boolean): String = buildString {
+        val inventory = linuxInventory()
         append("本次运行的命令和文件工具共用默认执行上下文：environment=android，identity=")
         append(identityFor(TerminalEnvironment.ANDROID, rootAvailable))
         append("，工作区=")
@@ -65,9 +91,9 @@ internal data class TerminalExecutionContext(
         append("，ready=")
         append(linuxReady)
         append("，common_tools=")
-        append(linuxCommonToolsReady)
+        append(inventory.commonTools)
         append("，profiles=")
-        append(linuxInstalledProfiles.ifEmpty { listOf("none") }.joinToString("/"))
+        append(inventory.profiles.ifEmpty { listOf("none") }.joinToString("/"))
         append("。Linux 工作区 ")
         append(JSONObject.quote(linuxWorkspacePath))
         append(" 映射宿主目录 ")

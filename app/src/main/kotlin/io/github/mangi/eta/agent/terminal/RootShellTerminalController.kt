@@ -29,6 +29,7 @@ internal class RootShellTerminalController(
         const val MAX_TIMEOUT_SECONDS = 180
         const val MAX_OUTPUT_CHARS = 16_000
         const val MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
+        const val SESSION_STREAM_MAX_BYTES = 1024 * 1024
     }
 
     private val sessions = linkedMapOf<String, TerminalSession>()
@@ -133,10 +134,10 @@ internal class RootShellTerminalController(
             stderr = stderr
         )
         session.stdoutThread = thread(name = "agent-terminal-session-stdout-$id", isDaemon = true) {
-            process.inputStream.use { input -> stdout.readFrom(input) }
+            process.inputStream.use { input -> stdout.readFrom(input, SESSION_STREAM_MAX_BYTES) }
         }
         session.stderrThread = thread(name = "agent-terminal-session-stderr-$id", isDaemon = true) {
-            process.errorStream.use { input -> stderr.readFrom(input) }
+            process.errorStream.use { input -> stderr.readFrom(input, SESSION_STREAM_MAX_BYTES) }
         }
         session.waiterThread = thread(name = "agent-terminal-session-waiter-$id", isDaemon = true) {
             runCatching { process.waitFor() }
@@ -152,7 +153,11 @@ internal class RootShellTerminalController(
 
         val mkdirDefault = if (safeCwd == androidWorkspace()) "mkdir -p ${shellQuote(safeCwd)} && " else ""
         val probeMarker = TerminalExecutionProbe.marker()
-        val setup = "${mkdirDefault}cd ${shellQuote(safeCwd)} && export TERM=dumb NO_COLOR=1 && {\n${TerminalExecutionProbe.script(probeMarker)}\n}"
+        // Probe set +H in a subshell: unsupported options terminate non-interactive POSIX sh.
+        val setup = "[ -r /etc/profile ] && . /etc/profile 2>/dev/null || true; " +
+            "[ -r \"\$HOME/.profile\" ] && . \"\$HOME/.profile\" 2>/dev/null || true; " +
+            "stty -echo 2>/dev/null || true; (set +H) 2>/dev/null && set +H; " +
+            "${mkdirDefault}cd ${shellQuote(safeCwd)} && export TERM=dumb NO_COLOR=1 && {\n${TerminalExecutionProbe.script(probeMarker)}\n}"
         val setupResult = runSessionCommand(session, setup, timeoutMs = 5_000)
         if (setupResult.exitCode != 0 || setupResult.timedOut) {
             closeSession(id)
@@ -390,7 +395,7 @@ internal class RootShellTerminalController(
             logger.warn(logMessage)
         }
         if (result.cwd != null) session.cwd = result.cwd
-        if (result.timedOut) {
+        if (result.timedOut || session.closed) {
             closeSession(session.id)
         }
         val rawStdout = if (mergeStderr && result.stderr.isNotBlank()) {
@@ -409,14 +414,14 @@ internal class RootShellTerminalController(
             .put("environment", session.environment.wireName)
             .put("cwd", session.cwd)
             .put("runtime", session.runtime ?: JSONObject.NULL)
-            .put("status", when { result.timedOut -> "timed_out"; session.closed -> "cancelled"; result.exitCode == 0 -> "exited"; else -> "failed" })
+            .put("status", when { result.timedOut -> "timed_out"; result.stdoutTruncated -> "failed"; session.closed -> "cancelled"; result.exitCode == 0 -> "exited"; else -> "failed" })
             .put("exit_code", result.exitCode)
             .put("timed_out", result.timedOut)
             .put("stdout", stdout)
             .put("stderr", stderr)
-            .put("stdout_truncated", rawStdout.length > MAX_OUTPUT_CHARS)
-            .put("stderr_truncated", !mergeStderr && result.stderr.length > MAX_OUTPUT_CHARS)
-            .put("output_truncated", rawStdout.length > MAX_OUTPUT_CHARS || (!mergeStderr && result.stderr.length > MAX_OUTPUT_CHARS))
+            .put("stdout_truncated", result.stdoutTruncated || rawStdout.length > MAX_OUTPUT_CHARS || (mergeStderr && result.stderrTruncated))
+            .put("stderr_truncated", !mergeStderr && (result.stderrTruncated || result.stderr.length > MAX_OUTPUT_CHARS))
+            .put("output_truncated", result.stdoutTruncated || result.stderrTruncated || rawStdout.length > MAX_OUTPUT_CHARS || result.stderr.length > MAX_OUTPUT_CHARS)
             .put("session_closed", result.timedOut || session.closed)
             .let { TerminalCommandDiagnostics.apply(it, executionContext.linuxReady, timeout) }
             .toString()
@@ -440,12 +445,7 @@ internal class RootShellTerminalController(
             val marker = SessionStatusProtocol.newMarker()
             val stdoutStart = session.stdout.text().length
             val stderrStart = session.stderr.text().length
-            val commandBlock = buildString {
-                append(command)
-                append('\n')
-                append(SessionStatusProtocol.statusCommand(marker))
-                append('\n')
-            }
+            val commandBlock = SessionStatusProtocol.commandLine(marker, command) + "\n"
             runCatching {
                 session.process.outputStream.write(commandBlock.toByteArray(Charsets.UTF_8))
                 session.process.outputStream.flush()
@@ -463,27 +463,40 @@ internal class RootShellTerminalController(
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(1_000, MAX_TIMEOUT_SECONDS * 1000).toLong())
             while (System.nanoTime() < deadline) {
                 val stdoutDelta = session.stdout.text().drop(stdoutStart)
-                if (session.closed || !session.process.isAlive) {
+                if (session.stdout.isTruncated()) {
+                    // The bounded head may have dropped the marker. Fail closed instead of
+                    // waiting for a false timeout or reusing a desynchronized session.
+                    session.closed = true
+                    processSupervisor.terminateProcessTree(session.process)
+                    session.stdoutThread.join(25)
+                    session.stderrThread.join(25)
                     return SessionCommandResult(
                         exitCode = -1,
-                        stdout = stdoutDelta.trimEnd(),
-                        stderr = session.stderr.text().drop(stderrStart).ifBlank { "terminal session 已关闭" }.trimEnd(),
+                        stdout = session.stdout.text().drop(stdoutStart).trimEnd(),
+                        stderr = session.stderr.text().drop(stderrStart).trimEnd() + "\n会话输出超过上限，已关闭；大量输出请使用 terminal_job 或重定向至文件。",
                         cwd = session.cwd,
-                        timedOut = false
+                        timedOut = false,
+                        stdoutTruncated = true,
+                        stderrTruncated = session.stderr.isTruncated(),
                     )
                 }
-                val status = stdoutDelta.lineSequence()
-                    .firstOrNull { SessionStatusProtocol.isStatusLine(it, marker) }
-                    ?.let { SessionStatusProtocol.parseStatusLine(it, marker) }
+                val markerStart = if (stdoutDelta.startsWith("$marker:")) 0 else
+                    stdoutDelta.indexOf("\n$marker:").let { if (it < 0) -1 else it + 1 }
+                val markerEnd = if (markerStart >= 0) stdoutDelta.indexOf('\n', markerStart) else -1
+                val status = if (markerEnd >= 0) {
+                    SessionStatusProtocol.parseStatusLine(stdoutDelta.substring(markerStart, markerEnd), marker)
+                } else null
                 if (status != null) {
+                    // stdout/stderr readers are independent. Allow the stderr tail to drain,
+                    // extending the short grace only if bytes are still arriving.
+                    val stderrBytes = session.stderr.totalBytesRead()
+                    Thread.sleep(10)
+                    if (session.stderr.totalBytesRead() != stderrBytes) Thread.sleep(10)
                     val exitCode = status.exitCode
                     val cwd = status.cwd ?: session.cwd
-                    val cleanedStdout = stdoutDelta
-                        .lineSequence()
-                        .filterNot { SessionStatusProtocol.isStatusLine(it, marker) }
-                        .joinToString("\n")
-                        .trimEnd()
+                    val cleanedStdout = stdoutDelta.take(markerStart).trimEnd()
                     val stderrDelta = session.stderr.text().drop(stderrStart).trimEnd()
+                    val stderrTruncated = session.stderr.isTruncated()
                     session.stdout.clear()
                     session.stderr.clear()
                     return SessionCommandResult(
@@ -491,10 +504,21 @@ internal class RootShellTerminalController(
                         stdout = cleanedStdout,
                         stderr = stderrDelta,
                         cwd = cwd,
-                        timedOut = false
+                        timedOut = false,
+                        stderrTruncated = stderrTruncated,
                     )
                 }
-                Thread.sleep(50)
+                if (session.closed || !session.process.isAlive) {
+                    return SessionCommandResult(
+                        exitCode = -1,
+                        stdout = stdoutDelta.trimEnd(),
+                        stderr = session.stderr.text().drop(stderrStart).ifBlank { "terminal session 已关闭" }.trimEnd(),
+                        cwd = session.cwd,
+                        timedOut = false,
+                        stderrTruncated = session.stderr.isTruncated(),
+                    )
+                }
+                Thread.sleep(20)
             }
 
             session.closed = true
@@ -504,7 +528,9 @@ internal class RootShellTerminalController(
                 stdout = session.stdout.text().drop(stdoutStart).trimEnd(),
                 stderr = session.stderr.text().drop(stderrStart).ifBlank { "命令执行超时" }.trimEnd(),
                 cwd = session.cwd,
-                timedOut = true
+                timedOut = true,
+                stdoutTruncated = session.stdout.isTruncated(),
+                stderrTruncated = session.stderr.isTruncated(),
             )
         }
     }
@@ -793,7 +819,9 @@ internal class RootShellTerminalController(
         val stdout: String,
         val stderr: String,
         val cwd: String?,
-        val timedOut: Boolean
+        val timedOut: Boolean,
+        val stdoutTruncated: Boolean = false,
+        val stderrTruncated: Boolean = false,
     )
 
     private class TerminalSession(

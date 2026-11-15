@@ -117,6 +117,7 @@ internal class AgentLocalTools(
     private val lsposedAvailable: () -> Boolean = { EtaApp.serviceInstance != null },
     private val guiControl: GuiControlCoordinator.RunControl? = null,
     browserSession: AgentBrowserSession? = null,
+    private val onRootChecked: () -> Unit = {},
 ) : AgentModelClient.ToolExecutor, AutoCloseable {
 
     private val closed = AtomicBoolean(false)
@@ -138,11 +139,12 @@ internal class AgentLocalTools(
         localNetworkAccess = { LocalNetworkPermission.accessState(context).name.lowercase(Locale.ROOT) },
         runtimeConfig = { runBlocking { WebToolsSettingsRepository.resolveRuntimeConfig(context) } },
     )
+    private val runSharedMounts by lazy { SharedFolderMounts.current() }
     val terminalExecutionContext = LinuxEnvironmentSettingsRepository.current(context).terminalEnvironment.let { environment ->
         TerminalExecutionContext(
             linuxEnvironment = environment,
             linuxRootfsPath = LinuxEnvironmentPaths.rootfsDir(context, checkNotNull(environment.linuxDistribution)).absolutePath,
-            sharedMounts = SharedFolderMounts.current(),
+            sharedMounts = runSharedMounts,
         )
     }
     private val terminalController = RootShellTerminalController(
@@ -154,10 +156,10 @@ internal class AgentLocalTools(
             logger = logger,
             recordsFile = DetachedTaskSupervisor.defaultRecordsFile(context),
             linuxRootfsPath = terminalExecutionContext.linuxRootfsPath,
-            linuxSharedMountsProvider = { SharedFolderMounts.current() },
+            linuxSharedMountsProvider = { runSharedMounts },
             rootAvailable = rootAvailable,
         ),
-        linuxSharedMountsProvider = { SharedFolderMounts.current() },
+        linuxSharedMountsProvider = { runSharedMounts },
     )
 
     private val publishedObservation = AtomicReference(PublishedObservation())
@@ -297,7 +299,9 @@ internal class AgentLocalTools(
                         ?: textResult(errorResult("UNKNOWN_TOOL", "未知设备工具"))
                 "read_image" -> fileVisionTool { imageTools.readImage(args) }
                 in AgentTerminalToolCatalog.names -> textResult(terminalTool {
-                    if (toolCall.name == "terminal" && args.optString("action").equals("check_root", ignoreCase = true)) checkRoot()
+                    if (toolCall.name == "terminal" && args.optString("action").equals("check_root", ignoreCase = true)) {
+                        try { checkRoot() } finally { onRootChecked() }
+                    }
                     else terminalController.executeTool(toolCall.name, args)
                 })
                 in AgentFileToolCatalog.names -> textResult(terminalTool { terminalController.fileTool(toolCall.name, args) })

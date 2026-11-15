@@ -15,6 +15,67 @@ class RootShellTerminalControllerTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
+    @Test fun sessionEvalHandlesMultilineHeredocEmptyStdinAndKeepsCwd() {
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        val directory = temporaryFolder.newFolder("child")
+        try {
+            val opened = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("action", "open").put("cwd", temporaryFolder.root.path)))
+            assertTrue(opened.toString(), opened.getBoolean("ok"))
+            assertTrue(opened.getJSONObject("runtime").getInt("uid") >= 0)
+            val id = opened.getString("session_id")
+            val result = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id)
+                .put("command", "cd child\ncat </dev/null\ncat <<'EOF'\nline 'one'\nline two\nEOF\nexport ETA_MULTILINE=kept\n# trailing comment")))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertEquals("line 'one'\nline two", result.getString("stdout"))
+            assertEquals(directory.canonicalPath, result.getString("cwd"))
+            val next = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id)
+                .put("command", "printf '%s:%s:%s' \"\$ETA_MULTILINE\" \"\$TERM\" \"\$NO_COLOR\"")))
+            assertEquals("kept:dumb:1", next.getString("stdout"))
+            assertEquals(directory.canonicalPath, next.getString("cwd"))
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun sessionWaitsForCompleteStatusWithoutLeadingNewline() {
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        val directory = temporaryFolder.newFolder("split-status")
+        try {
+            val id = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("action", "open").put("cwd", temporaryFolder.root.path))).getString("session_id")
+            // Override only the protocol's printf: remove its initial newline and delay cwd.
+            val command = "printf() { format=\${1#??}; command printf \"\${format%??}\" \"\$2\" ''; " +
+                "sleep 0.08; command printf '%s\\n' \"\$3\"; }; cd split-status"
+            val result = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id).put("command", command)))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertEquals("", result.getString("stdout"))
+            assertEquals(directory.canonicalPath, result.getString("cwd"))
+            val next = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id).put("command", "pwd")))
+            assertEquals(directory.canonicalPath, next.getString("stdout"))
+            assertEquals(directory.canonicalPath, next.getString("cwd"))
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun sessionDrainsStderrTailAndReportsBoundedOutputTruncation() {
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        try {
+            val id = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("action", "open").put("cwd", temporaryFolder.root.path))).getString("session_id")
+            repeat(6) { index ->
+                val result = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id)
+                    .put("command", "cat </dev/null; printf tail-$index >&2")))
+                assertTrue(result.toString(), result.getBoolean("ok"))
+                assertEquals("tail-$index", result.getString("stderr"))
+            }
+            val result = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id)
+                .put("command", "head -c 1100000 /dev/zero | tr '\\000' x")))
+            assertTrue(result.toString(), result.getBoolean("stdout_truncated"))
+            assertTrue(result.getBoolean("output_truncated"))
+            assertTrue(result.getBoolean("session_closed"))
+            assertFalse(result.getBoolean("timed_out"))
+            assertTrue(result.getString("stdout").startsWith("xxxx"))
+        } finally { controller.closeAll() }
+    }
+
     @Test
     fun sessionExecKeepsShellEnvironment() {
         val controller = RootShellTerminalController(NoopLogger)

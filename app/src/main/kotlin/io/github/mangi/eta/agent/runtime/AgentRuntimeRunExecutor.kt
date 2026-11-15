@@ -31,6 +31,7 @@ import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
 import io.github.mangi.eta.agent.tool.AgentLocalTools
 import io.github.mangi.eta.agent.tool.AgentToolRequirements
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
+import io.github.mangi.eta.agent.tool.AgentToolCapabilitiesCache
 import io.github.mangi.eta.agent.tool.PendingSkillConflictCapabilityParser
 import io.github.mangi.eta.agent.tool.ToolExecutionDecision
 import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
@@ -87,6 +88,7 @@ internal class AgentRuntimeRunExecutor(
         var cancelled = false
         var checkpointRecorder: AgentRunCheckpointRecorder? = null
         val timing = AgentRunTiming(AndroidAgentLogger)
+        val capabilities = AgentToolCapabilitiesCache({ AgentToolCapabilities.capture(appContext) })
 
         // 失败清理需要在 try 外拿到会话 id。
         var memoryConversationId: String? = null
@@ -183,6 +185,7 @@ internal class AgentRuntimeRunExecutor(
             val executor = AgentLocalTools(
                 context = appContext,
                 logger = AndroidAgentLogger,
+                onRootChecked = capabilities::invalidate,
                 browserRunId = request.runId,
                 browserSession = BrowserSessionRegistry.get(browserKey),
                 guiControl = guiRun,
@@ -301,7 +304,7 @@ internal class AgentRuntimeRunExecutor(
                     }
                     AgentRuntimePolicy.constrain(rawSubagentConfig, currentPermissions())
                 },
-                capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
+                capabilitiesProvider = capabilities,
                 baseToolExecutor = routingExecutor,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
@@ -401,7 +404,7 @@ internal class AgentRuntimeRunExecutor(
                     AgentRunCheckpointStore.saveTranscript(appContext, request.runId, transcript)
                     session.updateTranscript(transcript)
                 },
-                capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
+                capabilitiesProvider = capabilities,
                 prompt = request.prompt,
                 assistantScreenContext = request.assistantScreenContext,
                 toolExecutor = runToolExecutor,

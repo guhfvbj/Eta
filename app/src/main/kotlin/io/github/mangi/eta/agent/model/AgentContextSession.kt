@@ -43,6 +43,7 @@ internal class AgentContextSession(
         message.optInt("_eta_compacted_users") + if (message.optString("role") == "user") 1 else 0
     }
     private var committedSnapshot: AgentContextSnapshot? = null
+    private var committedEncoding: String? = null
 
     fun snapshot(): AgentContextSnapshot? = committedSnapshot
 
@@ -94,10 +95,17 @@ internal class AgentContextSession(
     /** Also used on cancellation/failure: never invoke the provider or check cancellation here. */
     fun checkpoint() {
         val snapshot = createSnapshot(messages)
-        snapshot.encode()
+        val encoded = snapshot.encode()
         // Keep a safe terminal snapshot even if durable I/O fails. Compaction itself remains atomic.
         committedSnapshot = snapshot
+        saveContext(snapshot, encoded)
+    }
+
+    private fun saveContext(snapshot: AgentContextSnapshot, encoded: String) {
+        if (encoded == committedEncoding) return
         onContextSnapshot(snapshot)
+        // Failed persistence must remain retryable, even when the in-memory snapshot is current.
+        committedEncoding = encoded
     }
 
     private fun tokenBaseline(candidate: JSONArray): AgentContextTokenBaseline {
@@ -188,8 +196,7 @@ internal class AgentContextSession(
             }
             val snapshot = try {
                 createSnapshot(candidate).also {
-                    it.encode()
-                    onContextSnapshot(it)
+                    saveContext(it, it.encode())
                 }
             } catch (failure: Exception) {
                 baseline = previousBaseline

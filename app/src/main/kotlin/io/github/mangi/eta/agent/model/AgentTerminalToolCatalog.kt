@@ -10,11 +10,9 @@ internal object AgentTerminalToolCatalog {
         tools.put(
             AgentToolSchema.function(
                 name = "terminal",
-                description = "执行 Shell 命令，直接提供 command 即可。默认环境、身份和工作目录见本次运行上下文。" +
-                    "开发命令（python3/git/node/rg 等）请显式传 environment=linux；Android 的 BusyBox ash 不提供完整开发工具。exit=127 时查看 environment_hint，已有 session_id 不会因 environment 参数切换环境。" +
-                    "需要保留 cd、环境变量等 Shell 状态时，先 action=open，再通过 session_id 执行命令，最后 action=close。" +
-                    "单次命令结束后进程会回收，勿用 & 挂后台；耗时或后台命令使用 terminal_job，跨运行的后台服务使用 terminal_daemon。" +
-                    "已知文件的读写、编辑和搜索优先使用对应文件工具。",
+                description = "执行 Shell 命令，默认环境、身份与目录见运行上下文；已知文件优先用文件工具。" +
+                    "保留 Shell 状态用 open → session_id exec → close，会话不随 environment 参数切换；exit=127 时查看 environment_hint。" +
+                    "勿用 & 挂后台；耗时命令用 terminal_job，跨运行服务用 terminal_daemon。",
                 parameters = parameters(
                     commandProperties()
                         .put("action", action("exec", "open", "close", "check_root")
@@ -26,10 +24,9 @@ internal object AgentTerminalToolCatalog {
         tools.put(
             AgentToolSchema.function(
                 name = "terminal_job",
-                description = "启动可在本次回复结束后继续运行的后台命令。start 立即返回 job_id，完成或失败时发送系统通知；返回的 completion_notifications_enabled 表示当前通知是否可用。" +
-                    "list 查看任务，read 查看当前状态和日志，wait 在需要结果时等待，stop 终止任务。" +
-                    "日志保存为文件，read 返回 output_path；预览截断时可用 read_file 分页读取完整日志。" +
-                    "后台命令使用独立 Shell；不继承 terminal 会话。启动后可继续其他工作或回复用户，不必轮询等待。",
+                description = "后台命令使用独立 Shell，不继承 terminal 会话，回复后继续执行。start 返回 job_id；完成或失败时通知，通知可用性见 completion_notifications_enabled。" +
+                    "list 查状态，read 读日志，依赖结果时 wait，stop 终止；状态含 elapsed_ms 和精简 output_tail。" +
+                    "完整日志在 output_path，截断时用 read_file 分页读取；启动后可继续工作或回复，无需轮询。",
                 parameters = parameters(
                     executionProperties()
                         .put("action", action("start", "list", "read", "wait", "stop"))
@@ -62,7 +59,7 @@ internal object AgentTerminalToolCatalog {
     }
 
     private fun executionProperties(): JSONObject = JSONObject()
-        .put("environment", text("执行环境（默认 android）：操作 Android 系统/应用/设备状态用 android；Git、写代码、运行 Python/Node 脚本、jq/rg/curl、包管理与 APK 分析请显式传 linux。工作区与共享目录在两端映射同一物理文件夹，按命令性质选环境并使用对应路径。")
+        .put("environment", text("默认 android，用于系统/应用/设备；Git、Python/Node、jq/rg/curl、包管理、构建和 APK 分析显式用 linux。共享目录映射与路径见运行上下文。")
             .put("enum", JSONArray(listOf("android", "linux"))))
         .put("identity", text("可选的宿主执行身份；Android 已确认 Root 授权时默认 root，否则 user。已授权时无需先尝试 user 或重复检测；显式 user 使用 Eta App UID。Linux 内模拟 root 不提供 Android 特权。")
             .put("enum", JSONArray(listOf("user", "root"))))

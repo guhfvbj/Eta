@@ -16,6 +16,49 @@ class AgentContextRecoveryTest {
         contextWindow = 900_000,
     )
 
+    @Test fun identicalCheckpointsAreSkippedButUsageMessagesAndTranscriptChangesAreSaved() {
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", "fixed"))
+            .put(AgentConversationCodec.userTextMessage("hello"))
+        val saved = mutableListOf<AgentContextSnapshot>()
+        var transcriptSize = 0
+        val session = AgentContextSession(config.copy(autoCompactionEnabled = false), messages, 1,
+            "operation", provider { _, _ -> error("No compaction expected") }, AgentRunController(),
+            { emptySet() }, {}, saved::add, transcriptSize = { transcriptSize })
+        session.checkpoint()
+        session.checkpoint()
+        session.compact()
+        assertEquals(1, saved.size)
+        session.captureRequest()
+        session.observeInputTokens(1234)
+        session.compact()
+        assertEquals(2, saved.size)
+        assertEquals(1234, saved.last().lastContextTokens)
+        messages.put(AgentConversationCodec.userTextMessage("new turn"))
+        session.userAppended()
+        session.compact()
+        assertEquals(3, saved.size)
+        assertEquals(2, saved.last().consumedUserTurns)
+        assertEquals(1, saved.last().consumedSupplementCount)
+        transcriptSize++
+        session.compact()
+        session.checkpoint()
+        assertEquals(4, saved.size)
+        assertEquals(1, saved.last().consumedTranscriptMessages)
+        assertEquals(saved.last().encode(), session.snapshot()!!.encode())
+    }
+
+    @Test fun failedSnapshotPersistenceIsRetriedBeforeDeduplication() {
+        var attempts = 0
+        val session = AgentContextSession(config.copy(autoCompactionEnabled = false), messages(), 1,
+            "operation", provider { _, _ -> error("No compaction expected") }, AgentRunController(),
+            { emptySet() }, {}, { if (++attempts == 1) error("storage unavailable") })
+        assertThrows(IllegalStateException::class.java) { session.checkpoint() }
+        assertNotNull(session.snapshot())
+        session.checkpoint()
+        session.compact()
+        assertEquals(2, attempts)
+    }
+
     @Test
     fun unknownWindowStillRunsButNeverAutoCompacts() {
         for (window in listOf(null, 0, -1)) {

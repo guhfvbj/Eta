@@ -270,16 +270,15 @@ internal class AgentLoop(
 
             if (toolCalls.isNotEmpty()) {
                 publishTranscript() // Persist the call before entering a potentially interrupted tool batch.
-                val outcomes = executeToolBatch(round, toolCalls, providerResponse.stopReason)
+                val outcomes = executeToolBatch(round, toolCalls, providerResponse.stopReason,
+                    allowParallel = hasUnambiguousToolCalls(assistantMessage))
                 // Completed results were journaled immediately, including before a
                 // cancellation. Only the model projection is ordered by call position.
                 val resultStart = messages.length() - outcomes.size
                 outcomes.forEachIndexed { index, outcome ->
                     messages.put(resultStart + index, AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
                 }
-                publishTranscript()
                 appendToolImages(round, outcomes)
-                publishTranscript()
                 round += 1
                 toolRounds += 1
                 continue
@@ -299,7 +298,6 @@ internal class AgentLoop(
                 error("模型接口第 $round 轮返回为空${finishReason.takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty()}")
             }
 
-            publishTranscript()
             if (purpose.allowsTools) context.compact(final = true)
             onEvent(AgentEvent.RunFinished(round = round, contentChars = content.length))
             return Result(
@@ -371,6 +369,7 @@ internal class AgentLoop(
         round: Int,
         toolCalls: List<AgentModelClient.ToolCall>,
         stopReason: AssistantStopReason,
+        allowParallel: Boolean,
     ): List<ToolOutcome> {
         if (stopReason != AssistantStopReason.TOOL_USE) {
             return toolCalls.map { call ->
@@ -391,7 +390,7 @@ internal class AgentLoop(
         var index = 0
         while (index < toolCalls.size) {
             val current = toolCalls[index]
-            if (current.name == AgentSubagentToolCatalog.TOOL_NAME && current.name in availableToolNames) {
+            if (allowParallel && current.name == AgentSubagentToolCatalog.TOOL_NAME && current.name in availableToolNames) {
                 val parallelBatch = mutableListOf<AgentModelClient.ToolCall>()
                 while (
                     index < toolCalls.size &&
@@ -406,10 +405,13 @@ internal class AgentLoop(
                 } else {
                     outcomes += executeParallelTools(round, parallelBatch)
                 }
-            } else if (current.name in PARALLEL_FILE_READ_TOOLS && current.name in availableToolNames) {
+            } else if (allowParallel && current.name in PARALLEL_READ_TOOLS && current.name in availableToolNames) {
                 val batch = mutableListOf<AgentModelClient.ToolCall>()
+                // Repeated time/location snapshots retain source order (including steering
+                // between snapshots); a snapshot may still share a batch with other reads.
                 while (index < toolCalls.size && batch.size < 4 &&
-                    toolCalls[index].name in PARALLEL_FILE_READ_TOOLS && toolCalls[index].name in availableToolNames) {
+                    toolCalls[index].name in PARALLEL_READ_TOOLS && toolCalls[index].name in availableToolNames &&
+                    (toolCalls[index].name != "get_current_context" || batch.none { it.name == "get_current_context" })) {
                     batch += toolCalls[index++].copy(round = round)
                 }
                 outcomes += if (batch.size == 1) listOf(executeTool(round, batch.single())) else executeParallelTools(round, batch)
@@ -419,6 +421,20 @@ internal class AgentLoop(
             }
         }
         return outcomes
+    }
+
+    /** Repaired/ambiguous provider calls keep their original serial execution contract. */
+    private fun hasUnambiguousToolCalls(message: JSONObject): Boolean {
+        val calls = message.optJSONArray("tool_calls") ?: return false
+        val ids = mutableSetOf<String>()
+        for (index in 0 until calls.length()) {
+            val call = calls.optJSONObject(index) ?: return false
+            val id = call.optString("id")
+            if (id.isBlank() || !ids.add(id) || call.optJSONObject("function")?.optString("name").isNullOrBlank()) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun executeParallelTools(
@@ -691,9 +707,25 @@ internal class AgentLoop(
     private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
 
     private companion object {
-        // Explicitly exclude shell, GUI, browser, memories and MCP: those executors
-        // may own mutable sessions even when a particular action sounds read-only.
-        val PARALLEL_FILE_READ_TOOLS = setOf("read_file", "stat_file", "list_directory", "glob_files", "grep_files")
+        // Explicit opt-in only: shell, GUI, images, mutable memory/tasks and MCP remain barriers.
+        val PARALLEL_READ_TOOLS = setOf(
+            "read_file", "stat_file", "list_directory", "glob_files", "grep_files",
+            "get_current_context", "search_apps", "device_status", "network_info", "inspect_app",
+            "top_memory_apps", "top_storage_apps", "get_display_state", "get_sound_state",
+            "get_flashlight", "get_hotspot", "get_device_state", "get_current_location",
+            "get_device_environment", "recent_app_activity", "app_usage_summary",
+            "search_notification_history", "recent_notifications", "list_alarms", "list_active_timers",
+            "get_health_summary", "search_clipboard_history", "list_calendars", "read_calendar_event",
+            "search_calendar_events", "web_search", "fetch_url", "skills_list", "skills_read",
+            "skills_read_resource", "skills_list_curated", "skills_inspect_github", "read_personal_item",
+            "search_bills", "search_todos", "search_calendar_todos", "search_memory_collections",
+            "search_daily_events", "search_flights", "search_hotels", "search_trains", "summarize_bills",
+            "search_media", "search_audio", "search_recordings", "search_files", "search_contacts",
+            "search_call_history", "search_messages", "search_downloads", "search_notes",
+            "search_coloros_recordings", "search_recording_summaries", "search_system_memories",
+            "search_saved_places", "search_personal_orders", "search_qq_chat_images", "search_wechat_chat_images",
+            "wifi_credentials", "get_setting", "read_sms_code", "get_logcat",
+        )
     }
 
     private class TurnMetricsAccumulator {

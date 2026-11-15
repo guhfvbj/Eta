@@ -47,7 +47,7 @@ internal class BackgroundTerminalJobs(
             }
             is DaemonStartResult.Started -> {
                 monitor()
-                taskJson(result.task).put("action", "start").toString()
+                taskJson(result.task, includeOutputTail = false).put("action", "start").toString()
             }
         }
     }
@@ -63,7 +63,7 @@ internal class BackgroundTerminalJobs(
         val task = supervisor.findTask(id)?.takeIf { it.commandTask }
             ?: return failure("JOB_NOT_FOUND", "未找到后台命令，请用 terminal_job 的 list 查看任务")
         val logs = supervisor.readLogs(id, maxBytes)
-        val result = taskJson(task).put("action", "read")
+        val result = taskJson(task, includeOutputTail = false).put("action", "read")
         if (!logs.ok) return result.put("ok", false).put("code", logs.code).put("message", logs.message).toString()
         return result.put("output", logs.text).put("output_truncated", logs.truncated).toString()
     }
@@ -161,15 +161,22 @@ internal class BackgroundTerminalJobs(
         waitLock.withLock { changed.signalAll() }
     }
 
-    private fun taskJson(task: DetachedTask): JSONObject = base("status")
+    private fun taskJson(task: DetachedTask, includeOutputTail: Boolean = true): JSONObject = base("status")
         .put("job_id", task.id).put("description", task.description)
         .put("environment", task.environment.wireName).put("identity", task.identity).put("cwd", task.cwd)
         .put("status", task.commandStatus).put("running", task.completedAt == null)
         .put("started_at", task.startedAt).put("completed_at", task.completedAt ?: JSONObject.NULL)
+        .put("elapsed_ms", ((task.completedAt ?: System.currentTimeMillis()) - task.startedAt).coerceAtLeast(0L))
         .put("exit_code", task.exitCode ?: JSONObject.NULL).put("end_reason", task.endReason ?: JSONObject.NULL)
         .put("output_path", supervisor.hostDaemonPath(task, task.logPath)).put("output_environment", "android")
         .put("timeout_ms", task.timeoutMs)
         .put("completion_notifications_enabled", completionNotificationsEnabled())
+        .also { result ->
+            if (includeOutputTail) {
+                val logs = supervisor.readLogs(task.id, 1_024)
+                if (logs.ok) result.put("output_tail", logs.text)
+            }
+        }
 
     private fun base(action: String) = JSONObject().put("ok", true).put("tool", "terminal_job").put("action", action)
     private fun failure(code: String, message: String) = JSONObject().put("ok", false).put("tool", "terminal_job")
