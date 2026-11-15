@@ -57,16 +57,23 @@ internal class McpRunSnapshot(
     override fun openedGroupIdsFrom(toolNames: Collection<String>): Set<String> =
         toolNames.mapNotNullTo(linkedSetOf()) { byModelName[it]?.let { tool -> mcpGroupId(tool.server.id) } }
 
-    fun appendModelTools(destination: JSONArray) = appendTools(destination, openedGroupIds = null)
+    /** Only upfront full mounting is capped; the frozen catalog and progressive views stay complete. */
+    fun appendModelTools(destination: JSONArray) {
+        appendSchemas(destination, tools.take(MAX_RUN_TOOLS))
+    }
 
     override fun appendTools(
         destination: JSONArray,
         openedGroupIds: Set<String>?,
         toolAllowed: (String) -> Boolean,
     ) {
-        tools.filter {
+        appendSchemas(destination, tools.filter {
             toolAllowed(it.modelName) && (openedGroupIds == null || mcpGroupId(it.server.id) in openedGroupIds)
-        }.forEach { tool ->
+        })
+    }
+
+    private fun appendSchemas(destination: JSONArray, selectedTools: List<McpRunTool>) {
+        selectedTools.forEach { tool ->
             val description = buildString {
                 append("MCP 服务器「").append(tool.server.name).append("」提供的工具")
                 tool.definition.description.trim().takeIf { it.isNotBlank() }?.let {
@@ -109,7 +116,6 @@ internal class McpRunSnapshot(
                     configured
                 }
                 server.activeTools.forEach { tool ->
-                    if (projected.size >= MAX_RUN_TOOLS) return@forEach
                     projected += McpRunTool(
                         modelName = modelToolName(server.id, tool.name),
                         server = server,

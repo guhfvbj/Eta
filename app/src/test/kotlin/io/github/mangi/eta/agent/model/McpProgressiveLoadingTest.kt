@@ -97,6 +97,114 @@ class McpProgressiveLoadingTest {
     }
 
     @Test
+    fun groupAndSearchUnlockCompleteServersPast64AndCanMountMoreThan64Tools() {
+        val large = largeSnapshot()
+        val late = listOf(large.tools[71], large.tools.last())
+        val lateNames = large.tools.drop(48).map { it.modelName }.toSet()
+        for (search in listOf(false, true)) {
+            val opened = ConcurrentHashMap.newKeySet<String>()
+            val loader = McpProgressiveLoader(large, opened, search)
+            val calls = if (search) listOf(call("tools_search", JSONObject()
+                .put("query", "select:" + late.joinToString(",") { it.modelName }).toString()))
+            else late.map { call("tools_use_group", JSONObject().put("group", mcpGroupId(it.server.id)).toString()) }
+            calls.forEach { request ->
+                val payload = JSONObject(loader.execute(request).content)
+                assertTrue(payload.getBoolean("ok"))
+                assertEquals("next_turn", payload.getString("available"))
+                if (search) assertEquals(late.map { it.modelName }.toSet(), payload.getJSONArray("matches")
+                    .objects().map { it.getString("name") }.toSet())
+            }
+            assertEquals(setOf("mcp:three", "mcp:four"), opened)
+            assertEquals(lateNames, JSONArray().also { large.appendTools(it, opened) }.names())
+            assertTrue(large.searchCandidates(opened).map { it.name }.containsAll(late.map { it.modelName }))
+
+            for (id in listOf("one", "two")) {
+                assertTrue(JSONObject(loader.execute(call("tools_use_group", """{"group":"mcp:$id"}""")).content)
+                    .getBoolean("ok"))
+            }
+            val mounted = JSONArray().also { large.appendTools(it, opened) }
+            assertEquals(96, mounted.length())
+            assertEquals(large.tools.map { it.modelName }.toSet(), mounted.names())
+        }
+    }
+
+    @Test
+    fun modelLoopDiscoversAndExecutesLateToolsInGroupAndSearchModes() {
+        val large = largeSnapshot()
+        val allNames = large.tools.map { it.modelName }.toSet()
+        val thirdTail = large.tools[71]
+        val fourthTail = large.tools.last()
+        for (search in listOf(false, true)) {
+            val opened = ConcurrentHashMap.newKeySet<String>()
+            val loader = McpProgressiveLoader(large, opened, search)
+            val executed = mutableListOf<String>()
+            var round = 0
+            fun load(id: String) = if (search) call("tools_search",
+                JSONObject().put("query", "Server $id tool24").toString(), "load-$id")
+            else call("tools_use_group", """{"group":"mcp:$id"}""", "load-$id")
+
+            val result = AgentModelClient.complete(config, "use late servers", AgentModelClient.ToolExecutor {
+                if (it.name in McpProgressiveLoader.names) loader.execute(it) else {
+                    executed += it.name
+                    AgentModelClient.ToolResult("executed ${it.name}")
+                }
+            }, mcpProjection = large, mcpSearchEnabled = search, openedMcpGroupsProvider = { opened.toSet() },
+                provider = provider { request, _ ->
+                    val names = request.tools.names()
+                    val remaining = large.deferredGroups().filterNot { it.id in opened }
+                    val systems = request.messages.objects().filter { it.optString("role") == "system" }
+                        .joinToString("\n") { it.optString("content") }
+                    assertEquals(large.tools.filter { mcpGroupId(it.server.id) in opened }
+                        .map { it.modelName }.toSet(), names.intersect(allNames))
+                    if (remaining.isNotEmpty()) {
+                        val groupEnum = request.tools.objects().single {
+                            it.getJSONObject("function").getString("name") == "tools_use_group"
+                        }.getJSONObject("function").getJSONObject("parameters").getJSONObject("properties")
+                            .getJSONObject("group").getJSONArray("enum")
+                        assertEquals(remaining.map { it.id }.toSet(), (0 until groupEnum.length())
+                            .map { groupEnum.getString(it) }.toSet())
+                        remaining.forEach { assertTrue(systems.contains(it.id)) }
+                        assertEquals(search, "tools_search" in names)
+                    } else {
+                        assertTrue(names.intersect(McpProgressiveLoader.names).isEmpty())
+                        large.deferredGroups().forEach { assertFalse(systems.contains(it.id)) }
+                    }
+                    when (++round) {
+                        1 -> {
+                            assertTrue(names.intersect(allNames).isEmpty())
+                            response(calls = listOf(load("three")))
+                        }
+                        2 -> {
+                            assertEquals(24, names.intersect(allNames).size)
+                            assertTrue(thirdTail.modelName in names)
+                            assertFalse(fourthTail.modelName in names)
+                            response(calls = listOf(call(thirdTail.modelName, "{}", "third-tail"), load("four")))
+                        }
+                        3 -> {
+                            assertEquals(48, names.intersect(allNames).size)
+                            assertTrue(fourthTail.modelName in names)
+                            assertTrue(request.messages.toString().contains("executed ${thirdTail.modelName}"))
+                            response(calls = listOf(call(fourthTail.modelName, "{}", "fourth-tail"), load("one")))
+                        }
+                        4 -> {
+                            assertEquals(72, names.intersect(allNames).size)
+                            assertTrue(request.messages.toString().contains("executed ${fourthTail.modelName}"))
+                            response(calls = listOf(load("two")))
+                        }
+                        5 -> {
+                            assertEquals(96, names.intersect(allNames).size)
+                            response("done")
+                        }
+                        else -> error("Unexpected model round")
+                    }
+                })
+            assertEquals(5, round)
+            assertEquals("done", result.content)
+            assertEquals(listOf(thirdTail.modelName, fourthTail.modelName), executed)
+        }
+    }
+
+    @Test
     fun loaderFailsClosedOnDisabledSearchInvalidArgumentsAndDisallowedGroups() {
         val opened = ConcurrentHashMap.newKeySet<String>()
         val loader = McpProgressiveLoader(snapshot, opened, false) { it == first.modelName }
@@ -276,41 +384,52 @@ class McpProgressiveLoadingTest {
     }
 
     @Test
-    fun offModeSendsFullCatalogOnEveryRoundWithoutLoaderOrIndex() {
-        val full = JSONArray().also(snapshot::appendModelTools)
+    fun offModeSendsOnlyFirst64ToolsOnEveryRoundWithoutLoaderOrIndex() {
+        val large = largeSnapshot()
+        val full = JSONArray().also(large::appendModelTools)
+        val allNames = large.tools.map { it.modelName }.toSet()
+        val mountedNames = large.tools.take(64).map { it.modelName }.toSet()
+        assertEquals(64, full.length())
         var round = 0
         AgentModelClient.complete(config, "legacy", AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("ok") },
             additionalTools = full, provider = provider { request, _ ->
-                assertTrue(request.tools.names().containsAll(listOf(first.modelName, second.modelName)))
+                assertEquals(mountedNames, request.tools.names().intersect(allNames))
                 assertTrue(request.tools.names().intersect(McpProgressiveLoader.names).isEmpty())
                 assertFalse(request.messages.objects().filter { it.optString("role") == "system" }
                     .any { it.optString("content").contains("mcp:one") })
-                if (++round == 1) response(calls = listOf(call(first.modelName, "{}"))) else response("done")
+                if (++round == 1) response(calls = listOf(call(large.tools.first().modelName, "{}"))) else response("done")
             })
         assertEquals(2, round)
     }
 
     @Test
     fun profileFilteringHidesGroupsAndSearchNeverOpensFilteredMatches() {
+        val large = largeSnapshot()
+        val allowed = large.tools[71]
+        val sibling = large.tools[64]
+        val denied = large.tools.last()
         val opened = ConcurrentHashMap.newKeySet<String>()
-        val loader = McpProgressiveLoader(snapshot, opened)
+        val loader = McpProgressiveLoader(large, opened)
         var round = 0
         AgentModelClient.complete(config, "search", loader,
-            mcpProjection = snapshot, openedMcpGroupsProvider = { opened.toSet() },
-            toolFilter = { tools -> JSONArray(tools.objects().filter { it.getJSONObject("function").getString("name") == first.modelName }) },
+            mcpProjection = large, openedMcpGroupsProvider = { opened.toSet() },
+            toolFilter = { tools -> JSONArray(tools.objects().filter { it.getJSONObject("function").getString("name") == allowed.modelName }) },
             provider = provider { request, _ ->
                 when (++round) {
                     1 -> {
                         assertEquals(McpProgressiveLoader.names, request.tools.names())
                         val index = request.messages.objects().last { it.optString("role") == "system" }.getString("content")
-                        assertTrue(index.contains("mcp:one"))
-                        assertFalse(index.contains("mcp:two"))
-                        response(calls = listOf(call("tools_search", JSONObject().put("query", "select:${first.modelName},${second.modelName}").toString())))
+                        assertTrue(index.contains("mcp:three"))
+                        assertFalse(index.contains("mcp:four"))
+                        response(calls = listOf(call("tools_search", JSONObject()
+                            .put("query", "select:${allowed.modelName},${sibling.modelName},${denied.modelName}").toString())))
                     }
                     else -> {
-                        assertEquals(setOf("mcp:one"), opened)
-                        assertEquals(setOf(first.modelName), request.tools.names())
-                        assertFalse(request.messages.objects().last { it.optString("role") == "tool" }.getString("content").contains(second.modelName))
+                        assertEquals(setOf("mcp:three"), opened)
+                        assertEquals(setOf(allowed.modelName), request.tools.names())
+                        val receipt = request.messages.objects().last { it.optString("role") == "tool" }.getString("content")
+                        assertFalse(receipt.contains(sibling.modelName))
+                        assertFalse(receipt.contains(denied.modelName))
                         response("done")
                     }
                 }
@@ -327,6 +446,10 @@ class McpProgressiveLoadingTest {
         val unknown = AgentModelClient.ConversationMessage("assistant", AgentMcpContext.appendMarker("old", setOf("mcp:removed")), contextSummary = true)
         assertTrue(AgentMcpContext.compactedGroupIds(listOf(unknown), snapshot.deferredGroups()).isEmpty())
     }
+
+    private fun largeSnapshot() = McpRunSnapshot(listOf("one", "two", "three", "four").flatMap { id ->
+        (1..24).map { tool(id, "Server $id", "tool$it") }
+    })
 
     private fun tool(id: String, serverName: String, name: String): McpRunTool = McpRunTool(
         "mcp_${id}_${name}_12345678", McpServerSetting(id, serverName, "https://example.invalid/mcp"),
