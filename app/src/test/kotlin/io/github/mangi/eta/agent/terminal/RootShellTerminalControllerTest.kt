@@ -353,6 +353,214 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    private fun executionContext(workspace: File = temporaryFolder.root) = TerminalExecutionContext(
+        linuxEnvironment = TerminalEnvironment.ALPINE, linuxRootfsPath = null, userWorkspacePath = workspace.path)
+
+    @Test fun oneShotSpillsBothStreamsBeyondMemoryBudgetsWithoutLosingOutput() {
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext())
+        try {
+            val result = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "head -c 300000 /dev/zero | tr '\\000' x; printf '你😀END'; " +
+                    "head -c 70000 /dev/zero | tr '\\000' e >&2; printf '错误😀END' >&2")
+                .put("cwd", temporaryFolder.root.path)))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertTrue(result.getBoolean("stdout_truncated"))
+            assertTrue(result.getBoolean("stderr_truncated"))
+            assertTrue(result.getBoolean("output_truncated"))
+            assertFalse(result.getString("stdout").contains('\uFFFD'))
+            assertFalse(result.getString("stderr").contains('\uFFFD'))
+            val file = File(result.getString("output_path"))
+            assertEquals("android", result.getString("output_environment"))
+            assertEquals(File(temporaryFolder.root, "tmp/terminal-output").canonicalPath, file.parentFile.canonicalPath)
+            assertEquals("x".repeat(300000) + "你😀END\n[stderr]\n" + "e".repeat(70000) + "错误😀END", file.readText())
+            assertFalse(file.readText().contains("__ETA_RUNTIME_"))
+            controller.closeAll()
+            assertTrue("published output remains available after run closes", file.exists())
+            assertEquals(listOf(file.name), file.parentFile.listFiles()!!.map { it.name })
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun jsonPreviewNeverSplitsSurrogatePairsAndSmallOutputLeavesNoSpill() {
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext())
+        try {
+            val small = JSONObject(controller.executeTool("terminal", JSONObject().put("command", "printf '你😀'")))
+            assertEquals("你😀", small.getString("stdout"))
+            assertFalse(small.has("output_path"))
+            assertTrue(File(temporaryFolder.root, "tmp/terminal-output").listFiles()!!.isEmpty())
+            for (merge in listOf(false, true)) {
+                val result = JSONObject(controller.executeTool("terminal", JSONObject().put("merge_stderr", merge)
+                    .put("command", "head -c 15999 /dev/zero | tr '\\000' x; printf '😀tail'; " +
+                        "{ head -c 15999 /dev/zero | tr '\\000' e; printf '😀tail'; } >&2")))
+                assertTrue(result.getBoolean("output_truncated"))
+                listOf(result.getString("stdout"), result.getString("stderr")).forEach { text ->
+                    text.forEachIndexed { index, char ->
+                        if (char.isHighSurrogate()) assertTrue(text.getOrNull(index + 1)?.isLowSurrogate() == true)
+                        if (char.isLowSurrogate()) assertTrue(text.getOrNull(index - 1)?.isHighSurrogate() == true)
+                    }
+                    assertFalse(text.contains('\uFFFD'))
+                }
+                assertTrue(File(result.getString("output_path")).readText().contains("😀tail"))
+            }
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun unwritableSpillWorkspaceFallsBackWithoutFailingCommand() {
+        val workspace = temporaryFolder.newFile("workspace-is-a-file")
+        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext(workspace))
+        try {
+            val result = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("cwd", temporaryFolder.root.path)
+                .put("command", "head -c 16001 /dev/zero | tr '\\000' x")))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertTrue(result.getBoolean("stdout_truncated"))
+            val path = File(result.getString("output_path"))
+            assertTrue(path.exists())
+            assertFalse(path.path.startsWith(workspace.path))
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun spillFilesAndStreamSizeStayBounded() {
+        val workspace = temporaryFolder.newFolder("spill-bounds")
+        repeat(20) {
+            ShellOutputSpill.create(workspace.path)!!.use { spill ->
+                spill.append("你😀".toByteArray(), 7, stderr = false)
+                assertTrue(spill.retain() != null)
+            }
+        }
+        val files = File(workspace, "tmp/terminal-output").listFiles()!!
+        assertEquals(16, files.size)
+        assertTrue(files.all { it.extension == "log" && it.readText() == "你😀" })
+        ShellOutputSpill.create(workspace.path)!!.use { spill ->
+            val bytes = "你".repeat(ShellOutputSpill.MAX_STREAM_BYTES / 3 + 10).toByteArray()
+            spill.append(bytes, bytes.size, stderr = false)
+            val path = File(spill.retain()!!)
+            assertTrue(spill.truncated)
+            assertTrue(path.length() <= ShellOutputSpill.MAX_STREAM_BYTES)
+            assertFalse(path.readText().contains('\uFFFD'))
+        }
+    }
+
+    @Test fun liveSpillMergesOnlyCompleteUtf8CharactersAcrossStreams() {
+        ShellOutputSpill.create(temporaryFolder.root.path, live = true)!!.use { spill ->
+            val chinese = "你".toByteArray()
+            val emoji = "😀".toByteArray()
+            spill.append(chinese.copyOfRange(0, 1), 1, stderr = false)
+            spill.append(emoji, emoji.size, stderr = true)
+            spill.append(chinese.copyOfRange(1, 3), 2, stderr = false)
+            assertEquals("😀你", spill.logFile.readText())
+            val path = File(spill.retain()!!)
+            assertEquals("😀你", path.readText())
+        }
+    }
+
+    @Test fun optedInFastExecReturnsOrdinaryResultIncludingSeparateStderrAndRuntime() {
+        withBackgroundController { controller, _ ->
+            val result = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "printf '你😀'; printf problem >&2").put("promote_on_timeout", true)
+                .put("timeout_ms", 3000).put("cwd", temporaryFolder.root.path)))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertEquals("exec", result.getString("action"))
+            assertEquals("exited", result.getString("status"))
+            assertEquals(0, result.getInt("exit_code"))
+            assertEquals("你😀", result.getString("stdout"))
+            assertEquals("problem", result.getString("stderr"))
+            assertFalse(result.getBoolean("timed_out"))
+            assertFalse(result.optBoolean("promoted"))
+            assertTrue(result.getJSONObject("runtime").getInt("uid") >= 0)
+            val failed = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "printf failed >&2; exit 7").put("promote_on_timeout", true)
+                .put("timeout_ms", 3000).put("cwd", temporaryFolder.root.path)))
+            assertFalse(failed.getBoolean("ok"))
+            assertEquals("failed", failed.getString("status"))
+            assertEquals(7, failed.getInt("exit_code"))
+            assertEquals("failed", failed.getString("stderr"))
+            val merged = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "printf out; printf err >&2").put("promote_on_timeout", true).put("merge_stderr", true)
+                .put("timeout_ms", 3000).put("cwd", temporaryFolder.root.path)))
+            assertEquals("out\n[stderr]\nerr", merged.getString("stdout"))
+            assertEquals("", merged.getString("stderr"))
+        }
+    }
+
+    @Test fun promotionContinuesTheSameProcessAfterForegroundTimeoutAndControllerClose() {
+        withBackgroundController { controller, jobs ->
+            val launches = File(temporaryFolder.root, "launches")
+            val result = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "printf launch >> ${shellQuote(launches.path)}; printf ready; sleep 0.6; printf '完成😀'")
+                .put("promote_on_timeout", true).put("timeout_ms", 80).put("cwd", temporaryFolder.root.path)))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            assertEquals("promoted", result.getString("status"))
+            assertTrue(result.getBoolean("promoted"))
+            assertFalse(result.getBoolean("timed_out"))
+            assertTrue(result.getString("output_tail").contains("ready"))
+            assertTrue(File(result.getString("output_path")).exists())
+            val id = result.getString("job_id")
+            controller.closeAll()
+            val waited = JSONObject(jobs.waitFor(id, 5000) { false })
+            assertEquals("completed", waited.getString("status"))
+            val output = JSONObject(jobs.read(id))
+            assertTrue(output.getString("output").contains("ready完成😀"))
+            assertEquals("launch", launches.readText())
+            assertEquals(result.getString("output_path"), output.getString("output_path"))
+        }
+    }
+
+    @Test fun cancellingOptedInForegroundWaitStopsItsTaskAndReturnsCancelled() {
+        withBackgroundController { controller, jobs ->
+            val marker = File(temporaryFolder.root, "running")
+            val after = File(temporaryFolder.root, "must-not-finish")
+            val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+            try {
+                val future = executor.submit<String> { controller.executeTool("terminal", JSONObject()
+                    .put("command", "touch ${shellQuote(marker.path)}; sleep 30; touch ${shellQuote(after.path)}")
+                    .put("promote_on_timeout", true).put("timeout_ms", 10000).put("cwd", temporaryFolder.root.path)) }
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                while (!marker.exists() && System.nanoTime() < deadline) Thread.sleep(10)
+                assertTrue(marker.exists())
+                controller.closeAll()
+                val result = JSONObject(future.get(3, java.util.concurrent.TimeUnit.SECONDS))
+                assertFalse(result.toString(), result.getBoolean("ok"))
+                assertEquals("cancelled", result.getString("status"))
+                assertFalse(result.getBoolean("timed_out"))
+                assertFalse(result.optBoolean("promoted"))
+                assertEquals(0, JSONObject(jobs.list(true)).getJSONArray("tasks").length())
+                assertFalse(after.exists())
+            } finally { executor.shutdownNow() }
+        }
+    }
+
+    @Test fun sessionExecIgnoresPromotionAndFallbackKeepsDefaultTimeoutBehavior() {
+        withBackgroundController { controller, jobs ->
+            val id = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("action", "open").put("cwd", temporaryFolder.root.path))).getString("session_id")
+            val result = JSONObject(controller.executeTool("terminal", JSONObject().put("session_id", id)
+                .put("promote_on_timeout", true).put("command", "printf session")))
+            assertEquals("session", result.getString("stdout"))
+            assertEquals(id, result.getString("session_id"))
+            assertEquals(0, JSONObject(jobs.list(false)).getJSONArray("tasks").length())
+            val defaultTimeout = JSONObject(controller.executeTool("terminal", JSONObject()
+                .put("command", "sleep 30").put("timeout_ms", 1).put("cwd", temporaryFolder.root.path)))
+            assertTrue(defaultTimeout.getBoolean("timed_out"))
+            assertFalse(defaultTimeout.optBoolean("promoted"))
+        }
+        val fallback = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext())
+        try {
+            val result = JSONObject(fallback.executeTool("terminal", JSONObject().put("command", "printf fallback")
+                .put("promote_on_timeout", true).put("cwd", temporaryFolder.root.path)))
+            assertEquals("fallback", result.getString("stdout"))
+            assertEquals("exited", result.getString("status"))
+        } finally { fallback.closeAll() }
+    }
+
+    private fun withBackgroundController(block: (RootShellTerminalController, BackgroundTerminalJobs) -> Unit) {
+        val supervisor = DetachedTaskSupervisor(NoopLogger, File(temporaryFolder.root, "promote-jobs.json"),
+            daemonDir = File(temporaryFolder.root, "daemon").path, rootAvailable = { false })
+        val jobs = BackgroundTerminalJobs(supervisor, NoopLogger)
+        val controller = RootShellTerminalController(NoopLogger, detachedSupervisor = supervisor, backgroundJobs = jobs,
+            rootAvailable = { false }, executionContext = executionContext())
+        try { block(controller, jobs) } finally { controller.closeAll(); jobs.close() }
+    }
+
     private object NoopLogger : AgentLogger {
         override fun debug(message: () -> String) = Unit
         override fun info(message: String) = Unit

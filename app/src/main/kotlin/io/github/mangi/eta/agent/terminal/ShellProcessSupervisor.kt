@@ -540,6 +540,7 @@ internal fun runOneShotShell(
     linuxRootfsPath: String? = null,
     linuxSharedMounts: List<SharedFolderMount> = emptyList(),
     maxOutputBytes: Int = Int.MAX_VALUE,
+    outputSpill: ShellOutputSpill? = null,
 ): OneShotShellResult {
     val process = processSupervisor.startShellProcess(
         identity = identity,
@@ -558,10 +559,14 @@ internal fun runOneShotShell(
         val output = ByteArrayOutputCollector()
         val stderr = ByteArrayOutputCollector()
         val outputThread = thread(name = "agent-terminal-stdout") {
-            process.inputStream.use { input -> output.readFrom(input, maxOutputBytes) }
+            process.inputStream.use { input -> output.readFrom(input, maxOutputBytes) { bytes, count ->
+                outputSpill?.append(bytes, count, stderr = false)
+            } }
         }
         val stderrThread = thread(name = "agent-terminal-stderr") {
-            process.errorStream.use { input -> stderr.readFrom(input, minOf(maxOutputBytes, 64 * 1024)) }
+            process.errorStream.use { input -> stderr.readFrom(input, minOf(maxOutputBytes, 64 * 1024)) { bytes, count ->
+                outputSpill?.append(bytes, count, stderr = true)
+            } }
         }
         val stdinFailed = AtomicBoolean(false)
         val stdinThread = thread(name = "agent-terminal-stdin") {
@@ -607,5 +612,143 @@ internal fun runOneShotShell(
             processSupervisor.reapProcess(process)
         }
         processSupervisor.unregisterProcess(process)
+    }
+}
+
+/**
+ * 每流最多 8 MiB，目录不可写、存储耗尽时静默放弃落盘，绝不改变命令退出语义。
+ * 普通 exec 只保留发生展示截断的日志（最多 16 份）；后台捕获由任务记录的 prune 管理。
+ */
+internal class ShellOutputSpill private constructor(
+    val logFile: File,
+    private val live: Boolean,
+) : AutoCloseable {
+    companion object {
+        const val MAX_STREAM_BYTES = 8 * 1024 * 1024
+        private const val MAX_RETAINED = 16
+        private val FILES_LOCK = Any()
+        private val active = mutableSetOf<String>()
+
+        fun create(workspace: String, live: Boolean = false): ShellOutputSpill? = synchronized(FILES_LOCK) {
+            val owner = System.getProperty("user.name", "app").replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "app" }
+            val directories = listOf(File(workspace, "tmp/terminal-output"),
+                File(System.getProperty("java.io.tmpdir", "/tmp"), "eta-terminal-output-$owner"))
+            directories.firstNotNullOfOrNull { directory ->
+                runCatching {
+                    if (!directory.isDirectory && !directory.mkdirs()) return@runCatching null
+                    val file = File.createTempFile(if (live) "job-" else "exec-", ".log", directory)
+                    active += file.path
+                    ShellOutputSpill(file, live).also { prune(directory) }
+                }.getOrNull()
+            }
+        }
+
+        private fun prune(directory: File, newest: File? = null) {
+            directory.listFiles()?.filter { it.name.startsWith("exec-") && it.extension == "log" && it.path !in active }
+                ?.sortedWith(compareByDescending<File> { it == newest }.thenByDescending { it.lastModified() })
+                ?.drop(MAX_RETAINED)?.forEach { it.delete() }
+            // 进程崩溃留下的普通 exec 暂存文件；运行中最大 180 秒，不会触及一天保留期。
+            val expired = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(1)
+            directory.listFiles()?.filter { it.name.startsWith("exec-") && it.extension in setOf("stdout", "stderr") &&
+                it.lastModified() < expired && it.path.substringBeforeLast('.') + ".log" !in active }
+                ?.forEach { it.delete() }
+        }
+    }
+
+    private val stdoutFile = File(logFile.path.removeSuffix(".log") + ".stdout")
+    private val stderrFile = File(logFile.path.removeSuffix(".log") + ".stderr")
+    private var stdout: java.io.OutputStream? = null
+    private var stderr: java.io.OutputStream? = null
+    private var merged: java.io.OutputStream? = null
+    private var outBytes = 0
+    private var errBytes = 0
+    private var outPending = byteArrayOf()
+    private var errPending = byteArrayOf()
+    private var failed = false
+    private var retained = false
+    private var closed = false
+    var truncated = false
+        private set
+
+    @Synchronized
+    fun append(bytes: ByteArray, count: Int, stderr: Boolean) {
+        if (closed || failed) return
+        runCatching {
+            val written = if (stderr) errBytes else outBytes
+            val allowed = count.coerceAtMost(MAX_STREAM_BYTES - written)
+            if (allowed < count) truncated = true
+            if (allowed == 0) return
+            val stream = if (stderr) this.stderr ?: privateStream(stderrFile).also { this.stderr = it }
+                else stdout ?: privateStream(stdoutFile).also { stdout = it }
+            stream.write(bytes, 0, allowed)
+            if (live) {
+                val log = merged ?: logFile.outputStream().also { merged = it }
+                // 两个管道可能恰好在 UTF-8 字符中间分块，先拼齐本流字符再合并，
+                // 防止另一个流插在续字节之间；达到落盘上限时也只发布完整字符。
+                val pending = if (stderr) errPending else outPending
+                val chunk = pending + bytes.copyOfRange(0, allowed)
+                val end = chunk.utf8End()
+                log.write(chunk, 0, end)
+                if (stderr) errPending = chunk.copyOfRange(end, chunk.size)
+                else outPending = chunk.copyOfRange(end, chunk.size)
+            }
+            if (stderr) errBytes += allowed else outBytes += allowed
+        }.onFailure { failed = true }
+    }
+
+    private fun privateStream(file: File): java.io.OutputStream {
+        java.nio.file.Files.createFile(file.toPath(), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+            java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")))
+        return file.outputStream()
+    }
+
+    /** 普通 exec 在结果已知后发布，剔除 stdout 开头的运行时探针；不将全量输出读入内存。 */
+    @Synchronized
+    fun retain(metadataBytes: Int = 0): String? {
+        if (failed || closed) return null
+        return runCatching {
+            finishStreams()
+            if (!live) logFile.outputStream().use { log ->
+                if (stdoutFile.exists()) stdoutFile.inputStream().use { input ->
+                    input.skip(metadataBytes.toLong())
+                    input.copyTo(log)
+                }
+                if (stderrFile.exists()) {
+                    log.write("\n[stderr]\n".toByteArray())
+                    stderrFile.inputStream().use { it.copyTo(log) }
+                }
+            }
+            retained = true
+            logFile.absolutePath
+        }.getOrElse { failed = true; null }
+    }
+
+    private fun finishStreams() {
+        listOfNotNull(stdout, stderr, merged).forEach { runCatching { it.close() } }
+        stdout = null; stderr = null; merged = null
+        listOf(stdoutFile, stderrFile).filter { it.exists() }.forEach { file ->
+            java.io.RandomAccessFile(file, "rw").use { io ->
+                val tail = ByteArray(minOf(4L, io.length()).toInt())
+                io.seek(io.length() - tail.size)
+                io.readFully(tail)
+                io.setLength(io.length() - (tail.size - tail.utf8End()))
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        runCatching { finishStreams() }
+        synchronized(FILES_LOCK) {
+            active -= logFile.path
+            if (!retained || failed) logFile.delete()
+            if (!live || !retained || failed) {
+                stdoutFile.delete()
+                stderrFile.delete()
+            }
+            prune(logFile.parentFile!!, newest = logFile)
+        }
     }
 }

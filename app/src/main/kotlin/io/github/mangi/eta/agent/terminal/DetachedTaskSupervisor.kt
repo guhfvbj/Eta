@@ -43,6 +43,7 @@ internal class DetachedTaskSupervisor(
         private val RECORDS_LOCK = Any()
         private val COMMAND_PROCESSES = java.util.concurrent.ConcurrentHashMap<String, CommandProcess>()
         private val USER_WAITERS = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private val COMPLETION_LISTENERS = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CopyOnWriteArraySet<() -> Unit>>()
 
         /** AI 工具侧与 UI 侧共用同一份记录文件，路径只能在这里定义一次。 */
         fun defaultRecordsFile(context: Context): File =
@@ -59,6 +60,7 @@ internal class DetachedTaskSupervisor(
         commandTask: Boolean = false,
         description: String = "",
         timeoutMs: Long = 0,
+        outputCapture: ShellOutputSpill? = null,
     ): DaemonStartResult {
         if (identity != "root" && identity != "user") return DaemonStartResult.Failed("INVALID_ARGUMENT", "执行身份无效")
         if (identity == "root" && !rootAvailable()) return DaemonStartResult.Failed("ROOT_REQUIRED", "Root 授权不可用")
@@ -73,7 +75,7 @@ internal class DetachedTaskSupervisor(
         }
         val id = (if (commandTask) "job_" else "dm_") + UUID.randomUUID().toString().take(8)
         val token = UUID.randomUUID().toString().replace("-", "")
-        if (commandTask) return startCommand(id, command, cwd, identity, environment, description, timeoutMs)
+        if (commandTask) return startCommand(id, command, cwd, identity, environment, description, timeoutMs, outputCapture)
         if (identity == "user") return startUserDaemon(id, token, command, cwd, environment)
         val wireDir = wireDaemonDir(environment)
         val wirePidFile = "$wireDir/$id.pid"
@@ -143,7 +145,7 @@ internal class DetachedTaskSupervisor(
         if (tasks.isEmpty()) return emptyList()
         // 不同身份分组巡检：/proc/<pid>/environ 只有进程属主与 root 可读，用任务自身身份探测最稳。
         val aliveById = mutableMapOf<String, Boolean>()
-        tasks.filter { it.completedAt == null }.groupBy { it.identity }.forEach { (identity, group) ->
+        tasks.filter { it.completedAt == null && COMMAND_PROCESSES[it.id] == null }.groupBy { it.identity }.forEach { (identity, group) ->
             if (identity == "root" && !rootAvailable()) return@forEach
             val probeScript = aliveCheckFunction() + "\n" + group.joinToString("\n") { task ->
                 "if eta_alive ${task.pid} ${shellQuote(ownerProof(task))}; " +
@@ -169,16 +171,17 @@ internal class DetachedTaskSupervisor(
         // 探测失败的任务保守视为仍在运行，不误报死亡；确认死亡的才允许被 prune 清掉。
         val statuses = tasks.map { task ->
             if (task.completedAt != null) return@map DetachedTaskStatus(task, false)
-            var running = aliveById[task.id] ?: true
+            val local = COMMAND_PROCESSES[task.id]
+            // 本进程 waiter 负责排空输出和提交完成；不抢先把尚未完成落盘的记录标为退出。
+            var running = if (local != null) true else aliveById[task.id] ?: true
             if (!task.commandTask && task.identity == "user" && aliveById[task.id] == true && !adoptUserTask(task)) running = false
             if (task.commandTask && !running) {
                 val exitCode = readCommandExit(task)
                 DetachedTaskStatus(completeCommand(task.id, exitCode, if (exitCode == null) "interrupted" else null) ?: task, false)
             } else DetachedTaskStatus(task, running)
         }
-        if (aliveById.isNotEmpty()) {
-            pruneExitedRecords(statuses)
-        }
+        // 本地任务由 waiter 确认完成，无需为了触发清理额外探测 /proc。
+        pruneExitedRecords(statuses)
         return statuses
     }
 
@@ -187,40 +190,88 @@ internal class DetachedTaskSupervisor(
             ?: return DaemonLogsResult(ok = false, code = "TASK_NOT_FOUND", message = "未找到守护任务：$id")
         if (task.identity == "root" && !rootAvailable()) return DaemonLogsResult(ok = false, code = "ROOT_REQUIRED", message = "Root 授权不可用")
         val limit = maxBytes.coerceIn(1_024, MAX_LOG_READ_BYTES)
-        val result = runOneShotShell(
-            processSupervisor = oneShotSupervisor,
-            identity = task.identity,
-            command = "tail -c $limit ${shellQuote(hostDaemonPath(task, task.logPath))} 2>/dev/null",
-            timeoutSeconds = 15,
-        )
-        if (result.exitCode != 0) {
-            return DaemonLogsResult(ok = false, code = "LOGS_UNAVAILABLE", message = "日志不可用：exit=${result.exitCode}")
-        }
+        val window = readLogWindow(task, 0, limit)
+            ?: return DaemonLogsResult(ok = false, code = "LOGS_UNAVAILABLE", message = "日志不可用")
+        val bytes = window.bytes
+        val start = bytes.utf8Start()
         return DaemonLogsResult(
             ok = true,
-            text = result.output.decodeToString(),
-            truncated = result.output.size >= limit,
+            text = bytes.decodeToString(start, bytes.utf8End().coerceAtLeast(start)),
+            // 保留原有 tail -c 的边界语义，包括文件长度恰好等于 limit 的情况。
+            truncated = bytes.size >= limit,
         )
     }
 
     fun findTask(id: String): DetachedTask? = synchronized(RECORDS_LOCK) { loadTasksLocked().firstOrNull { it.id == id } }
+
+    /** 跨 UI/Agent supervisor 实例共享事件；回调不得在记录锁内运行。 */
+    fun onCommandCompleted(listener: () -> Unit): () -> Unit {
+        val key = recordsFile.absolutePath
+        val listeners = COMPLETION_LISTENERS.computeIfAbsent(key) { java.util.concurrent.CopyOnWriteArraySet() }
+        listeners += listener
+        return { listeners -= listener }
+    }
+
+    data class LogWindow(val bytes: ByteArray, val at: Long, val totalBytes: Long)
+
+    /** 优先本地 seek；Root 文件无应用读取权限时仍由原身份在 Android 宿主读取。 */
+    fun readLogWindow(task: DetachedTask, fromOffset: Long, maxBytes: Int = 256 * 1024): LogWindow? {
+        if (task.identity == "root" && !rootAvailable()) return null
+        val path = hostDaemonPath(task, task.logPath)
+        runCatching {
+            java.io.RandomAccessFile(path, "r").use { input ->
+                val total = input.length()
+                val at = maxOf(fromOffset.coerceIn(0, total), total - maxBytes)
+                val bytes = ByteArray((total - at).toInt())
+                input.seek(at)
+                input.readFully(bytes)
+                return LogWindow(bytes, at, total)
+            }
+        }
+        val script = "eta_size=\$(wc -c < ${shellQuote(path)}) || exit 1; " +
+            "eta_at=$fromOffset; [ \"\$eta_at\" -le \"\$eta_size\" ] || eta_at=0; " +
+            "[ \$((eta_size-eta_at)) -le $maxBytes ] || eta_at=\$((eta_size-$maxBytes)); " +
+            "printf '%s:%s\\n' \"\$eta_at\" \"\$eta_size\"; " +
+            "tail -c +\$((eta_at+1)) ${shellQuote(path)} | head -c \$((eta_size-eta_at))"
+        val result = runOneShotShell(oneShotSupervisor, task.identity, script, 15, maxOutputBytes = maxBytes + 64)
+        if (result.exitCode != 0) return null
+        val newline = result.output.indexOf('\n'.code.toByte())
+        if (newline < 0) return null
+        val header = result.output.decodeToString(0, newline).split(':')
+        val at = header.getOrNull(0)?.trim()?.toLongOrNull() ?: return null
+        val total = header.getOrNull(1)?.trim()?.toLongOrNull() ?: return null
+        return LogWindow(result.output.copyOfRange(newline + 1, result.output.size), at, total)
+    }
+
+    /** promote 路径保留独立的流，快速完成时仍遵循普通 exec 的 stdout/stderr 合同。 */
+    fun capturedResult(id: String): OneShotShellResult? {
+        val task = findTask(id) ?: return null
+        val prefix = hostDaemonPath(task, task.logPath).removeSuffix(".log")
+        fun read(suffix: String, limit: Int): ByteArray = File(prefix + suffix).takeIf { it.exists() }
+            ?.inputStream()?.use { it.readNBytes(limit) } ?: ByteArray(0)
+        return runCatching {
+            OneShotShellResult(task.exitCode ?: -3, read(".stdout", 256 * 1024), read(".stderr", 64 * 1024),
+                File("$prefix.stdout").length() > 256 * 1024, File("$prefix.stderr").length() > 64 * 1024)
+        }.getOrNull()
+    }
 
     private class CommandProcess(val process: Process, val supervisor: ShellProcessSupervisor) {
         @Volatile var stopReason: String? = null
     }
 
     private fun startCommand(id: String, command: String, cwd: String, identity: String,
-        environment: TerminalEnvironment, description: String, timeoutMs: Long): DaemonStartResult {
+        environment: TerminalEnvironment, description: String, timeoutMs: Long, outputCapture: ShellOutputSpill?): DaemonStartResult {
         val workspace = if (identity == "user") TerminalRuntime.userWorkspacePath else TerminalRuntime.ROOT_WORKSPACE_PATH
         val wireDir = when {
             environment.isLinux -> LINUX_DAEMON_DIR
             identity == "user" && daemonDir == DEFAULT_DAEMON_DIR -> "$workspace/daemon"
             else -> daemonDir
         }
-        val logPath = "$wireDir/$id.log"
-        val script = "mkdir -p ${shellQuote(wireDir)} && { cd ${shellQuote(cwd)} && " +
-            commandPayload(command, "$wireDir/$id.exit") + "; } > ${shellQuote(logPath)} 2>&1"
-        val process = oneShotSupervisor.startShellProcess(identity, script, true, environment,
+        val logPath = outputCapture?.logFile?.absolutePath ?: "$wireDir/$id.log"
+        val script = if (outputCapture != null) "cd ${shellQuote(cwd)} && {\n$command\n}" else
+            "mkdir -p ${shellQuote(wireDir)} && { cd ${shellQuote(cwd)} && " +
+                commandPayload(command, "$wireDir/$id.exit") + "; } > ${shellQuote(logPath)} 2>&1"
+        val process = oneShotSupervisor.startShellProcess(identity, script, outputCapture == null, environment,
             linuxRootfsPath = rootfsPath(environment), linuxSharedMounts = linuxSharedMountsProvider())
             ?: return DaemonStartResult.Failed("PROCESS_START_FAILED", "无法启动后台命令")
         val ownership = oneShotSupervisor.ownershipOf(process)
@@ -241,14 +292,28 @@ internal class DetachedTaskSupervisor(
         COMMAND_PROCESSES[id] = running
         process.outputStream.close()
         val reader = thread(name = "eta-command-output", isDaemon = true) {
-            process.inputStream.use { ByteArrayOutputCollector().readFrom(it, 8_192) }
+            process.inputStream.use { ByteArrayOutputCollector().readFrom(it, 8_192) { bytes, count ->
+                outputCapture?.append(bytes, count, stderr = false)
+            } }
+        }
+        val errorReader = thread(name = "eta-command-stderr", isDaemon = true) {
+            process.errorStream.use { ByteArrayOutputCollector().readFrom(it, 8_192) { bytes, count ->
+                outputCapture?.append(bytes, count, stderr = true)
+            } }
         }
         thread(name = "eta-command-completion", isDaemon = true) {
             try {
                 val exitCode = process.waitFor()
                 reader.join(500)
+                errorReader.join(500)
+                if (outputCapture != null) {
+                    outputCapture.retain()
+                    outputCapture.close()
+                    runCatching { File(logPath.removeSuffix(".log") + ".exit").writeText(exitCode.toString()) }
+                }
                 completeCommand(id, if (running.stopReason == null) exitCode else null, running.stopReason)
             } finally {
+                outputCapture?.close()
                 oneShotSupervisor.retireExitedProcess(process)
                 COMMAND_PROCESSES.remove(id, running)
             }
@@ -273,15 +338,20 @@ internal class DetachedTaskSupervisor(
         saveTasksLocked(tasks)
     }
 
-    private fun completeCommand(id: String, exitCode: Int?, reason: String?): DetachedTask? = synchronized(RECORDS_LOCK) {
-        val tasks = loadTasksLocked()
-        val index = tasks.indexOfFirst { it.id == id }
-        if (index < 0) return@synchronized null
-        val existing = tasks[index]
-        if (existing.completedAt != null) return@synchronized existing
-        val completed = existing.copy(completedAt = System.currentTimeMillis(), exitCode = exitCode, endReason = reason)
-        tasks[index] = completed
-        if (saveTasksLocked(tasks)) completed else null
+    private fun completeCommand(id: String, exitCode: Int?, reason: String?): DetachedTask? {
+        var changed = false
+        val result = synchronized(RECORDS_LOCK) {
+            val tasks = loadTasksLocked()
+            val index = tasks.indexOfFirst { it.id == id }
+            if (index < 0) return@synchronized null
+            val existing = tasks[index]
+            if (existing.completedAt != null) return@synchronized existing
+            val completed = existing.copy(completedAt = System.currentTimeMillis(), exitCode = exitCode, endReason = reason)
+            tasks[index] = completed
+            if (saveTasksLocked(tasks)) completed.also { changed = true } else null
+        }
+        if (changed) COMPLETION_LISTENERS[recordsFile.absolutePath]?.forEach { listener -> runCatching { listener() } }
+        return result
     }
 
     private fun readCommandExit(task: DetachedTask): Int? {
@@ -343,7 +413,11 @@ internal class DetachedTaskSupervisor(
             appendLine("  sleep 0.1")
             appendLine("  eta_alive ${task.pid} ${shellQuote(ownerProof(task))} && exit 81")
             appendLine("fi")
-            if (removeFiles) append("rm -f ${shellQuote(hostDaemonPath(task, task.logPath))} ${shellQuote(hostDaemonPath(task, task.logPath.removeSuffix(".log") + ".pid"))} ${shellQuote(hostDaemonPath(task, task.logPath.removeSuffix(".log") + ".exit"))}")
+            if (removeFiles) {
+                append("rm -f " + listOf(".log", ".pid", ".exit", ".stdout", ".stderr").joinToString(" ") {
+                    shellQuote(hostDaemonPath(task, task.logPath.removeSuffix(".log") + it))
+                })
+            }
         }
         val result = runOneShotShell(
             processSupervisor = oneShotSupervisor,
@@ -535,7 +609,9 @@ internal class DetachedTaskSupervisor(
         if (victims.isEmpty()) return
         victims.groupBy { it.task.identity }.forEach { (identity, group) ->
             val removeScript = group.joinToString("\n") {
-                "rm -f ${shellQuote(hostDaemonPath(it.task, it.task.logPath))} " +
+                "rm -f ${shellQuote(hostDaemonPath(it.task, it.task.logPath.removeSuffix(".log") + ".stdout"))} " +
+                    shellQuote(hostDaemonPath(it.task, it.task.logPath.removeSuffix(".log") + ".stderr")) + " " +
+                    shellQuote(hostDaemonPath(it.task, it.task.logPath)) + " " +
                     shellQuote(hostDaemonPath(it.task, it.task.logPath.removeSuffix(".log") + ".pid")) + " " +
                     shellQuote(hostDaemonPath(it.task, it.task.logPath.removeSuffix(".log") + ".exit"))
             }

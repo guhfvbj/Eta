@@ -25,7 +25,14 @@ internal class BackgroundTerminalJobs(
     private val changed = waitLock.newCondition()
     private var monitor: ScheduledFuture<*>? = null
     private var leased = false
-    private var closed = false
+    @Volatile private var closed = false
+    private class OutputView(var ring: JobOutputRing = JobOutputRing(), val cursor: JobOutputRing.Cursor = JobOutputRing.Cursor())
+    private val outputViews = mutableMapOf<String, OutputView>()
+    private val removeCompletionListener = supervisor.onCommandCompleted {
+        // waiter 已提交完成记录；立即叫醒等待者，并在串行监控线程发送完成通知。
+        waitLock.withLock { changed.signalAll() }
+        runCatching { executor.execute(::refresh) }
+    }
 
     @Synchronized
     fun start(
@@ -36,11 +43,12 @@ internal class BackgroundTerminalJobs(
         environment: TerminalEnvironment,
         description: String,
         timeoutMs: Long,
+        outputCapture: ShellOutputSpill? = null,
     ): String {
         if (closed) return failure("BACKGROUND_CLOSED", "后台命令宿主已关闭")
         if (!lease()) return failure("BACKGROUND_START_NOT_ALLOWED", "系统未允许启动后台执行，请返回 Eta 后重试")
         return when (val result = launcher.start(command, cwd, identity, environment,
-            commandTask = true, description = description, timeoutMs = timeoutMs.coerceAtLeast(0))) {
+            commandTask = true, description = description, timeoutMs = timeoutMs.coerceAtLeast(0), outputCapture = outputCapture)) {
             is DaemonStartResult.Failed -> {
                 if (monitor == null) release()
                 failure(result.code, result.message)
@@ -58,12 +66,21 @@ internal class BackgroundTerminalJobs(
         return base("list").put("tasks", JSONArray(tasks.map { taskJson(it.task) })).toString()
     }
 
-    fun read(id: String, maxBytes: Int = 16_000): String {
+    fun read(id: String, maxBytes: Int = 16_000, fromOffset: Long? = null, incremental: Boolean = false): String {
         refresh()
         val task = supervisor.findTask(id)?.takeIf { it.commandTask }
             ?: return failure("JOB_NOT_FOUND", "未找到后台命令，请用 terminal_job 的 list 查看任务")
-        val logs = supervisor.readLogs(id, maxBytes)
         val result = taskJson(task, includeOutputTail = false).put("action", "read")
+        if (fromOffset != null || incremental) {
+            val delta = synchronized(this) {
+                val view = updateOutput(task) ?: return failure("LOGS_UNAVAILABLE", "后台命令日志不可用")
+                if (fromOffset != null) view.ring.readFrom(fromOffset.coerceAtLeast(0), maxBytes.coerceIn(1_024, DetachedTaskSupervisor.MAX_LOG_READ_BYTES))
+                else view.ring.consumeFrom(view.cursor, maxBytes.coerceIn(1_024, DetachedTaskSupervisor.MAX_LOG_READ_BYTES))
+            }
+            return result.put("output", delta.text).put("output_truncated", delta.lossy || delta.nextOffset < delta.totalBytes)
+                .put("next_offset", delta.nextOffset).put("total_bytes", delta.totalBytes).put("lossy", delta.lossy).toString()
+        }
+        val logs = supervisor.readLogs(id, maxBytes)
         if (!logs.ok) return result.put("ok", false).put("code", logs.code).put("message", logs.message).toString()
         return result.put("output", logs.text).put("output_truncated", logs.truncated).toString()
     }
@@ -79,17 +96,35 @@ internal class BackgroundTerminalJobs(
     fun waitFor(id: String, timeoutMs: Long, isCancelled: () -> Boolean): String {
         resume()
         if (supervisor.findTask(id)?.commandTask != true) return failure("JOB_NOT_FOUND", "未找到后台命令")
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(0, 60_000))
+        val task = awaitCompletion(id, timeoutMs.coerceIn(0, 60_000), isCancelled)
+            ?: return failure("JOB_NOT_FOUND", "后台命令已清理")
+        if (isCancelled()) return failure("CANCELLED", "已取消等待；后台命令仍保留，可单独停止")
+        // 完成通知也应在 wait 返回前提交；不能让调用方观察到陈旧的通知计数。
+        refresh()
+        return taskJson(task).put("action", "wait").put("wait_timed_out", task.completedAt == null).toString()
+    }
+
+    /** 前台 promote 的等待可达 180 秒，独立于 terminal_job.wait 的 60 秒上限。 */
+    fun awaitCompletion(id: String, timeoutMs: Long, isCancelled: () -> Boolean): DetachedTask? {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0))
         waitLock.withLock {
             while (supervisor.findTask(id)?.completedAt == null) {
-                if (isCancelled()) return failure("CANCELLED", "已取消等待；后台命令仍保留，可单独停止")
+                if (isCancelled() || closed || supervisor.findTask(id) == null) break
                 val remaining = deadline - System.nanoTime()
                 if (remaining <= 0) break
                 changed.awaitNanos(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(200)))
             }
         }
-        val task = supervisor.findTask(id) ?: return failure("JOB_NOT_FOUND", "后台命令已清理")
-        return taskJson(task).put("action", "wait").put("wait_timed_out", task.completedAt == null).toString()
+        return supervisor.findTask(id)
+    }
+
+    @Synchronized
+    private fun updateOutput(task: DetachedTask): OutputView? {
+        val view = outputViews.getOrPut(task.id) { OutputView() }
+        val window = supervisor.readLogWindow(task, view.ring.total) ?: return null
+        if (window.at != view.ring.total) view.ring = JobOutputRing(initialOffset = window.at)
+        view.ring.append(window.bytes)
+        return view
     }
 
     /** 重新打开 App 后从同一份任务记录恢复观察，不重新执行命令。 */
@@ -109,6 +144,9 @@ internal class BackgroundTerminalJobs(
             val expired = tasks.filter { it.running && it.task.timeoutMs > 0 && now - it.task.startedAt >= it.task.timeoutMs }
             expired.forEach { supervisor.stopCommand(it.task.id, "timed_out") }
             if (expired.isNotEmpty()) tasks = supervisor.list().filter { it.task.commandTask }
+            val retained = tasks.mapTo(mutableSetOf()) { it.task.id }
+            outputViews.keys.retainAll(retained)
+            tasks.filter { it.task.id in outputViews }.forEach { updateOutput(it.task) }
             tasks.filter { it.task.completedAt != null && !it.task.completionNotified }.forEach { status ->
                 try {
                     onCompleted(status.task)
@@ -129,7 +167,7 @@ internal class BackgroundTerminalJobs(
     }
 
     private fun monitor() {
-        if (monitor == null) monitor = executor.scheduleWithFixedDelay(::refresh, 0, 1, TimeUnit.SECONDS)
+        if (monitor == null) monitor = executor.scheduleWithFixedDelay(::refresh, 0, 500, TimeUnit.MILLISECONDS)
     }
 
     private fun lease(): Boolean {
@@ -154,6 +192,8 @@ internal class BackgroundTerminalJobs(
     override fun close() {
         stopAll()
         closed = true
+        removeCompletionListener()
+        outputViews.clear()
         monitor?.cancel(false)
         monitor = null
         executor.shutdownNow()

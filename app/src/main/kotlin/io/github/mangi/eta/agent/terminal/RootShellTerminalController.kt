@@ -34,6 +34,7 @@ internal class RootShellTerminalController(
 
     private val sessions = linkedMapOf<String, TerminalSession>()
     private val cleanupStarted = AtomicBoolean(false)
+    private val foregroundJobs = mutableSetOf<String>()
     val executionContext: TerminalExecutionContext = executionContext ?: run {
         val linuxEnvironment = selectedLinuxEnvironmentProvider()
         TerminalExecutionContext(
@@ -67,6 +68,7 @@ internal class RootShellTerminalController(
             environment = args.optString("environment", "android"),
             mergeStderr = args.optBoolean("merge_stderr", false),
             sessionId = args.optString("session_id").ifBlank { null },
+            promoteOnTimeout = args.optBoolean("promote_on_timeout", false),
         )
         "close" -> closeTerminal(args.optString("session_id"))
         else -> errorJson("UNSUPPORTED_TERMINAL_ACTION", "terminal action 仅支持 exec/open/close")
@@ -88,7 +90,12 @@ internal class RootShellTerminalController(
                     args.optString("description", "后台命令"), args.optLong("timeout_ms", 600_000))
             }
             "list" -> jobs.list(args.optBoolean("active_only", true))
-            "read" -> jobs.read(args.requiredText("job_id"), args.optInt("max_bytes", 16_000))
+            "read" -> jobs.read(args.requiredText("job_id"), args.optInt("max_bytes", 16_000),
+                fromOffset = when {
+                    args.has("from_offset") -> args.optLong("from_offset")
+                    args.has("cursor") -> args.optLong("cursor")
+                    else -> null
+                }, incremental = args.optBoolean("incremental", false))
             "wait" -> jobs.waitFor(args.requiredText("job_id"), args.optLong("wait_ms", 30_000)) { processSupervisor.isClosing }
             "stop" -> jobs.stop(args.requiredText("job_id"))
             else -> errorJson("UNSUPPORTED_TERMINAL_ACTION", "terminal_job action 仅支持 start/list/read/wait/stop")
@@ -188,6 +195,7 @@ internal class RootShellTerminalController(
         environment: String,
         mergeStderr: Boolean,
         sessionId: String?,
+        promoteOnTimeout: Boolean,
     ): String {
         val session = sessionId?.takeIf { it.isNotBlank() }?.let { id ->
             synchronized(sessions) { sessions[id] }
@@ -203,6 +211,10 @@ internal class RootShellTerminalController(
                 timeoutMs = timeoutMs,
                 mergeStderr = mergeStderr
             )
+        }
+        if (promoteOnTimeout && backgroundJobs != null && detachedSupervisor != null) {
+            return runPromotableCommand(command, cwd, timeoutMs.coerceIn(1, MAX_TIMEOUT_SECONDS * 1000),
+                effectiveIdentity, effectiveEnvironment, mergeStderr)
         }
         return runCommand(
             command = command,
@@ -340,13 +352,14 @@ internal class RootShellTerminalController(
     }
 
     private fun beginClosing() {
-        processSupervisor.beginClosing()
+        synchronized(foregroundJobs) { processSupervisor.beginClosing() }
         synchronized(sessions) {
             sessions.values.forEach { session -> session.closed = true }
         }
     }
 
     private fun closeAllInternal() {
+        synchronized(foregroundJobs) { foregroundJobs.toList() }.forEach { backgroundJobs?.stop(it) }
         val sessionIds = synchronized(sessions) { sessions.keys.toList() }
         sessionIds.forEach(::closeSession)
 
@@ -460,7 +473,8 @@ internal class RootShellTerminalController(
                 )
             }
 
-            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(1_000, MAX_TIMEOUT_SECONDS * 1000).toLong())
+            val started = System.nanoTime()
+            val deadline = started + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(1_000, MAX_TIMEOUT_SECONDS * 1000).toLong())
             while (System.nanoTime() < deadline) {
                 val stdoutDelta = session.stdout.text().drop(stdoutStart)
                 if (session.stdout.isTruncated()) {
@@ -518,7 +532,8 @@ internal class RootShellTerminalController(
                         stderrTruncated = session.stderr.isTruncated(),
                     )
                 }
-                Thread.sleep(20)
+                val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                Thread.sleep(when { elapsedMs < 200 -> 10L; elapsedMs < 1_000 -> 25L; else -> 50L })
             }
 
             session.closed = true
@@ -552,27 +567,96 @@ internal class RootShellTerminalController(
         val setup = if (safeCwd == androidWorkspace()) "mkdir -p ${shellQuote(safeCwd)} && " else ""
         val probeMarker = TerminalExecutionProbe.marker()
         val fullCommand = "${setup}cd ${shellQuote(safeCwd)} && export TERM=dumb NO_COLOR=1 && {\n${TerminalExecutionProbe.script(probeMarker)}\n$trimmed\n}"
-        val result = runText(
-            identity = normalizedIdentity,
-            command = fullCommand,
-            timeoutSeconds = timeout.toLong(),
-            environment = environment,
-        )
+        val spill = ShellOutputSpill.create(executionContext.androidWorkspacePath)
+        return spill.use {
+            val result = runText(
+                identity = normalizedIdentity,
+                command = fullCommand,
+                timeoutSeconds = timeout.toLong(),
+                environment = environment,
+                outputSpill = spill,
+            )
+            commandResultJson(result, trimmed, safeCwd, timeout * 1000, normalizedIdentity, environment, mergeStderr, probeMarker, spill)
+        }
+    }
+
+    private fun runPromotableCommand(
+        command: String, cwd: String?, timeoutMs: Int, identity: String,
+        environment: TerminalEnvironment, mergeStderr: Boolean,
+    ): String {
+        val trimmed = command.trim()
+        if (trimmed.isBlank()) return errorJson("INVALID_ARGUMENT", "command 不能为空")
+        if (processSupervisor.isClosing) return errorJson("TERMINAL_CLOSED", "当前运行已结束，不能再启动任务")
+        val jobs = checkNotNull(backgroundJobs)
+        val launcher = checkNotNull(detachedSupervisor)
+        val safeCwd = normalizeCwd(cwd, environment, identity)
+        if (safeCwd == androidWorkspace()) runCatching { File(safeCwd).mkdirs() }
+        val marker = TerminalExecutionProbe.marker()
+        val capture = ShellOutputSpill.create(executionContext.androidWorkspacePath, live = true)
+            ?: return errorJson("OUTPUT_CAPTURE_UNAVAILABLE", "无法建立后台输出文件，请检查临时目录")
+        val started = JSONObject(jobs.start(launcher,
+            "export TERM=dumb NO_COLOR=1\n${TerminalExecutionProbe.script(marker)}\n$trimmed",
+            safeCwd, identity, environment, "终端命令", timeoutMs = 0, outputCapture = capture))
+        if (!started.optBoolean("ok")) {
+            capture.close()
+            return started.toString()
+        }
+        val id = started.getString("job_id")
+        synchronized(foregroundJobs) { foregroundJobs += id }
+        try {
+            val task = jobs.awaitCompletion(id, timeoutMs.toLong()) { processSupervisor.isClosing }
+            val promote = synchronized(foregroundJobs) {
+                if (!processSupervisor.isClosing && task != null && task.completedAt == null) {
+                    foregroundJobs -= id
+                    true
+                } else false
+            }
+            if (promote) {
+                val preview = launcher.readLogs(id, 1_024)
+                return JSONObject().put("ok", true).put("tool", "terminal").put("action", "exec")
+                    .put("status", "promoted").put("promoted", true).put("timed_out", false)
+                    .put("job_id", id).put("identity", identity).put("environment", environment.wireName).put("cwd", safeCwd)
+                    .put("output_path", capture.logFile.absolutePath).put("output_environment", "android")
+                    .put("output_tail", TerminalExecutionProbe.extract(preview.text, marker, identity, environment).text.truncateForJson())
+                    .put("message", "命令超时后已自动转为后台任务继续运行，可用 terminal_job(action='read'/'wait'/'stop') 查看或控制。")
+                    .toString()
+            }
+            if (processSupervisor.isClosing) jobs.stop(id)
+            val result = launcher.capturedResult(id) ?: OneShotShellResult(-3, byteArrayOf(), "操作已取消".toByteArray())
+            return commandResultJson(ShellTextResult(
+                if (processSupervisor.isClosing) -3 else result.exitCode,
+                result.output.decodeUtf8Safe().trimEnd(), result.stderr.decodeUtf8Safe().trimEnd(),
+                result.outputTruncated, result.stderrTruncated,
+            ), trimmed, safeCwd, timeoutMs, identity, environment, mergeStderr, marker, outputPath = capture.logFile.absolutePath)
+        } catch (interrupted: InterruptedException) {
+            jobs.stop(id)
+            Thread.currentThread().interrupt()
+            return errorJson("CANCELLED", "命令已取消")
+        } finally {
+            synchronized(foregroundJobs) { foregroundJobs -= id }
+        }
+    }
+
+    private fun commandResultJson(
+        result: ShellTextResult, command: String, cwd: String, timeoutMs: Int, identity: String,
+        environment: TerminalEnvironment, mergeStderr: Boolean, probeMarker: String,
+        spill: ShellOutputSpill? = null, outputPath: String? = null,
+    ): String {
         val outcome = when (result.exitCode) {
             0 -> "succeeded"
             -2 -> "timed_out"
             else -> "failed"
         }
         val logMessage =
-            "Agent terminal action=exec outcome=$outcome identity=$normalizedIdentity " +
+            "Agent terminal action=exec outcome=$outcome identity=$identity " +
                 "environment=${environment.wireName} " +
-                "timeoutSeconds=$timeout commandChars=${trimmed.length} exitCode=${result.exitCode}"
+                "timeoutMs=$timeoutMs commandChars=${command.length} exitCode=${result.exitCode}"
         if (result.exitCode == 0) {
             logger.info(logMessage)
         } else {
             logger.warn(logMessage)
         }
-        val observation = TerminalExecutionProbe.extract(result.output, probeMarker, normalizedIdentity, environment)
+        val observation = TerminalExecutionProbe.extract(result.output, probeMarker, identity, environment)
         val rawStdout = if (mergeStderr && result.stderr.isNotBlank()) {
             observation.text + "\n[stderr]\n" + result.stderr
         } else {
@@ -584,9 +668,9 @@ internal class RootShellTerminalController(
             .put("ok", result.exitCode == 0)
             .put("tool", "terminal")
             .put("action", "exec")
-            .put("identity", normalizedIdentity)
+            .put("identity", identity)
             .put("environment", environment.wireName)
-            .put("cwd", safeCwd)
+            .put("cwd", cwd)
             .put("runtime", observation.runtime ?: JSONObject.NULL)
             .put("status", when { processSupervisor.isClosing -> "cancelled"; result.exitCode == -2 -> "timed_out"; result.exitCode == 0 -> "exited"; else -> "failed" })
             .put("exit_code", result.exitCode)
@@ -596,7 +680,14 @@ internal class RootShellTerminalController(
             .put("stdout_truncated", result.outputTruncated || rawStdout.length > MAX_OUTPUT_CHARS || (mergeStderr && result.stderrTruncated))
             .put("stderr_truncated", !mergeStderr && (result.stderrTruncated || result.stderr.length > MAX_OUTPUT_CHARS))
             .put("output_truncated", result.outputTruncated || result.stderrTruncated || rawStdout.length > MAX_OUTPUT_CHARS || result.stderr.length > MAX_OUTPUT_CHARS)
-            .let { TerminalCommandDiagnostics.apply(it, executionContext.linuxReady, timeout * 1000) }
+            .also { json ->
+                if (json.getBoolean("output_truncated")) {
+                    val path = outputPath ?: spill?.retain(observation.metadataBytes)
+                    if (path != null) json.put("output_path", path).put("output_environment", "android")
+                    if (spill?.truncated == true) json.put("spill_truncated", true)
+                }
+            }
+            .let { TerminalCommandDiagnostics.apply(it, executionContext.linuxReady, timeoutMs) }
             .toString()
     }
 
@@ -759,6 +850,7 @@ internal class RootShellTerminalController(
         command: String,
         timeoutSeconds: Long,
         environment: TerminalEnvironment,
+        outputSpill: ShellOutputSpill? = null,
     ): ShellTextResult {
         val result = runProcess(
             identity = identity,
@@ -767,11 +859,12 @@ internal class RootShellTerminalController(
             stdin = null,
             environment = environment,
             maxOutputBytes = MAX_COMMAND_OUTPUT_BYTES,
+            outputSpill = outputSpill,
         )
         return ShellTextResult(
             exitCode = result.exitCode,
-            output = result.output.decodeToString().trimEnd(),
-            stderr = result.stderr.decodeToString().trimEnd(),
+            output = result.output.decodeUtf8Safe().trimEnd(),
+            stderr = result.stderr.decodeUtf8Safe().trimEnd(),
             outputTruncated = result.outputTruncated,
             stderrTruncated = result.stderrTruncated,
         )
@@ -784,6 +877,7 @@ internal class RootShellTerminalController(
         stdin: ByteArray?,
         environment: TerminalEnvironment,
         maxOutputBytes: Int = Int.MAX_VALUE,
+        outputSpill: ShellOutputSpill? = null,
     ): OneShotShellResult =
         runOneShotShell(
             processSupervisor = processSupervisor,
@@ -795,10 +889,15 @@ internal class RootShellTerminalController(
             linuxRootfsPath = rootfsPathFor(environment),
             linuxSharedMounts = sharedMountsFor(environment),
             maxOutputBytes = maxOutputBytes,
+            outputSpill = outputSpill,
         )
 
-    private fun String.truncateForJson(): String =
-        if (length <= MAX_OUTPUT_CHARS) this else take(MAX_OUTPUT_CHARS) + "\n...[truncated]"
+    private fun String.truncateForJson(): String {
+        if (length <= MAX_OUTPUT_CHARS) return this
+        val end = if (this[MAX_OUTPUT_CHARS - 1].isHighSurrogate() && this[MAX_OUTPUT_CHARS].isLowSurrogate())
+            MAX_OUTPUT_CHARS - 1 else MAX_OUTPUT_CHARS
+        return take(end) + "\n...[truncated]"
+    }
 
     private fun errorJson(code: String, message: String): String =
         JSONObject()

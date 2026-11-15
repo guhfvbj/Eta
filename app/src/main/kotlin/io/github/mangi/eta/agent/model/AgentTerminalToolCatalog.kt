@@ -17,7 +17,8 @@ internal object AgentTerminalToolCatalog {
                     commandProperties()
                         .put("action", action("exec", "open", "close", "check_root")
                             .put("description", "默认 exec 执行命令；open 创建持久 Shell；close 关闭会话；check_root 用固定的 su -c 'id -u' 检测并更新 Root 授权，不需要 command，可能显示系统授权请求。"))
-                        .put("session_id", text("open 返回的会话 ID。exec 沿用会话的目录、环境和身份；切换目录请在会话中执行 cd。")),
+                        .put("session_id", text("open 返回的会话 ID。exec 沿用会话的目录、环境和身份；切换目录请在会话中执行 cd。"))
+                        .put("promote_on_timeout", bool("exec 未传 session_id 时可选，默认 false。显式 true 时，超过 timeout_ms 自动保留为后台命令，返回 status=promoted 和 job_id；用 terminal_job 的 read/wait/stop 继续查看或控制。")),
                 ),
             ),
         )
@@ -36,6 +37,9 @@ internal object AgentTerminalToolCatalog {
                         .put("job_id", text("start 或 list 返回的任务 ID；read、wait、stop 使用。"))
                         .put("active_only", bool("list 是否只返回运行中的任务，默认 true。"))
                         .put("max_bytes", integer("read 返回的日志尾部字节数，默认 16000，最多 65536；完整日志保存在 output_path。"))
+                        .put("from_offset", integer("read 可选的绝对 UTF-8 字节偏移；返回 next_offset、total_bytes、lossy。按 next_offset 继续读取；落后于内存环时 lossy=true，较早输出仍可从 output_path 读取。"))
+                        .put("cursor", integer("read 的 from_offset 别名。"))
+                        .put("incremental", bool("read 可选，默认 false；不传偏移且为 true 时使用并推进宿主消费游标。默认读取仍返回日志尾部。"))
                         .put("wait_ms", integer("wait 最长等待毫秒数，默认 30000，最多 60000；等待超时不会停止命令。")),
                     "action",
                 ),

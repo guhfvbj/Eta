@@ -159,6 +159,102 @@ class BackgroundTerminalJobsTest {
         jobs.stop(id)
     }
 
+    @Test fun incrementalOffsetsAndConsumerCursorDoNotChangeLegacyTailReads() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val gate = File(temporary.root, "continue")
+        val id = JSONObject(jobs.start(supervisor,
+            "printf '你😀'; while [ ! -f ${shellQuote(gate.path)} ]; do sleep 0.02; done; printf '好'",
+            temporary.root.path, "user", TerminalEnvironment.ANDROID, "增量输出", 5000)).getString("job_id")
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+        var first: JSONObject
+        do {
+            first = JSONObject(jobs.read(id, fromOffset = 0))
+            if (first.getString("output") == "你😀") break
+            Thread.sleep(10)
+        } while (System.nanoTime() < deadline)
+        assertEquals("你😀", first.getString("output"))
+        assertEquals(7L, first.getLong("next_offset"))
+        assertFalse(first.getBoolean("lossy"))
+        assertEquals("你😀", JSONObject(jobs.read(id, fromOffset = 0)).getString("output"))
+        assertEquals("你😀", JSONObject(jobs.read(id, incremental = true)).getString("output"))
+        assertEquals("", JSONObject(jobs.read(id, incremental = true)).getString("output"))
+        gate.writeText("go")
+        jobs.waitFor(id, 5000) { false }
+        val second = JSONObject(jobs.read(id, fromOffset = first.getLong("next_offset")))
+        assertEquals("好", second.getString("output"))
+        assertEquals(10L, second.getLong("next_offset"))
+        assertEquals(10L, second.getLong("total_bytes"))
+        assertEquals("好", JSONObject(jobs.read(id, incremental = true)).getString("output"))
+        val legacy = JSONObject(jobs.read(id))
+        assertEquals("你😀好", legacy.getString("output"))
+        assertFalse(legacy.has("next_offset"))
+        assertFalse(legacy.getBoolean("output_truncated"))
+    }
+
+    @Test fun incrementalReadsPageOnUtf8BoundariesAndReportEviction() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val id = JSONObject(jobs.start(supervisor,
+            "head -c 1023 /dev/zero | tr '\\000' x; printf '😀end'", temporary.root.path,
+            "user", TerminalEnvironment.ANDROID, "分页", 5000)).getString("job_id")
+        jobs.waitFor(id, 5000) { false }
+        val first = JSONObject(jobs.read(id, 1024, fromOffset = 0))
+        assertEquals(1023, first.getString("output").length)
+        assertEquals(1023L, first.getLong("next_offset"))
+        val second = JSONObject(jobs.read(id, 1024, fromOffset = first.getLong("next_offset")))
+        assertEquals("😀end", second.getString("output"))
+        assertFalse(second.getBoolean("lossy"))
+        val large = JSONObject(jobs.start(supervisor,
+            "head -c 300000 /dev/zero | tr '\\000' x", temporary.root.path,
+            "user", TerminalEnvironment.ANDROID, "环淘汰", 5000)).getString("job_id")
+        jobs.waitFor(large, 5000) { false }
+        val read = JSONObject(jobs.read(large, fromOffset = 0))
+        assertTrue(read.getBoolean("lossy"))
+        assertEquals(300000L, read.getLong("total_bytes"))
+        assertEquals(300000L - 256 * 1024 + 16000, read.getLong("next_offset"))
+        assertEquals(300000L, File(read.getString("output_path")).length())
+    }
+
+    @Test fun completionCallbackNotifiesBeforeThePeriodicMonitorTick() {
+        val launcher = supervisor()
+        val completed = java.util.concurrent.CountDownLatch(1)
+        val notified = java.util.concurrent.CountDownLatch(1)
+        val completionTime = java.util.concurrent.atomic.AtomicLong()
+        val notificationTime = java.util.concurrent.atomic.AtomicLong()
+        val removeListener = launcher.onCommandCompleted {
+            completionTime.set(System.nanoTime())
+            completed.countDown()
+        }
+        // UI 与 Agent 使用不同 supervisor 实例，也必须收到同一任务的完成事件。
+        val observer = supervisor()
+        val jobs = BackgroundTerminalJobs(observer, NoopLogger, onCompleted = {
+            notificationTime.set(System.nanoTime())
+            notified.countDown()
+        }).also { hosts += it }
+        val gate = File(temporary.root, "finish")
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val id = JSONObject(jobs.start(launcher,
+                "while [ ! -f ${shellQuote(gate.path)} ]; do sleep 0.01; done; printf done",
+                temporary.root.path, "user", TerminalEnvironment.ANDROID, "即时完成", 5000)).getString("job_id")
+            val waiting = java.util.concurrent.CountDownLatch(1)
+            val waiter = executor.submit<DetachedTask?> {
+                waiting.countDown()
+                jobs.awaitCompletion(id, 5000) { false }
+            }
+            assertTrue(waiting.await(1, java.util.concurrent.TimeUnit.SECONDS))
+            gate.writeText("go")
+            // 从实际 process.waitFor 完成开始计时，避免将系统进程组清理时间计入通知延迟。
+            assertTrue(completed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue("completion must notify without waiting for the periodic tick",
+                notified.await(200, java.util.concurrent.TimeUnit.MILLISECONDS))
+            assertTrue(notificationTime.get() - completionTime.get() < java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200))
+            assertTrue(waiter.get(200, java.util.concurrent.TimeUnit.MILLISECONDS)!!.completedAt != null)
+            assertEquals("completed", JSONObject(jobs.waitFor(id, 1000) { false }).getString("status"))
+        } finally { executor.shutdownNow(); removeListener() }
+    }
+
     private object NoopLogger : AgentLogger {
         override fun debug(message: () -> String) = Unit
         override fun info(message: String) = Unit
