@@ -20,6 +20,10 @@ internal class AgentContextSession(
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit,
     private val transcriptSize: () -> Int = { 0 },
     private val roleplay: Boolean = false,
+    private val mainToolsProvider: () -> JSONArray = { JSONArray() },
+    private val mainSessionId: String = operationId,
+    private val messageProjector: ((JSONArray) -> JSONArray)? = null,
+    private val enableCacheReuse: Boolean = false,
     private val systemCountProvider: () -> Int = { systemCount },
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
     initialTokenBaseline: AgentContextTokenBaseline? = null,
@@ -104,8 +108,9 @@ internal class AgentContextSession(
         val prefix = AgentTokenEstimator.bounded((localRequest.toLong() - localHistory).coerceAtLeast(0) +
             AgentTokenEstimator.json(tools))
         val known = baseline?.takeIf { it.matches(history, config) }
-        // 估算权重变更后旧校准系数不再适用，直接按新算法从 1.0 重新学习。
-        val scale = baseline?.takeIf { it.estimatorVersion >= AgentTokenEstimator.VERSION }
+        // 估算权重、模型或窗口变更后旧校准系数不再适用，从 1.0 重新学习。
+        val scale = baseline?.takeIf { it.estimatorVersion >= AgentTokenEstimator.VERSION &&
+            it.modelKey == AgentTokenEstimator.modelKey(config) }
             ?.boundedEstimateScale ?: 1.0
         // 老库的 prefixTokens 使用双倍中文权重，不能把估算算法差异误当作提示词删除。
         val comparablePrefix = if (known != null && known.estimatorVersion < AgentTokenEstimator.VERSION) {
@@ -159,16 +164,19 @@ internal class AgentContextSession(
         onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
             val compactor = AgentContextCompactor(config, provider, runController, roleplay = roleplay,
-                dynamicMcpGroupsProvider = dynamicMcpGroupsProvider)
-            val candidate = try {
-                compactor.compact(messages, systemCount, sensitiveIds())
+                dynamicMcpGroupsProvider = dynamicMcpGroupsProvider,
+                mainTools = mainToolsProvider(), mainSessionId = mainSessionId,
+                messageProjector = messageProjector, enableCacheReuse = enableCacheReuse)
+            val outcome = try {
+                compactor.compactWithOutcome(messages, systemCount, sensitiveIds())
             } catch (failure: Exception) {
                 runController.throwIfCancelled()
                 if (!emergency || failure is AgentRunCancelledException || failure is CancellationException ||
                     failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
-                compactor.fallbackCompact(messages, systemCount, sensitiveIds())
+                compactor.fallbackCompactWithOutcome(messages, systemCount, sensitiveIds())
             }
             runController.throwIfCancelled()
+            val candidate = outcome.messages
             val previousBaseline = baseline
             val previousNoProgress = noProgressCount
             val previousCooldown = cooldownRemaining
@@ -193,7 +201,8 @@ internal class AgentContextSession(
             for (index in 0 until candidate.length()) messages.put(candidate.getJSONObject(index))
             baseline = snapshot.tokenBaseline
             committedSnapshot = snapshot
-            onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before))
+            onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_COMPLETED, before,
+                usage = outcome.usage, archiveId = outcome.archiveId))
         } catch (failure: Exception) {
             runController.throwIfCancelled()
             onEvent(AgentEvent.ContextCompaction(operation, "failed", before,

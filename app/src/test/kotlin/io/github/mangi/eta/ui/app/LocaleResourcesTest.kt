@@ -51,6 +51,18 @@ class LocaleResourcesTest {
         assertEquals("Retrying model request", localizedString("en-US", R.string.system_notice_model_retry))
         assertEquals("模型请求重试", localizedString("zh-CN", R.string.system_notice_model_retry))
         assertEquals("模型請求重試", localizedString("zh-TW", R.string.system_notice_model_retry))
+        assertEquals("Auto-generate titles", localizedString("en-US", R.string.conversation_title_settings_title))
+        assertEquals("自动生成对话标题", localizedString("zh-CN", R.string.conversation_title_settings_title))
+        assertEquals("自動產生對話標題", localizedString("zh-TW", R.string.conversation_title_settings_title))
+        assertEquals("Compaction model", localizedString("en-US", R.string.compaction_model_title))
+        assertEquals("压缩模型", localizedString("zh-CN", R.string.compaction_model_title))
+        assertEquals("壓縮模型", localizedString("zh-TW", R.string.compaction_model_title))
+        assertEquals("Search for tools", localizedString("en-US", R.string.mcp_loading_mode_search))
+        assertEquals("按工具搜索", localizedString("zh-CN", R.string.mcp_loading_mode_search))
+        assertEquals("依工具搜尋", localizedString("zh-TW", R.string.mcp_loading_mode_search))
+        assertEquals("Floating assistant", localizedString("en-US", R.string.assistant_overlay_settings_title))
+        assertEquals("全局浮窗助手", localizedString("zh-CN", R.string.assistant_overlay_settings_title))
+        assertEquals("全域浮窗助手", localizedString("zh-TW", R.string.assistant_overlay_settings_title))
         assertEquals(
             "1 task is running. Return to Eta to check progress.",
             localizedQuantity("en-US", R.plurals.execution_summary, 1),

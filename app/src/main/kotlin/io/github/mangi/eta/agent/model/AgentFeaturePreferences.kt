@@ -14,8 +14,6 @@ internal object AgentFeaturePreferences {
         if (settings.optInt("migration", 0) < 2) {
             settings.keys().asSequence().toList().filter { it.startsWith("group_") || it == "disabled_tools" }.forEach(settings::remove)
             if (settings.optString("loading") == "tool") settings.put("loading", "search")
-            if (!settings.has("title_custom")) settings.put("title_custom", settings.optString("title_model").isNotBlank())
-            if (!settings.has("title_custom_model_id")) settings.put("title_custom_model_id", settings.optString("title_model"))
             if (!settings.has("decision_escalation_enabled")) settings.put("decision_escalation_enabled", settings.optString("decision_upgrade_model").isNotBlank())
             settings.put("migration", 2)
             check(prefs(context).edit().putString("settings", settings.toString()).commit())
@@ -87,20 +85,10 @@ internal object AgentFeaturePreferences {
     fun isTextModel(model: io.github.mangi.eta.data.model.Model): Boolean = model.outputModalities.all { it.equals("text", true) } &&
         !Regex("(?i)(?:^|[-_/])(tts|speech|whisper|dall-e|imagen|image|imagine|imagegen|video|audio|sora|veo|flux|cosyvoice|sensevoice)(?:$|[-_./])").containsMatchIn(model.modelId)
     fun clearConversation(id: String, context: Context) {
-        val editor = prefs(context).edit()
-        listOf("manual_title_", "generated_title_").forEach { editor.remove(it + id) }
-        editor.apply()
         val sessions = context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE)
         sessions.edit().remove("mode_$id").remove("opened_$id").remove("groups_$id").apply()
     }
     fun clearToolSessions(context: Context) = context.getSharedPreferences("eta_tool_sessions", Context.MODE_PRIVATE).edit().clear().putLong("generation",System.currentTimeMillis()).apply()
-    fun resetGeneratedTitleForEdit(id: String, context: Context): Boolean {
-        if(manualTitle(id,context)) return false
-        prefs(context).edit().remove("generated_title_$id").apply()
-        return true
-    }
-    fun manualTitle(id: String, context: Context) = prefs(context).getBoolean("manual_title_$id", false)
-    fun protectTitle(id: String, context: Context) { prefs(context).edit().putBoolean("manual_title_$id", true).apply() }
 }
 
 internal data class ModelFeatureSelection(val custom: Boolean, val providerId: String, val modelId: String) {

@@ -23,13 +23,14 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36], application = Application::class)
 class EtaDatabaseMigrationTest {
     @Test
-    fun migration26To27AddsMetadataAndRepairsDeepseekWindows() {
+    fun overlappingMigrationsAreIdempotentAndPreserveMetadataAndWindowOverrides() {
         val context = RuntimeEnvironment.getApplication() as Context
         val name = "m26-${UUID.randomUUID().toString().take(8)}.db"
         fun open(version: Int): SupportSQLiteOpenHelper = FrameworkSQLiteOpenHelperFactory().create(
             SupportSQLiteOpenHelper.Configuration.builder(context).name(name)
                 .callback(object : SupportSQLiteOpenHelper.Callback(version) {
                     override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("CREATE TABLE conversation_messages (id TEXT PRIMARY KEY NOT NULL)")
                         db.execSQL("CREATE TABLE conversation_context_checkpoints (conversation_id TEXT PRIMARY KEY NOT NULL, history_json TEXT NOT NULL, journal_json TEXT NOT NULL DEFAULT '')")
                         db.execSQL("INSERT INTO conversation_context_checkpoints VALUES ('conversation', 'history', 'journal')")
                         db.execSQL("CREATE TABLE provider_models (id TEXT PRIMARY KEY NOT NULL, is_built_in INTEGER NOT NULL, context_window INTEGER, context_window_override INTEGER)")
@@ -37,12 +38,16 @@ class EtaDatabaseMigrationTest {
                             "('builtin-bailian-deepseek-v4-1-flash',1,1000000,NULL), ('gemini-4',0,NULL,256000), ('custom-deepseek',0,NULL,1000000)")
                     }
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
-                        EtaDatabase.MIGRATION_26_27.migrate(db)
+                        repeat(2) {
+                            EtaDatabase.MIGRATION_25_26.migrate(db)
+                            EtaDatabase.MIGRATION_26_27.migrate(db)
+                            EtaDatabase.MIGRATION_27_28.migrate(db)
+                        }
                     }
                 }).build(),
         )
         open(26).use { it.writableDatabase }
-        val helper = open(27)
+        val helper = open(28)
         try {
             val db = helper.writableDatabase
             db.query("SELECT history_json, journal_json, runtime_state_json FROM conversation_context_checkpoints").use {
@@ -64,7 +69,7 @@ class EtaDatabaseMigrationTest {
     }
 
     @Test
-    fun migration6To27PreservesDataAndMovesCompleteConversationContext() {
+    fun migration6To28PreservesDataAndMovesCompleteConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -103,6 +108,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_24_25,
                 EtaDatabase.MIGRATION_25_26,
                 EtaDatabase.MIGRATION_26_27,
+                EtaDatabase.MIGRATION_27_28,
             )
             .build()
         try {
@@ -187,6 +193,87 @@ class EtaDatabaseMigrationTest {
             database.close()
             context.deleteDatabase(databaseName)
         }
+    }
+
+    @Test
+    fun officialAndForkVersions24Through27MigrateTo28WithoutDataLoss() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val origins = listOf(24 to "official", 25 to "official", 26 to "official",
+            26 to "fork", 27 to "fork", 27 to "partial")
+        for ((version, lineage) in origins) {
+            val name = "m$version-$lineage-${UUID.randomUUID()}.db"
+            createHistoricalDatabase(context, name, version, lineage)
+            val database = Room.databaseBuilder(context, EtaDatabase::class.java, name)
+                .addMigrations(EtaDatabase.MIGRATION_24_25, EtaDatabase.MIGRATION_25_26,
+                    EtaDatabase.MIGRATION_26_27, EtaDatabase.MIGRATION_27_28)
+                .build()
+            try {
+                // Opening through Room validates the complete entity schema, foreign keys and indices.
+                val message = runBlocking(Dispatchers.IO) { database.conversationDao().messages().single() }
+                assertEquals("旧消息", message.content)
+                assertEquals(if (lineage == "official" && version == 26) 800 else null, message.cacheWriteTokens)
+                assertEquals(if (lineage == "official" && version == 26) "fold-3" else null, message.compactionArchiveId)
+                val checkpoint = runBlocking(Dispatchers.IO) { database.conversationDao().contextCheckpoint("conv-1") }
+                assertEquals(if (lineage == "fork" && version == 27) "saved-runtime" else "", checkpoint?.runtimeStateJson)
+                val db = database.openHelper.readableDatabase
+                assertEquals(28, db.version)
+                db.query("SELECT COUNT(*) FROM agent_tasks").use {
+                    check(it.moveToFirst())
+                    assertEquals(if (lineage == "fork") 1 else 0, it.getInt(0))
+                }
+                db.query("SELECT COUNT(*) FROM agent_task_runs").use {
+                    check(it.moveToFirst())
+                    assertEquals(if (lineage == "fork") 1 else 0, it.getInt(0))
+                }
+                assertEquals("保留的结果", runBlocking(Dispatchers.IO) { database.runtimeRunDao().runtimeResults().single().content })
+            } finally {
+                database.close()
+                context.deleteDatabase(name)
+            }
+        }
+    }
+
+    private fun createHistoricalDatabase(context: Context, name: String, version: Int, lineage: String) {
+        createVersion6Database(context, name)
+        FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context).name(name)
+                .callback(object : SupportSQLiteOpenHelper.Callback(version) {
+                    override fun onCreate(db: SupportSQLiteDatabase) = error("Expected v6 fixture")
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                        listOf(EtaDatabase.MIGRATION_6_7, EtaDatabase.MIGRATION_7_8,
+                            EtaDatabase.MIGRATION_8_9, EtaDatabase.MIGRATION_9_10,
+                            EtaDatabase.MIGRATION_10_11, EtaDatabase.MIGRATION_11_12,
+                            EtaDatabase.MIGRATION_12_13, EtaDatabase.MIGRATION_13_14,
+                            EtaDatabase.MIGRATION_14_15, EtaDatabase.MIGRATION_15_16,
+                            EtaDatabase.MIGRATION_16_17, EtaDatabase.MIGRATION_17_18,
+                            EtaDatabase.MIGRATION_18_19, EtaDatabase.MIGRATION_19_20,
+                            EtaDatabase.MIGRATION_20_21, EtaDatabase.MIGRATION_21_22,
+                            EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24).forEach { it.migrate(db) }
+                        if (version >= 25) EtaDatabase.MIGRATION_24_25.migrate(db)
+                        // Reproduce the actual shipped schemas, rather than the reconciled migrations.
+                        if (lineage == "official" && version == 26) {
+                            db.execSQL("ALTER TABLE conversation_messages ADD COLUMN cache_write_tokens INTEGER")
+                            db.execSQL("ALTER TABLE conversation_messages ADD COLUMN compaction_archive_id TEXT")
+                            db.execSQL("UPDATE conversation_messages SET cache_write_tokens = 800, compaction_archive_id = 'fold-3'")
+                        }
+                        if (lineage == "fork") {
+                            db.execSQL("CREATE TABLE agent_tasks (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL, " +
+                                "triggerJson TEXT NOT NULL, enabled INTEGER NOT NULL, nextRunAt INTEGER, cooldownSeconds INTEGER NOT NULL, " +
+                                "maxRuns INTEGER NOT NULL, runCount INTEGER NOT NULL, lastStartedAt INTEGER, lastStatus TEXT NOT NULL, " +
+                                "createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)")
+                            db.execSQL("CREATE TABLE agent_task_runs (id TEXT NOT NULL PRIMARY KEY, taskId TEXT NOT NULL, fireKey TEXT NOT NULL, " +
+                                "status TEXT NOT NULL, eventJson TEXT NOT NULL, queuedAt INTEGER NOT NULL, startedAt INTEGER, finishedAt INTEGER, resultPreview TEXT NOT NULL)")
+                            db.execSQL("CREATE UNIQUE INDEX index_agent_task_runs_taskId_fireKey ON agent_task_runs(taskId, fireKey)")
+                            db.execSQL("INSERT INTO agent_tasks VALUES ('task', 'Name', 'Prompt', '{}', 1, NULL, 60, 10, 1, NULL, 'ready', 1, 1)")
+                            db.execSQL("INSERT INTO agent_task_runs VALUES ('run', 'task', 'fire', 'completed', '{}', 1, 2, 3, 'Result')")
+                            if (version == 27) {
+                                db.execSQL("ALTER TABLE conversation_context_checkpoints ADD COLUMN runtime_state_json TEXT NOT NULL DEFAULT ''")
+                                db.execSQL("UPDATE conversation_context_checkpoints SET runtime_state_json = 'saved-runtime' WHERE conversation_id = 'conv-1'")
+                            }
+                        }
+                    }
+                }).build(),
+        ).use { it.writableDatabase }
     }
 
     private fun createVersion6Database(

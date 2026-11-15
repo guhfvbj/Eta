@@ -113,17 +113,15 @@ class AgentAppStateConversationLoadingTest {
     }
 
     @Test
-    fun editingFirstMessageResetsAGeneratedTitleForTheNextSuccessfulRun() {
+    fun manuallyRenamingToTheFallbackTitleStillProtectsItWhenEditingTheFirstMessage() {
         seed("first" to conversation("first"))
-        val features = context.getSharedPreferences("eta_agent_features", Context.MODE_PRIVATE)
-        features.edit().putBoolean("generated_title_first", true).commit()
         val state = AgentAppState(context, scope)
+        state.renameConversation("first", "first-message-0-end")
 
         state.beginMessageEdit("first-0")
         state.sendCurrentMessage("Updated first question")
 
-        assertEquals("Updated first question", state.conversationPaneState.conversations.single().title)
-        assertFalse(features.contains("generated_title_first"))
+        assertEquals("first-message-0-end", state.conversationPaneState.conversations.single().title)
     }
 
     @Test

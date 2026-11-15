@@ -89,15 +89,18 @@ class PromptStudioIntegrationTest {
     }
 
     @Test
-    fun manualTitlesStayProtectedAndDeletionClearsTheirFeatureState() {
+    fun deletingConversationClearsItsToolSessionState() {
         val context = RuntimeEnvironment.getApplication()
-        AgentFeaturePreferences.protectTitle("conversation", context)
-        context.getSharedPreferences("eta_agent_features", 0).edit()
-            .putBoolean("generated_title_conversation", true).commit()
-        assertFalse(AgentFeaturePreferences.resetGeneratedTitleForEdit("conversation", context))
+        val sessions = context.getSharedPreferences("eta_tool_sessions", 0)
+        sessions.edit().putString("mode_conversation", "search")
+            .putString("opened_conversation", "mcp:one")
+            .putString("groups_conversation", "mcp:one")
+            .putString("mode_other", "group").commit()
         AgentFeaturePreferences.clearConversation("conversation", context)
-        assertFalse(AgentFeaturePreferences.manualTitle("conversation", context))
-        assertFalse(context.getSharedPreferences("eta_agent_features", 0).contains("generated_title_conversation"))
+        assertFalse(sessions.contains("mode_conversation"))
+        assertFalse(sessions.contains("opened_conversation"))
+        assertFalse(sessions.contains("groups_conversation"))
+        assertEquals("group", sessions.getString("mode_other", null))
     }
 
     private fun system(customization: PromptCustomization) = AgentPromptBuilder.buildSystemMessages(

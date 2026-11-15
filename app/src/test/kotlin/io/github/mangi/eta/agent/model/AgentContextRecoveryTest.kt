@@ -339,7 +339,7 @@ class AgentContextRecoveryTest {
                     })
             }
             val snapshot = AgentContextSnapshot.decode(failure.contextSnapshot!!.encode())!!
-            assertTrue(snapshot.lastContextTokens!! > 128_000)
+            assertTrue(snapshot.lastContextTokens!! >= bounded.contextWindow!! * 0.75)
             assertEquals("pending", snapshot.messages.last().toolCallId)
             assertTrue(snapshot.messages.last().content.contains("TOOL_INTERRUPTED"))
             assertEquals(failure.transcript.size, snapshot.consumedTranscriptMessages)
@@ -386,7 +386,7 @@ class AgentContextRecoveryTest {
         var chats = 0
         var summaries = 0
         val result = AgentModelClient.complete(config.copy(contextWindow = 256_000, autoCompactionEnabled = false),
-            "继续", { error("no tools") }, history = history(), provider = provider { request, emit ->
+            "继续", { error("no tools") }, history = history(200_000), provider = provider { request, emit ->
                 if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                     summaries++
                     response("无效摘要", "length")
@@ -475,9 +475,9 @@ class AgentContextRecoveryTest {
         }
     }
 
-    private fun history() = listOf(
+    private fun history(assistantChars: Int = 100_000) = listOf(
         AgentModelClient.ConversationMessage("user", "旧任务"),
-        AgentModelClient.ConversationMessage("assistant", "长".repeat(100_000)),
+        AgentModelClient.ConversationMessage("assistant", "长".repeat(assistantChars)),
     )
 
     private fun messages() = JSONArray().put(JSONObject().put("role", "system").put("content", "固定约束")).also { source ->

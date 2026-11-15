@@ -35,7 +35,7 @@ internal object GeminiInteractionsProvider : AgentProviderClient {
             }.build()
         val httpRequest = Request.Builder().url(ProviderUrls.geminiInteractionsUrl(config.baseUrl))
             .headers(headers)
-            .post(GeminiInteractionsRequest.build(config, request.messages, request.effectiveTools).also { body ->
+            .post(GeminiInteractionsRequest.build(config, request.messages, request.effectiveTools, request.purpose).also { body ->
                     request.outputLimit?.let { limit ->
                         val generation = body.optJSONObject("generation_config") ?: org.json.JSONObject()
                         generation.put("max_output_tokens", limit.coerceIn(1, 8192))

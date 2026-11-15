@@ -82,7 +82,7 @@ class AgentContextCompactionTest {
         val provider = provider { request, emit ->
             if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                 summaries++
-                assertEquals(0, request.effectiveTools.length())
+                assertTrue(request.effectiveTools.length() > 0)
                 response("已完成前面的任务，继续处理最新请求。")
             } else {
                 assertTrue(request.messages.toString().contains("最新请求必须保留"))
@@ -659,6 +659,234 @@ class AgentContextCompactionTest {
                 assertTrue(requests > 0)
             }
         }
+    }
+
+    @Test
+    fun compactionReusesMainPrefixToolsAndSessionIdWithoutLeakingObservationsOrScreenContext() {
+        val history = (1..4).flatMap { turn ->
+            listOf(
+                AgentModelClient.ConversationMessage("user", "历史任务 $turn"),
+                AgentModelClient.ConversationMessage("assistant", "历史响应 $turn ".repeat(1500)),
+            )
+        }
+        val events = mutableListOf<AgentEvent>()
+        val capturedRequests = mutableListOf<ProviderRequest>()
+        var round = 0
+        val provider = provider { request, emit ->
+            capturedRequests += ProviderRequest(
+                config = request.config,
+                messages = JSONArray(request.messages.toString()),
+                tools = JSONArray(request.tools.toString()),
+                sessionId = request.sessionId,
+                purpose = request.purpose,
+            )
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                emit(
+                    ProviderEvent.Usage(
+                        AgentTokenUsage(
+                            contextTokens = 45_500,
+                            inputTokens = 45_500,
+                            outputTokens = 180,
+                            cachedTokens = 44_000,
+                            cacheWriteTokens = 300,
+                        ),
+                    ),
+                )
+                response("已归档此前历史与工具结果。\n关键实体与线索：get_current_context")
+            } else if (round++ == 0) {
+                emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 100_000, cachedTokens = 90_000)))
+                ProviderResponse(
+                    JSONObject()
+                        .put("role", "assistant")
+                        .put("content", "")
+                        .put("finish_reason", "tool_calls")
+                        .put(
+                            "tool_calls",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("id", "call-1")
+                                    .put("type", "function")
+                                    .put(
+                                        "function",
+                                        JSONObject()
+                                            .put("name", "get_current_context")
+                                            .put("arguments", "{}"),
+                                    ),
+                            ),
+                        ),
+                )
+            } else {
+                emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 4_000, cachedTokens = 2_000)))
+                response("全部完成")
+            }
+        }
+        val result = AgentModelClient.complete(
+            // Leave room for the calibrated local estimate; the first tool round's
+            // observed usage triggers the single compaction exercised below.
+            config = config,
+            prompt = "当前问题",
+            toolExecutor = AgentModelClient.ToolExecutor {
+                AgentModelClient.ToolResult(
+                    content = """{"ok":true}""",
+                    images = listOf(
+                        AgentModelClient.ModelImage("data:image/png;base64,PRIVATE_OBS_IMAGE", "image/png", 16),
+                    ),
+                )
+            },
+            history = history,
+            provider = provider,
+            sessionId = "stable-conv-session",
+            assistantScreenContext = "PRIVATE_AUTOMATIC_SCREEN_CONTENT",
+            onEvent = events::add,
+        )
+
+        assertEquals("全部完成", result.content)
+        val mainRound1 = capturedRequests.first { it.purpose == ProviderRequestPurpose.CHAT }
+        val compactionReq = capturedRequests.first { it.purpose == ProviderRequestPurpose.COMPACTION }
+        assertEquals("stable-conv-session", compactionReq.sessionId)
+        assertEquals(mainRound1.effectiveTools.toString(), compactionReq.effectiveTools.toString())
+        assertEquals(mainRound1.messages.getJSONObject(0).toString(), compactionReq.messages.getJSONObject(0).toString())
+        assertFalse(compactionReq.messages.toString().contains("PRIVATE_OBS_IMAGE"))
+        assertFalse(compactionReq.messages.toString().contains("PRIVATE_AUTOMATIC_SCREEN_CONTENT"))
+        assertTrue(compactionReq.messages.toString().contains("历史任务 1"))
+        assertTrue(compactionReq.messages.toString().contains("当前问题"))
+        assertEquals(
+            true,
+            compactionReq.messages.getJSONObject(compactionReq.messages.length() - 1)
+                .optBoolean("_eta_compaction_prompt"),
+        )
+        val completedCompaction = events.filterIsInstance<AgentEvent.ContextCompaction>()
+            .single { it.phase == AgentEvent.ContextCompaction.PHASE_COMPLETED }
+        assertEquals("fold-1", completedCompaction.archiveId)
+        assertEquals(45_500, completedCompaction.usage?.inputTokens)
+        assertEquals(44_000, completedCompaction.usage?.cachedTokens)
+        assertEquals(300, completedCompaction.usage?.cacheWriteTokens)
+        assertEquals(AgentTokenUsage.REQUEST_KIND_COMPACTION, completedCompaction.usage?.requestKind)
+        val snapshot = checkNotNull(result.contextSnapshot)
+        val summaryMsg = snapshot.messages.first { it.contextSummary }
+        assertEquals("fold-1", summaryMsg.compactionArchiveId)
+        assertTrue(summaryMsg.content.contains("fold-1"))
+        assertTrue(summaryMsg.content.contains(AgentConversationToolCatalog.READ_HISTORY))
+    }
+
+    @Test
+    fun repeatedCompactionsIncrementArchiveIdAndFallBackIfModelAttemptsToolCall() {
+        val firstMessages = jsonHistory()
+        val firstCompacted = AgentContextCompactor(
+            config = config,
+            provider = provider { _, _ -> response("第一段摘要。") },
+            controller = AgentRunController(),
+            mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            mainSessionId = "s1",
+            enableCacheReuse = true,
+        ).compactWithOutcome(firstMessages, 1, emptySet())
+        assertEquals("fold-1", firstCompacted.archiveId)
+
+        val secondMessages = JSONArray(firstCompacted.messages.toString()).apply {
+            put(AgentConversationCodec.userTextMessage("新一轮任务"))
+            put(JSONObject().put("role", "assistant").put("content", "后续结果 ".repeat(1500)))
+        }
+        var attempts = 0
+        val secondCompacted = AgentContextCompactor(
+            config = config,
+            provider = provider { request, emit ->
+                attempts++
+                if (attempts == 1) {
+                    assertTrue(request.tools.length() > 0)
+                    emit(ProviderEvent.BlockStart(AssistantBlockKind.TOOL_CALL, 0, "c1", "get_current_context"))
+                    response("")
+                } else {
+                    assertEquals(0, request.tools.length())
+                    response("合并后的第二段摘要。")
+                }
+            },
+            controller = AgentRunController(),
+            mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            mainSessionId = "s1",
+            enableCacheReuse = true,
+        ).compactWithOutcome(secondMessages, 1, emptySet())
+        assertEquals(2, attempts)
+        assertEquals("fold-2", secondCompacted.archiveId)
+        assertTrue(secondCompacted.messages.toString().contains("fold-2"))
+    }
+
+    @Test
+    fun customCompactionNeverReusesMainToolsPrefixOrSessionAndAggregatesRollingUsage() {
+        val custom = config.copy(model = "small-summary-model", contextWindow = 8_192)
+        var requests = 0
+        var resolutions = 0
+        val outcome = AgentContextCompactor(
+            config, provider { _, _ -> error("must use selected model") }, AgentRunController(),
+            mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            mainSessionId = "private-main-session",
+            enableCacheReuse = true,
+            resolveSummaryModel = {
+                resolutions++
+                custom to provider { request, emit ->
+                    requests++
+                    assertEquals(custom.model, request.config.model)
+                    assertEquals(0, request.tools.length())
+                    assertNotEquals("private-main-session", request.sessionId)
+                    assertFalse(request.messages.toString().contains("PRIVATE_MAIN_PREFIX"))
+                    assertEquals(2_048, request.outputLimit)
+                    emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 100, cachedTokens = 20,
+                        cacheWriteTokens = 10, outputTokens = 5)))
+                    response("本批检查已完成。")
+                }
+            },
+        ).compactWithOutcome(jsonHistory().put(0,
+            JSONObject().put("role", "system").put("content", "PRIVATE_MAIN_PREFIX")), 1, emptySet())
+        assertEquals(1, resolutions)
+        assertTrue(requests > 1)
+        assertEquals(100 * requests, outcome.usage?.inputTokens)
+        assertEquals(20 * requests, outcome.usage?.cachedTokens)
+        assertEquals(10 * requests, outcome.usage?.cacheWriteTokens)
+        assertEquals(requests, outcome.usage?.stepCount)
+        assertEquals("fold-1", outcome.archiveId)
+    }
+
+    @Test
+    fun cacheReuseRedactsSensitivePrefixAndKeepsTheSelectedMainRequestConfiguration() {
+        val messages = jsonHistory()
+        val firstAssistant = messages.getJSONObject(2)
+        firstAssistant.put("reasoning_content", "PRIVATE_REASONING")
+        firstAssistant.put("tool_calls", JSONArray("""[{"id":"secret","function":{"name":"fixture","arguments":"PRIVATE_ARGS"}}]"""))
+        val withResult = JSONArray()
+        for (index in 0 until messages.length()) {
+            withResult.put(messages.getJSONObject(index))
+            if (index == 2) withResult.put(JSONObject().put("role", "tool")
+                .put("tool_call_id", "secret").put("content", "PRIVATE_RESULT"))
+        }
+        var requests = 0
+        AgentContextCompactor(config, provider { request, _ ->
+            requests++
+            assertSame(config, request.config)
+            assertEquals("stable-main-session", request.sessionId)
+            assertTrue(request.tools.length() > 0)
+            assertNull(request.outputLimit) // Main-model thinking/output settings remain cache-compatible.
+            assertFalse(request.messages.toString().contains("PRIVATE_"))
+            response("已读取敏感工具，只保留动作概要。")
+        }, AgentRunController(), mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            mainSessionId = "stable-main-session", enableCacheReuse = true,
+        ).compactWithOutcome(withResult, 1, setOf("secret"))
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun overflowingCachePrefixFallsBackToBoundedIsolatedSummary() {
+        var requests = 0
+        AgentContextCompactor(config, provider { request, _ ->
+            if (requests++ == 0) {
+                assertTrue(request.tools.length() > 0)
+                throw AgentModelFailure("CONTEXT_OVERFLOW", false, "fixture")
+            }
+            assertEquals(0, request.tools.length())
+            assertNotNull(request.outputLimit)
+            response("已完成此前任务。")
+        }, AgentRunController(), mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+            enableCacheReuse = true,
+        ).compactWithOutcome(jsonHistory(), 1, emptySet())
+        assertEquals(2, requests)
     }
 
     private fun history() = (1..6).flatMap { turn -> listOf(

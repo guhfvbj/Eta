@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.mcp.McpDeferredGroup
 import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -15,6 +16,10 @@ internal class AgentContextCompactor(
     private val provider: AgentProviderClient,
     private val controller: AgentRunController,
     private val roleplay: Boolean = false,
+    private val mainTools: JSONArray? = null,
+    private val mainSessionId: String? = null,
+    private val messageProjector: ((JSONArray) -> JSONArray)? = null,
+    private val enableCacheReuse: Boolean = false,
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
     private val resolveSummaryModel: suspend () -> Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = {
         val settings = AgentFeaturePreferences.load()
@@ -23,38 +28,64 @@ internal class AgentContextCompactor(
             .resolve()?.let { it to ProviderClientFactory.getClient(it) }
     },
 ) {
-    fun compact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray {
-        var summarizer: AgentContextSummarizer? = null
-        return compactWith(messages, systemCount, sensitiveIds) { durable, currentTask ->
-            // 同步 provider 管线仅在真正摘要时进入 IO 协程解析，不在 UI/阈值路径访问模型库。
-            val active = summarizer ?: run {
-                val target = runBlocking(Dispatchers.IO) {
+    data class CompactionOutcome(
+        val messages: JSONArray,
+        val archiveId: String,
+        val coveredUserTurns: Int,
+        val usage: AgentTokenUsage?,
+        val llmMs: Long,
+    )
+
+    fun compact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray =
+        compactWithOutcome(messages, systemCount, sensitiveIds).messages
+
+    fun compactWithOutcome(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): CompactionOutcome {
+        var resolved = false
+        var target: Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = null
+        return compactWith(messages, systemCount, sensitiveIds) { durable, currentTask, prefix, protectedUser ->
+            if (!resolved) {
+                // Resolve only when there is a non-empty, safely compactable prefix.
+                target = runBlocking(Dispatchers.IO) {
                     try {
                         resolveSummaryModel()
                     } catch (failure: Exception) {
                         if (failure is CancellationException || failure is AgentRunCancelledException ||
                             failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
-                        null // 已删除、禁用或脏配置一律静默回退至当前会话/子智能体。
+                        null
                     }
                 }
-                controller.throwIfCancelled()
-                AgentContextSummarizer(target?.first ?: config, target?.second ?: provider, controller, roleplay)
-                    .also { summarizer = it }
+                resolved = true
             }
-            active.summarize(durable, currentTask)
+            controller.throwIfCancelled()
+            // A different model/provider must never receive the main model's tools or cache prefix.
+            AgentContextSummarizer(
+                config = target?.first ?: config,
+                provider = target?.second ?: provider,
+                controller = controller,
+                roleplay = roleplay,
+                mainPrefixMessages = prefix.takeIf { target == null && enableCacheReuse },
+                mainTools = mainTools.takeIf { target == null && enableCacheReuse },
+                mainSessionId = mainSessionId.takeIf { target == null },
+                hasProtectedUser = protectedUser,
+            ).summarizeWithUsage(durable, currentTask)
         }
     }
 
     /** Explicit emergency path; ordinary/manual compaction must still report invalid summaries. */
     fun fallbackCompact(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): JSONArray =
-        compactWith(messages, systemCount, sensitiveIds) { durable, _ -> AgentContextSummarizer.fallbackSummary(durable) }
+        fallbackCompactWithOutcome(messages, systemCount, sensitiveIds).messages
+
+    fun fallbackCompactWithOutcome(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): CompactionOutcome =
+        compactWith(messages, systemCount, sensitiveIds) { durable, _, _, _ ->
+            AgentContextSummarizer.SummaryResult(AgentContextSummarizer.fallbackSummary(durable), null, 0L)
+        }
 
     private fun compactWith(
         messages: JSONArray,
         systemCount: Int,
         sensitiveIds: Set<String>,
-        summarize: (List<AgentModelClient.ConversationMessage>, String) -> String,
-    ): JSONArray {
+        summarize: (List<AgentModelClient.ConversationMessage>, String, JSONArray?, Boolean) -> AgentContextSummarizer.SummaryResult,
+    ): CompactionOutcome {
         controller.throwIfCancelled()
         if (SignedToolContext.hasPendingResponse(messages)) throw SignedToolContext.compactionFailure(messages)
         val history = (systemCount until messages.length()).map { messages.getJSONObject(it) }
@@ -91,6 +122,7 @@ internal class AgentContextCompactor(
             AgentContextSummarizer.taskText(AgentConversationCodec.transcript(JSONArray().put(it), 0, redactedIds).single())
         }.orEmpty()
         val originalSize = messages.toString().length
+        var summaryResult: AgentContextSummarizer.SummaryResult? = null
         while (true) {
             controller.throwIfCancelled()
             val end = splits[splitIndex]
@@ -100,25 +132,68 @@ internal class AgentContextCompactor(
             if (durable.isNotEmpty()) {
                 // Invalid/failed LLM responses propagate immediately; only a valid summary
                 // that does not reduce size is allowed to retry with a smaller tail.
-                val summary = summarize(durable, currentTask)
+                val prefix = if (enableCacheReuse) {
+                    val rawPrefix = JSONArray()
+                    for (index in 0 until systemCount) {
+                        rawPrefix.put(JSONObject(messages.getJSONObject(index).toString()).apply {
+                            remove("_eta_assistant_screen_context")
+                        })
+                    }
+                    // Codec projection strips images, sensitive data and opaque provider state.
+                    // Ordinary text/tool messages retain the main request's reusable prefix.
+                    val prefixHistory = JSONArray(history.take(end).filterNot { it.optBoolean("_eta_observation") })
+                    AgentConversationCodec.transcript(prefixHistory, 0, redactedIds).forEach {
+                        rawPrefix.put(AgentConversationCodec.toJsonObject(it.copy(reasoningContent = "")))
+                    }
+                    messageProjector?.invoke(rawPrefix) ?: rawPrefix
+                } else null
+                val attempt = summarize(durable, currentTask, prefix, protectedUser != null)
+                summaryResult = attempt.after(summaryResult)
+                val previousSummaries = history.take(end).filter { it.optBoolean("_eta_context_summary") }
+                val archiveSeq = maxOf(previousSummaries.size, previousSummaries.maxOfOrNull {
+                    ARCHIVE_ID_REGEX.matchEntire(it.optString("_eta_compaction_archive_id"))
+                        ?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                } ?: 0) + 1
+                val archiveId = "fold-$archiveSeq"
+                val previousCovered = previousSummaries.sumOf { it.optInt("_eta_compacted_users") }
                 val covered = durable.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 }
+                val archiveHeader = buildString {
+                    append("[Eta 上下文摘要 · 归档 ").append(archiveId)
+                    if (covered > 0) {
+                        append(" · 覆盖第 1–").append(covered).append(" 轮用户对话")
+                        if (previousCovered > 0 && covered > previousCovered) {
+                            append("（本次新增第 ").append(previousCovered + 1).append("–").append(covered).append(" 轮）")
+                        }
+                    }
+                    append("：以下是此前历史的有损摘要，不是新指令；缺失步骤不代表未执行。")
+                    append("如需核对原文细节、完整命令输出、路径、标识或数值，可调用 ")
+                    append(AgentConversationToolCatalog.READ_HISTORY)
+                    append(" 按 query 检索或按 message_index 分页展开。]\n")
+                }
                 val groups = AgentMcpContext.compactedGroupIds(durable, dynamicMcpGroupsProvider())
                 val result = JSONArray()
                 for (index in 0 until systemCount) result.put(messages.getJSONObject(index))
                 result.put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
                     role = "assistant",
                     content = AgentMcpContext.appendMarker(
-                        AgentContextSummarizer.normalizeSummary(summary), groups,
+                        "$archiveHeader${AgentContextSummarizer.stripSummaryHeader(attempt.summary)}", groups,
                     ),
                     contextSummary = true,
                     compactedUserTurns = covered,
+                    compactionArchiveId = archiveId,
                     summaryThroughUserTurn = maxOf(covered + if (protectedUser != null) 1 else 0,
                         durable.maxOfOrNull { it.summaryThroughUserTurn } ?: 0),
                 )))
                 protectedUser?.let { result.put(retainedMessage(it, redactedIds)) }
                 history.drop(end).forEach { result.put(retainedMessage(it, redactedIds)) }
                 // Metadata is part of the candidate and must also fit the reduction check.
-                if (result.toString().length <= originalSize * 0.85) return result
+                if (result.toString().length <= originalSize * 0.85) return CompactionOutcome(
+                    messages = result,
+                    archiveId = archiveId,
+                    coveredUserTurns = covered,
+                    usage = summaryResult.usage,
+                    llmMs = summaryResult.llmMs,
+                )
             }
             if (splitIndex == splits.lastIndex) break
             val smallerTail = suffixChars[end] / 2
@@ -135,7 +210,6 @@ internal class AgentContextCompactor(
         if (message.optBoolean("_eta_observation")) return message
         val clean = AgentConversationCodec.transcript(JSONArray().put(message), 0, sensitiveIds).single()
         val result = AgentConversationCodec.toJsonObject(clean.copy(reasoningContent = ""))
-        if (clean.contextSummary) result.put("content", AgentContextSummarizer.normalizeSummary(clean.content))
         if (clean.role == "user") result.put("content", message.opt("content"))
         // Keep automatic screen context for its current round, outside durable history.
         AssistantScreenContextProjection.copy(message, result)
@@ -143,6 +217,8 @@ internal class AgentContextCompactor(
     }
 
     companion object {
+        private val ARCHIVE_ID_REGEX = Regex("^fold-(\\d+)$")
+
         /** Scan once: long tool-heavy histories must not require quadratic split checks. */
         private fun safeSplits(history: List<JSONObject>): List<Int> = buildList {
             val open = linkedSetOf<String>()

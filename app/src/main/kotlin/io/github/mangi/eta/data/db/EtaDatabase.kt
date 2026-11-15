@@ -28,7 +28,7 @@ import androidx.room.migration.Migration
         AgentTaskEntity::class,
         AgentTaskRunEntity::class,
     ],
-    version = 27,
+    version = 28,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -73,6 +73,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_24_25,
                         MIGRATION_25_26,
                         MIGRATION_26_27,
+                        MIGRATION_27_28,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db); createAgentTaskTables(db) }
@@ -140,13 +141,35 @@ internal abstract class EtaDatabase : RoomDatabase() {
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_tokens INTEGER")
         }
 
+        // Official and fork releases shipped different v26/v27 schemas. Each step repairs
+        // the union, so either lineage (including partially backported schemas) upgrades safely.
         internal val MIGRATION_25_26 = Migration(25, 26) { database ->
-            createAgentTaskTables(database)
+            ensureMergedContextSchema(database)
         }
 
         internal val MIGRATION_26_27 = Migration(26, 27) { database ->
-            database.execSQL("ALTER TABLE conversation_context_checkpoints ADD COLUMN runtime_state_json TEXT NOT NULL DEFAULT ''")
-            // Catalog metadata only: never overwrite an explicit user window override (including Gemini).
+            ensureMergedContextSchema(database)
+        }
+
+        internal val MIGRATION_27_28 = Migration(27, 28) { database ->
+            ensureMergedContextSchema(database)
+        }
+
+        private fun ensureMergedContextSchema(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            fun addColumnIfMissing(table: String, column: String, definition: String) {
+                val exists = database.query("PRAGMA table_info(`$table`)").use { cursor ->
+                    val nameIndex = cursor.getColumnIndexOrThrow("name")
+                    var found = false
+                    while (cursor.moveToNext()) if (cursor.getString(nameIndex) == column) found = true
+                    found
+                }
+                if (!exists) database.execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $definition")
+            }
+            addColumnIfMissing("conversation_messages", "cache_write_tokens", "INTEGER")
+            addColumnIfMissing("conversation_messages", "compaction_archive_id", "TEXT")
+            addColumnIfMissing("conversation_context_checkpoints", "runtime_state_json", "TEXT NOT NULL DEFAULT ''")
+            createAgentTaskTables(database)
+            // Catalog metadata only: preserve every explicit context_window_override.
             database.execSQL("UPDATE provider_models SET context_window = 131072 WHERE is_built_in = 1 " +
                 "AND id IN ('builtin-deepseek-flash', 'builtin-deepseek-v4-pro', 'builtin-bailian-deepseek-v4-1-flash') " +
                 "AND context_window IN (1048576, 1000000)")

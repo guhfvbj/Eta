@@ -2,7 +2,6 @@ package io.github.mangi.eta.ui
 
 import io.github.mangi.eta.ui.screens.models.rememberFeatureSettings
 import io.github.mangi.eta.agent.model.AgentFeaturePreferences
-import androidx.compose.material.icons.rounded.AutoAwesome
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -17,7 +16,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Dashboard
@@ -274,30 +275,12 @@ private fun SettingsPageContent(
         "${provider.name} / ${selectedModel?.displayName ?: stringResource(R.string.settings_model_not_selected)}"
     } ?: stringResource(R.string.settings_not_configured)
 
-    val titleSettings = rememberFeatureSettings().value
-    val titleModelId = titleSettings.optString("title_custom_model_id")
-    val titleProviderId = titleSettings.optString("title_custom_provider_id")
-    val titleProvider = providers.firstOrNull { provider ->
-        if (titleProviderId.isNotBlank()) provider.id == titleProviderId
-        else provider.models.any { it.id == titleModelId }
-    }
-    val titleModel = titleProvider?.models?.firstOrNull { it.id == titleModelId }
-    val titleModelSummary = when {
-        !titleSettings.optBoolean("title_enabled", true) -> stringResource(R.string.status_disabled)
-        titleSettings.optBoolean("title_custom") -> titleModel?.let { "${titleProvider.name} · ${it.displayName}" }
-            ?: stringResource(R.string.settings_model_not_selected)
-        else -> stringResource(R.string.title_model_follow_current)
-    }.let { summary ->
-        if (titleSettings.optBoolean("title_enabled", true) && titleSettings.optBoolean("title_follow")) {
-            "$summary · ${stringResource(R.string.model_feature_title_follow)}"
-        } else summary
-    }
-
-    val compactionProvider = providers.firstOrNull { it.id == titleSettings.optString("compaction_custom_provider_id") && it.isEnabled }
+    val featureSettings = rememberFeatureSettings().value
+    val compactionProvider = providers.firstOrNull { it.id == featureSettings.optString("compaction_custom_provider_id") && it.isEnabled }
     val compactionModel = compactionProvider?.models?.firstOrNull {
-        it.id == titleSettings.optString("compaction_custom_model_id") && it.isEnabled && AgentFeaturePreferences.isTextModel(it)
+        it.id == featureSettings.optString("compaction_custom_model_id") && it.isEnabled && AgentFeaturePreferences.isTextModel(it)
     }
-    val compactionModelSummary = if (titleSettings.optBoolean("compaction_custom") && compactionProvider != null && compactionModel != null) {
+    val compactionModelSummary = if (featureSettings.optBoolean("compaction_custom") && compactionProvider != null && compactionModel != null) {
         "${compactionProvider.name} · ${compactionModel.displayName}"
     } else stringResource(R.string.compaction_model_follow_current)
 
@@ -407,13 +390,6 @@ private fun SettingsPageContent(
                     )
                     CouiIconDivider()
                     CouiPreference(
-                        title = stringResource(R.string.title_model_title),
-                        summary = titleModelSummary,
-                        icon = { CouiSettingsIcon(Icons.Rounded.AutoAwesome, SettingsIconColors.Orange) },
-                        onClick = { onNavigate(AppRoute.TitleModel) },
-                    )
-                    CouiIconDivider()
-                    CouiPreference(
                         title = stringResource(R.string.compaction_model_title),
                         summary = compactionModelSummary,
                         icon = { CouiSettingsIcon(Icons.Rounded.Layers, SettingsIconColors.Blue) },
@@ -438,6 +414,12 @@ private fun SettingsPageContent(
                         key = Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED,
                         icon = Icons.Rounded.Layers,
                         iconTint = SettingsIconColors.Blue,
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
+                        title = stringResource(R.string.conversation_title_settings_title),
+                        icon = { CouiSettingsIcon(Icons.Rounded.AutoAwesome, SettingsIconColors.Blue) },
+                        onClick = { onNavigate(AppRoute.ConversationTitleSettings) },
                     )
                     CouiIconDivider()
                     CouiPreference(
@@ -554,6 +536,17 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = openAssistantSettings,
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
+                        title = stringResource(R.string.assistant_overlay_settings_title),
+                        icon = {
+                            CouiSettingsIcon(
+                                Icons.Rounded.ChatBubble,
+                                SettingsIconColors.Blue,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.AssistantOverlaySettings) },
                     )
                     if (prefs != null || hasConnectedFramework) {
                         CouiIconDivider()
@@ -854,12 +847,6 @@ private fun SettingsPageContent(
                             onClick = { onNavigate(AppRoute.ModelProviders) },
                         )
                         ArrowPreference(
-                            title = stringResource(R.string.title_model_title),
-                            summary = titleModelSummary,
-                            startAction = { SettingsIcon(Icons.Rounded.AutoAwesome, tint = SettingsIconColors.Orange) },
-                            onClick = { onNavigate(AppRoute.TitleModel) },
-                        )
-                        ArrowPreference(
                             title = stringResource(R.string.compaction_model_title),
                             summary = compactionModelSummary,
                             startAction = { SettingsIcon(Icons.Rounded.Layers, tint = SettingsIconColors.Blue) },
@@ -886,6 +873,16 @@ private fun SettingsPageContent(
                             key = Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED,
                             icon = Icons.Rounded.Layers,
                             iconTint = SettingsIconColors.Blue,
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.conversation_title_settings_title),
+                            startAction = {
+                                SettingsIcon(
+                                    icon = Icons.Rounded.AutoAwesome,
+                                    tint = SettingsIconColors.Blue,
+                                )
+                            },
+                            onClick = { onNavigate(AppRoute.ConversationTitleSettings) },
                         )
                         ArrowPreference(
                             title = stringResource(R.string.ui_memory_b55ff5),
@@ -1006,6 +1003,16 @@ private fun SettingsPageContent(
                                 )
                             },
                             onClick = openAssistantSettings,
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.assistant_overlay_settings_title),
+                            startAction = {
+                                SettingsIcon(
+                                    icon = Icons.Rounded.ChatBubble,
+                                    tint = SettingsIconColors.Blue,
+                                )
+                            },
+                            onClick = { onNavigate(AppRoute.AssistantOverlaySettings) },
                         )
                         if (prefs != null || hasConnectedFramework) {
                             OverlayDropdownPreference(
