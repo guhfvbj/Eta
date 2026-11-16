@@ -138,7 +138,7 @@ internal object AgentPromptBuilder {
                     "依赖前次结果或涉及写入的调用保持先后顺序；partial=true 时检查 skipped/stop_reason 并使用 cursor 续查。" +
                     rootInstructions(rootAvailable) +
                     "普通命令调用 terminal，只需 command；单次进程会回收，不要用 & 起后台进程。保留 Shell 状态用 action=open 和 session_id，目录变化用会话内 cd。" +
-                    "回复后继续执行用 terminal_job，跨任务服务用 terminal_daemon；仅在依赖结果时 wait，日志可按返回路径分页读取。后台任务可能退出、被系统回收或随重启结束，以实际状态为准。" +
+                    "长命令应使用 promote_on_timeout 自动升级或 terminal_job，不要自己 sleep 轮询。完成后系统会自动唤醒并继续当前对话，不需要下一轮先读全部输出，需要细节时通过 from_offset 只读增量。用户明确要求完成后不要打扰时使用 background_delivery=quiet，只发通知而不唤醒。回复后继续执行用 terminal_job，跨任务服务用 terminal_daemon；仅在依赖结果时 wait，日志可按返回路径分页读取。后台任务可能退出、被系统回收或随重启结束，以实际状态为准。" +
                     "environment=android 用于 pm/cmd/am/dumpsys/settings 等 Android 系统能力及 Root 下的应用私有目录，提供 Toybox（Root 优先 BusyBox ash），无完整开发运行时。" +
                     "代码、git、Python/Node.js/复杂 Shell、curl/jq/rg/fd/sqlite3、包管理、构建、APK 分析和开发服务使用选定的 Linux 发行版，终端与文件工具均显式传 environment=\"linux\"。" +
                     "环境、身份和 cwd 可选覆盖，失败不自动切换；文件工具按 environment 解析路径：/workspace、/workspace/mounts/<name>、/root 属于 linux，Android 宿主路径用 environment=\"android\"；两边 revision 独立，不可混用。" +

@@ -14,6 +14,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentConversationRevisionReducerTest {
+    @Test fun backgroundNoticeStillCountsForOneToOneUserBoundaries() {
+        val users = listOf(UserMessageUi("user-first", "原任务"),
+            UserMessageUi("user-wake-supplement-1", "后台完成",
+                origin = io.github.mangi.eta.ui.model.UserMessageOrigin.BackgroundJob),
+            UserMessageUi("user-next", "后续问题"))
+        val history = users.map { AgentModelClient.ConversationMessage("user", it.content, messageId = it.id) }
+        val state = AgentChatUiState(messages = users, history = history,
+            input = "", isStreaming = false, thinkingEnabled = false)
+        val boundary = AgentConversationRevisionReducer.boundary(state, "user-next")!!
+        assertEquals(2, boundary.userMessageIndex)
+        assertEquals(history.take(2), boundary.historyPrefix)
+        assertFalse(boundary.contextWasCompacted)
+        val noticeBoundary = AgentConversationRevisionReducer.boundary(state, "user-wake-supplement-1")!!
+        assertEquals(history.take(1), noticeBoundary.historyPrefix)
+        assertEquals(1, noticeBoundary.laterTurnCount)
+    }
+
+
     @Test
     fun editingUserTurnCoveredBySummaryDropsStaleSummary() {
         val summary = AgentModelClient.ConversationMessage("assistant", "旧操作结果", contextSummary = true,

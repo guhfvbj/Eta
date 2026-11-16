@@ -23,6 +23,7 @@ internal class RootShellTerminalController(
     },
     private val rootAvailable: () -> Boolean = { TerminalRuntime.rootAvailable },
     executionContext: TerminalExecutionContext? = null,
+    private val origin: JobOrigin? = null,
 ) : AutoCloseable {
     private companion object {
         const val USER_STORAGE = "/storage/emulated/0"
@@ -69,6 +70,7 @@ internal class RootShellTerminalController(
             mergeStderr = args.optBoolean("merge_stderr", false),
             sessionId = args.optString("session_id").ifBlank { null },
             promoteOnTimeout = args.optBoolean("promote_on_timeout", false),
+            backgroundDelivery = JobDelivery.fromWire(args.optString("background_delivery")),
         )
         "close" -> closeTerminal(args.optString("session_id"))
         else -> errorJson("UNSUPPORTED_TERMINAL_ACTION", "terminal action 仅支持 exec/open/close")
@@ -87,7 +89,7 @@ internal class RootShellTerminalController(
                 val command = args.requiredText("command")
                 if (command.isBlank()) return errorJson("INVALID_ARGUMENT", "command 不能为空")
                 jobs.start(launcher, command, cwd, identity, environment,
-                    args.optString("description", "后台命令"), args.optLong("timeout_ms", 600_000))
+                    args.optString("description", "后台命令"), args.optLong("timeout_ms", 600_000), origin = origin)
             }
             "list" -> jobs.list(args.optBoolean("active_only", true))
             "read" -> jobs.read(args.requiredText("job_id"), args.optInt("max_bytes", 16_000),
@@ -196,6 +198,7 @@ internal class RootShellTerminalController(
         mergeStderr: Boolean,
         sessionId: String?,
         promoteOnTimeout: Boolean,
+        backgroundDelivery: JobDelivery,
     ): String {
         val session = sessionId?.takeIf { it.isNotBlank() }?.let { id ->
             synchronized(sessions) { sessions[id] }
@@ -214,7 +217,7 @@ internal class RootShellTerminalController(
         }
         if (promoteOnTimeout && backgroundJobs != null && detachedSupervisor != null) {
             return runPromotableCommand(command, cwd, timeoutMs.coerceIn(1, MAX_TIMEOUT_SECONDS * 1000),
-                effectiveIdentity, effectiveEnvironment, mergeStderr)
+                effectiveIdentity, effectiveEnvironment, mergeStderr, backgroundDelivery)
         }
         return runCommand(
             command = command,
@@ -582,7 +585,7 @@ internal class RootShellTerminalController(
 
     private fun runPromotableCommand(
         command: String, cwd: String?, timeoutMs: Int, identity: String,
-        environment: TerminalEnvironment, mergeStderr: Boolean,
+        environment: TerminalEnvironment, mergeStderr: Boolean, backgroundDelivery: JobDelivery,
     ): String {
         val trimmed = command.trim()
         if (trimmed.isBlank()) return errorJson("INVALID_ARGUMENT", "command 不能为空")
@@ -596,7 +599,9 @@ internal class RootShellTerminalController(
             ?: return errorJson("OUTPUT_CAPTURE_UNAVAILABLE", "无法建立后台输出文件，请检查临时目录")
         val started = JSONObject(jobs.start(launcher,
             "export TERM=dumb NO_COLOR=1\n${TerminalExecutionProbe.script(marker)}\n$trimmed",
-            safeCwd, identity, environment, "终端命令", timeoutMs = 0, outputCapture = capture))
+            safeCwd, identity, environment, "终端命令", timeoutMs = 0, outputCapture = capture,
+            // 无会话入口也显式声明 INLINE；空归属在升级后仍按通知兜底。
+            origin = JobOrigin(origin?.conversationId.orEmpty(), origin?.runId.orEmpty(), JobDelivery.INLINE)))
         if (!started.optBoolean("ok")) {
             capture.close()
             return started.toString()
@@ -612,6 +617,7 @@ internal class RootShellTerminalController(
                 } else false
             }
             if (promote) {
+                jobs.setDelivery(id, if (backgroundDelivery == JobDelivery.QUIET) JobDelivery.QUIET else JobDelivery.WAKEUP)
                 val preview = launcher.readLogs(id, 1_024)
                 return JSONObject().put("ok", true).put("tool", "terminal").put("action", "exec")
                     .put("status", "promoted").put("promoted", true).put("timed_out", false)

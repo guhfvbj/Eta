@@ -40,6 +40,8 @@ import io.github.mangi.eta.agent.runtime.AgentExternalArchivePayload
 import io.github.mangi.eta.agent.runtime.AgentRunArchiveStore
 import io.github.mangi.eta.agent.runtime.AgentRunCheckpointStore
 import io.github.mangi.eta.agent.runtime.AgentRuntimeClient
+import io.github.mangi.eta.ui.MainActivity
+import io.github.mangi.eta.agent.runtime.AgentRuntimeService
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
 import io.github.mangi.eta.agent.runtime.AgentUiHandoffPayload
 import io.github.mangi.eta.config.Prefs
@@ -71,6 +73,7 @@ import io.github.mangi.eta.ui.model.SystemNoticeCode
 import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
+import io.github.mangi.eta.ui.model.UserMessageOrigin
 import io.github.mangi.eta.ui.model.UserMessageUi
 import io.github.mangi.eta.ui.model.contentMatches
 import java.io.InputStream
@@ -87,6 +90,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -111,6 +115,7 @@ internal class AgentAppState(
     // 导入期间暂停保存：旧状态的增量保存会删除刚导入的会话；导入成功后整体重载，失败时数据库已回滚。
     private var persistencePaused = false
     private val runtimeRecoveryInProgress = AtomicBoolean(false)
+    private val runtimeRecoveryRequested = AtomicBoolean(false)
     private val defaultThinkingEnabled = agentBooleanForUi(Prefs.Keys.AGENT_THINKING_ENABLED)
     @Volatile
     private var conversationPersistence = AgentConversationPersistence(initialConversations)
@@ -179,6 +184,23 @@ internal class AgentAppState(
     init {
         refreshConversationSummaries()
         observeRuntimeSelection()
+        scope.launch {
+            AgentRuntimeService.runPublications.collect { publication ->
+                withContext(Dispatchers.Main.immediate) {
+                    if (!MainActivity.isInForeground) return@withContext
+                    if (publication.started) {
+                        val id = publication.conversationId ?: return@withContext
+                        val state = conversationsById[id] ?: return@withContext
+                        updateConversation(id, state.copy(isStreaming = true), updateTimestamp = false)
+                        refreshConversationSummaries()
+                        // 复用恢复入口挂接新 run，事件与后续结果沿既有幂等链路合并。
+                        refreshRuntimeResults()
+                    } else {
+                        refreshRuntimeResults()
+                    }
+                }
+            }
+        }
         runtimeRecoveryInProgress.set(true)
         scope.launch(Dispatchers.IO) {
             try {
@@ -186,6 +208,11 @@ internal class AgentAppState(
                 importArchivedExternalRuns()
             } finally {
                 runtimeRecoveryInProgress.set(false)
+                if (runtimeRecoveryRequested.getAndSet(false)) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (MainActivity.isInForeground) refreshRuntimeResults()
+                    }
+                }
             }
         }
     }
@@ -249,13 +276,20 @@ internal class AgentAppState(
             ?: AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId).selectedModel?.id
 
     fun refreshRuntimeResults() {
+        runtimeRecoveryRequested.set(true)
         if (!runtimeRecoveryInProgress.compareAndSet(false, true)) return
+        runtimeRecoveryRequested.set(false)
         scope.launch(Dispatchers.IO) {
             try {
                 recoverRuntimeRuns()
                 importArchivedExternalRuns()
             } finally {
                 runtimeRecoveryInProgress.set(false)
+                if (runtimeRecoveryRequested.getAndSet(false)) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (MainActivity.isInForeground) refreshRuntimeResults()
+                    }
+                }
             }
         }
     }
@@ -1033,6 +1067,7 @@ internal class AgentAppState(
             !homeState.isConversationLoaded || homeState.isStreaming || homeState.isCompacting ||
             homeState.messageEdit != null || homeState.roleplayMessages.pendingRewrites.isNotEmpty() ||
             runStore.activeRunId(conversationId) != null || conversationId in pendingConversationDeletes) return
+        if (AgentConversationRevisionReducer.boundary(homeState, messageId)?.userMessage?.origin == UserMessageOrigin.BackgroundJob) return
         val selectionVersion = conversationSelectionVersion
         val branchId = newConversationId()
         val baseTitle = appContext.getString(R.string.conversation_branch_title,
@@ -1341,6 +1376,7 @@ internal class AgentAppState(
 
         val editBoundary = edit?.let {
             AgentConversationRevisionReducer.boundary(homeState, it.targetMessageId)
+                ?.takeIf { boundary -> boundary.userMessage.origin == UserMessageOrigin.Human }
         }
         if (edit != null && editBoundary == null) {
             cancelMessageEdit()
@@ -1478,6 +1514,7 @@ internal class AgentAppState(
     }
 
     fun beginMessageEdit(messageId: String) {
+        if ((homeState.messages.firstOrNull { it.id == messageId } as? UserMessageUi)?.origin == UserMessageOrigin.BackgroundJob) return
         if (homeState.isStreaming || homeState.messageEdit != null || isBranchingCurrentConversation) return
         if (homeState.roleplay != null) {
             if (messageId !in homeState.roleplayMessages.links) return
@@ -1545,7 +1582,8 @@ internal class AgentAppState(
         }
 
     private fun revisionBoundary(messageId: String): AgentConversationRevisionReducer.Boundary? =
-        AgentConversationRevisionReducer.boundary(homeState, messageId).also { boundary ->
+        AgentConversationRevisionReducer.boundary(homeState, messageId)
+            ?.takeIf { it.userMessage.origin == UserMessageOrigin.Human }.also { boundary ->
             if (boundary == null && homeState.hasEarlierMessages) {
                 Toast.makeText(appContext, R.string.conversation_load_turn_start, Toast.LENGTH_SHORT).show()
             }
@@ -2243,7 +2281,7 @@ internal class AgentAppState(
                 refreshConversationSummaries()
             }
             is AgentEvent.UserSupplementReceived ->
-                insertSupplementMessage(runId, event.index, event.text, persist = persistSupplement)
+                insertSupplementMessage(runId, event.index, event.text, event.source, persist = persistSupplement)
             is AgentEvent.RunStarted -> if (runStore.isStopRequested(runId)) scope.launch(Dispatchers.IO) {
                 AgentRuntimeClient(appContext, AndroidAgentLogger).cancelRun(runId)
             }
@@ -2358,7 +2396,7 @@ internal class AgentAppState(
             if (acknowledgeRuntimeResult && result.operation == AgentRuntimeWire.OP_CHAT &&
                 result.ok && result.content.isNotBlank()
             ) {
-                maybeGenerateConversationTitle(conversationId, result.content)
+                maybeGenerateConversationTitle(conversationId, result.content, runId)
             }
             val finishedState = conversationsById[conversationId]
             if (finishedState != null && finishedState.queuedMessages.isNotEmpty()) {
@@ -2379,6 +2417,7 @@ internal class AgentAppState(
     private fun maybeGenerateConversationTitle(
         conversationId: String,
         assistantReply: String,
+        runId: String,
     ) {
         if (conversationId in pendingConversationDeletes ||
             conversationId in manuallyRenamedConversationIds ||
@@ -2388,8 +2427,13 @@ internal class AgentAppState(
         }
         val state = conversationsById[conversationId] ?: return
         if (state.roleplay != null) return
+        if (state.messages.filterIsInstance<UserMessageUi>().any {
+                it.origin == UserMessageOrigin.BackgroundJob && it.id.startsWith("user-$runId-supplement-")
+            } && state.messages.filterIsInstance<UserMessageUi>().none {
+                it.origin == UserMessageOrigin.Human && (it.id == "user-$runId" || it.id.startsWith("user-$runId-supplement-"))
+            }) return
         val expectedFallback = pendingAutoTitleFallbacks[conversationId] ?: run {
-            val users = state.messages.filterIsInstance<UserMessageUi>()
+            val users = state.messages.filterIsInstance<UserMessageUi>().filter { it.origin == UserMessageOrigin.Human }
             if (users.size == 1 && conversationId !in autoGeneratedTitleIds) {
                 users.first().content.defaultConversationTitleFromMessage()
             } else {
@@ -2400,6 +2444,7 @@ internal class AgentAppState(
         if (currentTitle != expectedFallback && currentTitle.isNotBlank()) return
         val firstUserPrompt = state.messages
             .filterIsInstance<UserMessageUi>()
+            .filter { it.origin == UserMessageOrigin.Human }
             .firstOrNull()
             ?.content
             .orEmpty()
@@ -2454,6 +2499,7 @@ internal class AgentAppState(
         runId: String,
         index: Int,
         text: String,
+        source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER,
         persist: Boolean = true,
     ) {
         updateMessages(runId) { messages ->
@@ -2464,6 +2510,7 @@ internal class AgentAppState(
                         index = index,
                         text = text,
                         createdAt = System.currentTimeMillis(),
+                        source = source,
                     )
                 ),
                 messages = messages,

@@ -51,12 +51,15 @@ sealed interface AgentChatMessageUi {
     val id: String
 }
 
+enum class UserMessageOrigin { Human, BackgroundJob }
+
 @Immutable
 data class UserMessageUi(
     override val id: String,
     val content: String,
     val images: List<String> = emptyList(),
     val isEdited: Boolean = false,
+    val origin: UserMessageOrigin = UserMessageOrigin.Human,
 ) : AgentChatMessageUi
 
 @Immutable

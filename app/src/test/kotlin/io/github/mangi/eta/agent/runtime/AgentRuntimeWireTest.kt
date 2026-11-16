@@ -28,6 +28,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33, 36])
 class AgentRuntimeWireTest {
+    @Test fun supplementEventWireDefaultsToUserAndPreservesBackgroundSource() {
+        val old = AgentRuntimeWire.eventToBundle(AgentEvent.UserSupplementReceived(1, "旧补充"))
+        old.remove("source")
+        assertEquals(AgentRuntimeWire.SUPPLEMENT_SOURCE_USER,
+            (AgentRuntimeWire.eventFromBundle(old) as AgentEvent.UserSupplementReceived).source)
+        val job = AgentEvent.UserSupplementReceived(2, "命令完成", AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB)
+        assertEquals(job, AgentRuntimeWire.eventFromBundle(AgentRuntimeWire.eventToBundle(job)))
+        assertEquals(job, AgentEventJsonCodec.decode(AgentEventJsonCodec.encode(job)))
+    }
+
     @Test
     fun searchSuggestionsCapabilityIsOptionalAndHtmlIsNeverDurable() {
         val request = AgentRuntimeWire.RunRequest(

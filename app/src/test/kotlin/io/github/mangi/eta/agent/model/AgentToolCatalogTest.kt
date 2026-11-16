@@ -8,6 +8,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentToolCatalogTest {
+    @Test fun terminalBackgroundDeliveryDefaultsToWakeupAndExplainsIncrementalConsumption() {
+        val tools = JSONArray().also { AgentTerminalToolCatalog.appendTo(it) }
+        val terminal = tools.getJSONObject(0).getJSONObject("function")
+        val properties = terminal.getJSONObject("parameters").getJSONObject("properties")
+        val delivery = properties.getJSONObject("background_delivery")
+        assertEquals(listOf("wakeup", "quiet"), delivery.getJSONArray("enum").let { values ->
+            (0 until values.length()).map { values.getString(it) }
+        })
+        assertEquals("wakeup", delivery.getString("default"))
+        assertTrue(delivery.getString("description").contains("否则忽略"))
+        assertTrue(terminal.getString("description").contains("自动唤醒"))
+        assertTrue(terminal.getString("description").contains("不要自己 sleep 轮询"))
+        assertTrue(tools.getJSONObject(1).getJSONObject("function").getString("description").contains("from_offset"))
+        assertFalse(terminal.getJSONObject("parameters").getJSONArray("required").toString().contains("background_delivery"))
+    }
+
+
     @Test
     fun featureFlagsProduceExactUniqueToolUnions() {
         val base = AgentToolCatalog.build(

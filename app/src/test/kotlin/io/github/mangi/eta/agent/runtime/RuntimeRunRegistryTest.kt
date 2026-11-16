@@ -93,7 +93,7 @@ class RuntimeRunRegistryTest {
         a.session.controller.cancel()
         assertTrue(a.session.controller.isCancelled)
         assertFalse(b.session.controller.isCancelled)
-        assertEquals("补充 B", b.session.controller.pollSteeringMessage())
+        assertEquals("补充 B", b.session.controller.pollSteeringMessage()?.text)
     }
 
     @Test

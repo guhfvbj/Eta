@@ -1,5 +1,9 @@
 package io.github.mangi.eta.agent.runtime
 
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import android.app.Service
@@ -70,6 +74,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -173,7 +181,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action != ACTION_KEEP_ALIVE || runs.all().isEmpty()) {
+        if (intent?.action != ACTION_KEEP_ALIVE || (runs.all().isEmpty() && pendingJobWakes.isEmpty())) {
             stopSelf(startId)
         }
         return START_NOT_STICKY
@@ -304,6 +312,13 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         thread(name = "agent-runtime-image-ingest") {
             val prepared = runCatching {
                 run.session.controller.throwIfCancelled()
+                val uiPayload = incoming.request.handoff?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
+                    ?.let { AgentUiHandoffPayload.from(it.payload) }
+                if (incoming.request.operation == AgentRuntimeWire.OP_CHAT && uiPayload != null &&
+                    uiPayload.origin != AgentUiHandoffPayload.ORIGIN_JOB_WAKEUP) {
+                    runCatching { AgentConversationRuntimeStore.resetJobWakes(this, uiPayload.conversationId) }
+                        .onFailure { AndroidAgentLogger.warn("重置后台唤醒预算失败：${it.javaClass.simpleName}") }
+                }
                 run.awaitPredecessors()
                 val request = AgentRuntimeRequestConfigResolver.constrainPresentation(
                     AgentRuntimeImageTransfer.materialize(incoming), isEtaProcess,
@@ -363,10 +378,13 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     private fun startRun(
         request: AgentRuntimeWire.RunRequest,
         replyTo: Messenger? = null,
-    ) {
-        val run = admitRun(request, replyTo) ?: return
+        onStarted: () -> Unit = {},
+    ): Boolean {
+        val run = admitRun(request, replyTo) ?: return false
         run.prepared(request)
+        onStarted()
         executePreparedRun(run)
+        return true
     }
 
     private fun admitRun(
@@ -555,6 +573,17 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                     "Agent runtime archive persistence failed: type=${throwable.safeLogType()}"
                 )
             }
+        if (result.ok && request.operation == AgentRuntimeWire.OP_CHAT && request.images.isEmpty() &&
+            request.handoff?.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE) {
+            runCatching {
+                val payload = AgentUiHandoffPayload.from(request.handoff.payload)
+                AgentContinuationBaseStore.default(this).save(AgentContinuationBaseStore.Base(
+                    payload.conversationId, request.runId, request, result.contextSnapshot, result.transcript,
+                    System.currentTimeMillis(),
+                ))
+            }.onFailure { AndroidAgentLogger.warn("保存后台续跑基座失败：${it.javaClass.simpleName}") }
+        }
+        publishRun(request, started = false)
     }
 
     private fun postTerminalOverlay(
@@ -838,10 +867,22 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         guiControl.resumeForUser()
     }
 
+    /** 后台监控可从任意线程调用；所有 Run 的选择与补充分配仍串行于 Main。 */
+    internal fun deliverJobNotice(conversationId: String, notice: String, jobId: String): Boolean = onMain(mainHandler) {
+        if (destroyed) return@onMain false
+        val active = runs.all().firstOrNull { run ->
+            !run.session.isTerminal && run.request.handoff?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
+                ?.let { AgentUiHandoffPayload.from(it.payload).conversationId } == conversationId
+        } ?: return@onMain false
+        active.supplement(notice, AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, jobId) != null
+    }
+
     private fun requestSupplement(runId: String?, text: String) {
         val supplementText = text.trim()
         if (supplementText.isBlank()) return
         val run = displayedRun?.takeIf { it.runId == runId } ?: return
+        runCatching { AgentConversationRuntimeStore.resetJobWakes(this, run.conversationId) }
+            .onFailure { AndroidAgentLogger.warn("重置后台唤醒预算失败：${it.javaClass.simpleName}") }
         if (guiControl.state.value.userPaused && guiControl.state.value.ownerRunId == null) return
         setCapsuleInputMode(focusable = false)
         runs.get(run.runId)?.let { active ->
@@ -1497,9 +1538,130 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             Prefs.localAgentPreferences()
         )
 
+    internal data class RunPublication(val conversationId: String?, val runId: String, val started: Boolean)
+
     companion object {
         @Volatile
         private var activeInstance: AgentRuntimeService? = null
+
+        private val publicationEvents = MutableSharedFlow<RunPublication>(
+            extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
+        val runPublications: SharedFlow<RunPublication> = publicationEvents.asSharedFlow()
+        private val pendingJobWakes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+        private fun publishRun(request: AgentRuntimeWire.RunRequest, started: Boolean) {
+            runCatching {
+                val id = request.handoff?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
+                    ?.let { AgentUiHandoffPayload.from(it.payload).conversationId }
+                publicationEvents.tryEmit(RunPublication(id, request.runId, started))
+            }
+        }
+
+        internal fun deliverToActiveRun(conversationId: String, notice: String, jobId: String): Boolean =
+            activeInstance?.deliverJobNotice(conversationId, notice, jobId) ?: false
+
+        /** FGS 租约先接力，再通过普通 startRun 路径执行；不主动显示浮层。 */
+        fun wakeForJobCompletion(context: Context, base: AgentContinuationBaseStore.Base, notice: String, jobId: String): Boolean {
+            val newRunId = "run-${UUID.randomUUID()}"
+            var request = AgentContinuationBuilder.buildJobNotice(base, notice, jobId, newRunId)
+            val stopped = AtomicBoolean(false)
+            if (!AgentExecutionService.acquire(context, "run:$newRunId", allowBoundFallback = true) {
+                    stopped.set(true)
+                    Handler(Looper.getMainLooper()).post { activeInstance?.cancelRun(newRunId) }
+                }) return false
+            var handedOver = false
+            try {
+                // 基座完全不保存配置；按会话当前绑定模型重建，随后应用普通 Runtime 权限约束。
+                val config = runBlocking(Dispatchers.IO) {
+                    val conversation = io.github.mangi.eta.data.db.EtaDatabase.get(context).conversationDao()
+                        .conversationMetadataRow(base.conversationId) ?: return@runBlocking null
+                    RuntimeConfigRepository.runtimeConfigFor(conversation.modelId)
+                } ?: return false
+                val permissions = AgentRuntimePolicy.permissions(Prefs.localAgentPreferences())
+                request = request.copy(config = AgentRuntimePolicy.constrain(config.copy(
+                    // 配置仓库只解析模型连接；工具开关按当前本地设置重建，才能继续 terminal_job.read。
+                    terminalTools = permissions.terminalTools,
+                    browserTools = permissions.browserTools,
+                    deviceDirectTools = permissions.deviceDirectTools,
+                    deviceSensitiveReadTools = permissions.deviceSensitiveReadTools,
+                    deviceSensitiveActionTools = permissions.deviceSensitiveActionTools,
+                    subagentTools = permissions.subagentTools,
+                ), permissions))
+                pendingJobWakes += newRunId
+                val app = context.applicationContext
+                // 前台服务的启动与限制处理由 acquire 复用现有 AgentExecutionService 路径完成。
+                app.startService(Intent(app, AgentRuntimeService::class.java).setAction(ACTION_KEEP_ALIVE))
+                val deadline = android.os.SystemClock.uptimeMillis() + 5_000
+                val main = Handler(Looper.getMainLooper())
+                val completed = CountDownLatch(1)
+                val accepted = AtomicBoolean(false)
+                val abandoned = AtomicBoolean(false)
+                val attempt = object : Runnable {
+                    override fun run() {
+                        if (abandoned.get() || stopped.get()) { completed.countDown(); return }
+                        val instance = activeInstance?.takeUnless { it.destroyed }
+                        if (instance == null) {
+                            if (android.os.SystemClock.uptimeMillis() < deadline) main.postDelayed(this, 25)
+                            else completed.countDown()
+                            return
+                        }
+                        runCatching {
+                            if (!abandoned.get() && !stopped.get()) {
+                                accepted.set(instance.startRun(request, onStarted = { publishRun(request, true) }))
+                                if (abandoned.get() || stopped.get()) {
+                                    instance.cancelRun(newRunId)
+                                    accepted.set(false)
+                                }
+                            }
+                        }.onFailure { AndroidAgentLogger.warn("后台唤醒投递失败：${it.javaClass.simpleName}") }
+                        completed.countDown()
+                    }
+                }
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    // 主线程不能等待自身的 onCreate；已有实例时可立即投递，否则降级通知。
+                    if (activeInstance == null) return false
+                    attempt.run()
+                } else {
+                    main.post(attempt)
+                    if (!completed.await(5, TimeUnit.SECONDS)) {
+                        abandoned.set(true)
+                        main.removeCallbacks(attempt)
+                        main.post { activeInstance?.cancelRun(newRunId) }
+                        return false
+                    }
+                }
+                handedOver = accepted.get()
+                return handedOver
+            } catch (failure: Exception) {
+                if (failure is InterruptedException) Thread.currentThread().interrupt()
+                AndroidAgentLogger.warn("后台唤醒失败：${failure.javaClass.simpleName}")
+                return false
+            } finally {
+                pendingJobWakes -= newRunId
+                if (!handedOver) {
+                    AgentExecutionService.release("run:$newRunId")
+                    Handler(Looper.getMainLooper()).post {
+                        activeInstance?.let { instance ->
+                            if (pendingJobWakes.isEmpty() && instance.runs.all().isEmpty() && instance.displayedRun == null &&
+                                !instance.guiControl.state.value.userPaused) instance.stopSelf()
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun onMain(handler: Handler, action: () -> Boolean): Boolean {
+            if (Looper.myLooper() == Looper.getMainLooper()) return runCatching(action).getOrDefault(false)
+            val task = java.util.concurrent.FutureTask<Boolean> { runCatching(action).getOrDefault(false) }
+            handler.post(task)
+            return try { task.get(5, TimeUnit.SECONDS) } catch (failure: Exception) {
+                task.cancel(false)
+                handler.removeCallbacks(task)
+                if (failure is InterruptedException) Thread.currentThread().interrupt()
+                false
+            }
+        }
 
         // 只投影到 App 与 GUI 浮层的现有窗口，窗口不可见时由系统恢复息屏。
         private val keepScreenOnState = MutableStateFlow(false)

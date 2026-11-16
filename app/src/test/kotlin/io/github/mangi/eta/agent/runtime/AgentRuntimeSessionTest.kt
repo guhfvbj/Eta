@@ -11,6 +11,68 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentRuntimeSessionTest {
+    @Test fun backgroundSteeringPreservesTurnMetricsWhileHumanSteeringResetsThem() {
+        for (source in listOf(AgentRuntimeWire.SUPPLEMENT_SOURCE_USER, AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB)) {
+            for (afterTool in listOf(false, true)) {
+                val controller = AgentRunController()
+                val events = mutableListOf<AgentEvent>()
+                var round = 0
+                val provider = object : io.github.mangi.eta.agent.model.AgentProviderClient {
+                    override val id = "steering-fixture"
+                    override val capabilities = io.github.mangi.eta.agent.model.ProviderCapabilities(
+                        io.github.mangi.eta.agent.model.EndpointKind.CHAT_COMPLETIONS, true, true, false, false, false, false)
+                    override fun complete(request: io.github.mangi.eta.agent.model.ProviderRequest,
+                        runController: AgentRunController,
+                        onEvent: (io.github.mangi.eta.agent.model.ProviderEvent) -> Unit,
+                    ): io.github.mangi.eta.agent.model.ProviderResponse {
+                        round++
+                        if (round == 1 && !afterTool) controller.steer("完成通报", source)
+                        val response = org.json.JSONObject().put("role", "assistant").put("content", "第 $round 轮结果")
+                            .put("finish_reason", if (round == 1 && afterTool) "tool_calls" else "stop")
+                        if (round == 1 && afterTool) response.put("tool_calls", org.json.JSONArray().put(
+                            org.json.JSONObject().put("id", "call").put("type", "function").put("function",
+                                org.json.JSONObject().put("name", "get_current_context").put("arguments", "{}"))))
+                        return io.github.mangi.eta.agent.model.ProviderResponse(response)
+                    }
+                }
+                val result = io.github.mangi.eta.agent.model.AgentModelClient.complete(
+                    config = io.github.mangi.eta.agent.model.AgentModelClient.ModelConfig(
+                        baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "",
+                        browserTools = false, autoCompactionEnabled = false),
+                    prompt = "原任务", operationId = "run", runController = controller, provider = provider,
+                    toolExecutor = io.github.mangi.eta.agent.model.AgentModelClient.ToolExecutor {
+                        controller.steer("完成通报", source)
+                        io.github.mangi.eta.agent.model.AgentModelClient.ToolResult("{}")
+                    }, onEvent = events::add,
+                )
+                val supplement = result.transcript.single { it.role == "user" }
+                val background = source == AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB
+                val prefix = if (background) io.github.mangi.eta.agent.model.AgentLoop.JOB_STEERING_PREFIX
+                    else io.github.mangi.eta.agent.model.AgentLoop.USER_STEERING_PREFIX
+                assertTrue(supplement.content.startsWith(prefix))
+                assertEquals("user-run-supplement-1", supplement.messageId)
+                assertEquals(listOf(1, if (background) 2 else 1),
+                    events.filterIsInstance<AgentEvent.UsageReceived>().map { it.usage.stepCount })
+            }
+        }
+    }
+
+    @Test fun supplementsKeepSourceInEventsRecordsAndQueue() {
+        val events = mutableListOf<AgentEvent>()
+        val session = AgentRuntimeSession("run", eventSink = events::add)
+        val user = session.supplement("用户追加")!!
+        val job = session.supplement("命令完成", AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, "job-1")!!
+        assertEquals(AgentRuntimeWire.SUPPLEMENT_SOURCE_USER, user.source)
+        assertEquals(AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, job.source)
+        assertEquals(listOf(user, job), events)
+        assertEquals(listOf(user.source, job.source), session.supplements.map { it.source })
+        assertEquals("job-1", session.supplements.last().jobId)
+        assertEquals("用户追加", session.controller.pollSteeringMessage()!!.text)
+        assertEquals(job.source, session.controller.pollSteeringOrSeal()!!.source)
+        assertEquals(null, session.controller.pollSteeringOrSeal())
+        assertEquals(null, session.supplement("封口后通知", job.source))
+    }
+
     @Test
     fun searchSuggestionsSurviveActiveReplayButStopAtCancellationAndBudget() {
         val delivered = mutableListOf<AgentEvent>()

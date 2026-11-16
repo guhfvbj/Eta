@@ -55,7 +55,6 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         }
         TerminalRuntime.initialize(this)
         RootAccess.initialize(this)
-        applicationScope.launch { TerminalRuntime.backgroundJobs(this@EtaApp).resume() }
         SettingsDataStore.init(this)
         val predictiveBackEnabled = runBlocking(Dispatchers.IO) {
             AppearanceSettingsRepository.settings().predictiveBackEnabled
@@ -63,6 +62,12 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         PredictiveBackController.apply(applicationInfo, predictiveBackEnabled)
         AgentMemoryRepository.init(this)
         ProviderRepository.init(this)
+        applicationScope.launch {
+            val jobs = TerminalRuntime.backgroundJobs(this@EtaApp)
+            runCatching { jobs.completionSink = io.github.mangi.eta.agent.runtime.AgentJobWakeCoordinator(this@EtaApp) }
+                .onFailure { AndroidAgentLogger.warn("后台命令完成通道接线失败：${it.javaClass.simpleName}") }
+            jobs.resume()
+        }
         runCatching { AgentRequestSnapshot.init(this) }
         applicationScope.launch {
             EtaDatabase.get(this@EtaApp).agentTaskDao().recoverInterrupted(System.currentTimeMillis())

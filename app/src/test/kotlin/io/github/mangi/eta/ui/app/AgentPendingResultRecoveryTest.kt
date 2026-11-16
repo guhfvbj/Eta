@@ -15,6 +15,30 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentPendingResultRecoveryTest {
+    @Test fun backgroundJobPromptAndSupplementsProjectOnceAsUserMessages() {
+        val original = io.github.mangi.eta.ui.model.UserMessageUi("user-original", "人类任务")
+        val state = AgentChatUiState(messages = listOf(original),
+            history = listOf(AgentModelClient.ConversationMessage("user", "人类任务")),
+            input = "", isStreaming = true, thinkingEnabled = false)
+        val prompt = AgentUiHandoffPayload.Supplement(2, "后台完成", 1,
+            source = AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, jobId = "job")
+        val extra = AgentUiHandoffPayload.Supplement(3, "第二个后台完成", 2,
+            source = AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB)
+        val result = AgentRuntimeWire.RunResult("wake", true, "整理结果", transcript = listOf(
+            AgentModelClient.ConversationMessage("user", "第二个后台完成", messageId = "user-wake-supplement-3"),
+            AgentModelClient.ConversationMessage("assistant", "整理结果")))
+        val once = AgentPendingResultRecovery.apply(state, "wake", result, prompt, listOf(extra))
+        val twice = AgentPendingResultRecovery.apply(once.state, "wake", result, prompt, listOf(extra))
+        val users = once.state.messages.filterIsInstance<io.github.mangi.eta.ui.model.UserMessageUi>()
+        assertEquals(listOf("user-original", "user-wake-supplement-2", "user-wake-supplement-3"), users.map { it.id })
+        assertEquals(io.github.mangi.eta.ui.model.UserMessageOrigin.Human, users.first().origin)
+        assertTrue(users.drop(1).all { it.origin == io.github.mangi.eta.ui.model.UserMessageOrigin.BackgroundJob })
+        assertEquals(users.size, once.state.history.count { it.role == "user" })
+        assertEquals(once.state, twice.state)
+        assertTrue(twice.alreadyApplied)
+    }
+
+
     @Test
     fun recoveryDoesNotReplaceFailedAttemptOrRetryNotice() {
         val partial = AgentMessageUi(id = "assistant-retry-run-1-0", content = "半截回答")

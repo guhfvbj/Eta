@@ -17,6 +17,7 @@ internal data class AgentConversationRuntimeState(
     val version: Int = 1,
     val tokenBaseline: AgentContextTokenBaseline? = null,
     val subagents: List<SubagentSessionStore.StoredSession> = emptyList(),
+    val consecutiveJobWakes: Int = 0,
 ) {
     fun encode(): String = codec.encodeToString(this)
 
@@ -29,6 +30,19 @@ internal data class AgentConversationRuntimeState(
 }
 
 internal object AgentConversationRuntimeStore {
+    fun incrementJobWakes(context: Context, conversationId: String, max: Int): Int {
+        var next = 0
+        update(context, conversationId) { state ->
+            next = (state.consecutiveJobWakes.toLong() + 1).coerceIn(0, max.coerceAtLeast(0).toLong()).toInt()
+            state.copy(consecutiveJobWakes = next)
+        }
+        return next
+    }
+
+    fun resetJobWakes(context: Context, conversationId: String) {
+        update(context, conversationId) { it.copy(consecutiveJobWakes = 0) }
+    }
+
     fun load(context: Context, conversationId: String): AgentConversationRuntimeState = runBlocking(Dispatchers.IO) {
         val database = EtaDatabase.get(context)
         database.withTransaction {

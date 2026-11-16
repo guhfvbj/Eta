@@ -48,6 +48,7 @@ import io.github.mangi.eta.agent.skill.GitHubSkillRepository
 import io.github.mangi.eta.agent.skill.GitHubSkillSourceException
 import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
+import io.github.mangi.eta.agent.terminal.JobOrigin
 import io.github.mangi.eta.agent.terminal.DetachedTaskSupervisor
 import io.github.mangi.eta.agent.terminal.LinuxEnvironmentPaths
 import io.github.mangi.eta.agent.terminal.terminalEnvironment
@@ -118,6 +119,7 @@ internal class AgentLocalTools(
     private val guiControl: GuiControlCoordinator.RunControl? = null,
     browserSession: AgentBrowserSession? = null,
     private val onRootChecked: () -> Unit = {},
+    private val originConversationId: String? = null,
 ) : AgentModelClient.ToolExecutor, AutoCloseable {
 
     private val closed = AtomicBoolean(false)
@@ -151,6 +153,7 @@ internal class AgentLocalTools(
         logger = logger,
         rootAvailable = rootAvailable,
         executionContext = terminalExecutionContext,
+        origin = originConversationId?.takeIf(String::isNotBlank)?.let { JobOrigin(it, browserRunId) },
         backgroundJobs = io.github.mangi.eta.agent.terminal.TerminalRuntime.backgroundJobs(context),
         detachedSupervisor = DetachedTaskSupervisor(
             logger = logger,

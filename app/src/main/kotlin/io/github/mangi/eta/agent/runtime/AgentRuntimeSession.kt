@@ -44,6 +44,26 @@ internal class AgentRuntimeSession(
     }
     private var state = State.RUNNING
     private val replayEvents = mutableListOf<AgentEvent>()
+    private val supplementRecords = mutableListOf<AgentUiHandoffPayload.Supplement>()
+    private var nextSupplementIndex = 1
+    val supplements: List<AgentUiHandoffPayload.Supplement>
+        get() = lock.withLock { supplementRecords.toList() }
+
+    /** 注册器构造时恢复已存在的补充编号；尚未接受任何新事件。 */
+    fun restoreSupplements(payload: AgentUiHandoffPayload) = lock.withLock {
+        check(supplementRecords.isEmpty())
+        supplementRecords += payload.supplements
+        nextSupplementIndex = payload.lastSupplementIndex + 1
+    }
+
+    /** 来源随事件与 handoff 一同保存，后台通知不冒充人类补充。 */
+    fun supplement(text: String, source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER, jobId: String = ""): AgentEvent.UserSupplementReceived? =
+        steer(text, source) {
+            val record = AgentUiHandoffPayload.Supplement(nextSupplementIndex++, text.trim(), System.currentTimeMillis(), source, jobId)
+            supplementRecords += record
+            AgentEvent.UserSupplementReceived(record.index, record.text, record.source)
+        }
+
     private val searchSuggestionsBudget = SearchSuggestionsBudget()
     private val subscribers = mutableListOf<Subscriber>()
 
@@ -93,18 +113,19 @@ internal class AgentRuntimeSession(
         true
     }
 
-    fun steer(text: String): Boolean =
+    fun steer(text: String, source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER): Boolean =
         lock.withLock {
             if (state != State.RUNNING || operation != AgentRuntimeWire.OP_CHAT) return false
-            controller.steer(text)
+            controller.steer(text, source)
         }
 
     fun <T : AgentEvent> steer(
         text: String,
+        source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER,
         eventFactory: () -> T,
     ): T? =
         lock.withLock {
-            if (state != State.RUNNING || operation != AgentRuntimeWire.OP_CHAT || !controller.steer(text)) return null
+            if (state != State.RUNNING || operation != AgentRuntimeWire.OP_CHAT || !controller.steer(text, source)) return null
             eventFactory().also { event ->
                 recordForReplay(event)
                 subscribers.forEach { it.eventSink(event) }

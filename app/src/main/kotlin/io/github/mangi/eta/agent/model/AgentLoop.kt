@@ -1,6 +1,8 @@
 package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.mcp.McpDeferredGroup
+import io.github.mangi.eta.agent.runtime.SteeringMessage
+import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
@@ -346,7 +348,7 @@ internal class AgentLoop(
         val supplement = runController.pollSteeringMessage() ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        turnMetrics.reset()
+        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) turnMetrics.reset()
         return true
     }
 
@@ -354,14 +356,11 @@ internal class AgentLoop(
         val supplement = runController.pollSteeringOrSeal() ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        turnMetrics.reset()
+        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) turnMetrics.reset()
         return true
     }
 
-    private fun steeringPrompt(supplement: String): String =
-        "用户补充指令：$supplement\n\n请基于当前任务上下文继续执行，不要从头重复已经完成或已经验证过的操作。"
-
-    private fun steeringMessage(supplement: String): JSONObject =
+    private fun steeringMessage(supplement: SteeringMessage): JSONObject =
         AgentConversationCodec.userTextMessage(steeringPrompt(supplement))
             .put("_eta_message_id", "user-$operationId-supplement-${++supplementIndex}")
 
@@ -706,9 +705,17 @@ internal class AgentLoop(
 
     private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
 
-    private companion object {
+    companion object {
+        const val USER_STEERING_PREFIX = "用户补充指令："
+        const val JOB_STEERING_PREFIX = "后台命令完成通知（系统注入，不是用户发言）："
+
+        internal fun steeringPrompt(supplement: SteeringMessage): String {
+            val prefix = if (supplement.source == AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) JOB_STEERING_PREFIX else USER_STEERING_PREFIX
+            return "$prefix${supplement.text}\n\n请基于当前任务上下文继续执行，不要从头重复已经完成或已经验证过的操作。"
+        }
+
         // Explicit opt-in only: shell, GUI, images, mutable memory/tasks and MCP remain barriers.
-        val PARALLEL_READ_TOOLS = setOf(
+        private val PARALLEL_READ_TOOLS = setOf(
             "read_file", "stat_file", "list_directory", "glob_files", "grep_files",
             "get_current_context", "search_apps", "device_status", "network_info", "inspect_app",
             "top_memory_apps", "top_storage_apps", "get_display_state", "get_sound_state",

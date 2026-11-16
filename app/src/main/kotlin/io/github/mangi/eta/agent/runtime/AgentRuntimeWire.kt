@@ -164,6 +164,9 @@ internal object AgentRuntimeWire {
     private const val TRUNCATED_SUFFIX = "\n\n[跨进程结果过长，已截断]"
     private const val MAX_START_REQUEST_PARCEL_BYTES = 768 * 1024
 
+    const val SUPPLEMENT_SOURCE_USER = "user"
+    const val SUPPLEMENT_SOURCE_BACKGROUND_JOB = "background_job"
+
     data class RunRequest(
         val runId: String,
         val prompt: String,
@@ -794,6 +797,7 @@ internal object AgentRuntimeWire {
                 putString(KEY_TYPE, "user_supplement_received")
                 putInt("index", event.index)
                 putString("text", event.text)
+                putString("source", event.source)
             }
 
             is AgentEvent.ToolStarted -> {
@@ -958,6 +962,7 @@ internal object AgentRuntimeWire {
         "user_supplement_received" -> AgentEvent.UserSupplementReceived(
             index = bundle.getInt("index"),
             text = bundle.getString("text").orEmpty(),
+            source = bundle.getString("source") ?: SUPPLEMENT_SOURCE_USER,
         )
 
         "tool_started" -> AgentEvent.ToolStarted(

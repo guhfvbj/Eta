@@ -10,6 +10,9 @@ import androidx.room.Upsert
 
 @Dao
 internal interface ConversationDao : ChunkedTextDao {
+    @Query("SELECT COUNT(*) FROM conversations WHERE id = :id")
+    suspend fun conversationCount(id: String): Int
+
     @Query(
         "SELECT c.id, c.title, c.reasoning_effort, c.created_at, c.updated_at, c.model_id, c.is_pinned, " +
             "(c.roleplay_json != '') AS has_roleplay, " +
@@ -122,7 +125,7 @@ internal interface ConversationDao : ChunkedTextDao {
     @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId ORDER BY sort_index ASC LIMIT :limit OFFSET :offset")
     suspend fun messageRowsPage(conversationId: String, limit: Int, offset: Int): List<ConversationMessageEntity>
 
-    @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId AND type IN ('user', 'assistant') " +
+    @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId AND type IN ('user', 'job_notice', 'assistant') " +
         "ORDER BY sort_index ASC LIMIT :limit OFFSET :offset")
     suspend fun legacyMessageRowsPage(conversationId: String, limit: Int, offset: Int): List<ConversationMessageEntity>
 

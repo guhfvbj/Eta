@@ -37,15 +37,10 @@ internal class RuntimeRunRegistry(private val capacity: Int = MAX_ACTIVE_RUNS) {
 
         private val ingested = AtomicBoolean(false)
         private var pendingIncoming = incoming
-        private val supplementsLock = Any()
-        private val supplements = initialRequest.handoff
-            ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
-            ?.let { AgentUiHandoffPayload.from(it.payload).supplements }
-            .orEmpty().toMutableList()
-        private var nextSupplementIndex = initialRequest.handoff
-            ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
-            ?.let { AgentUiHandoffPayload.from(it.payload).lastSupplementIndex + 1 }
-            ?: 1
+        init {
+            initialRequest.handoff?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
+                ?.let { session.restoreSupplements(AgentUiHandoffPayload.from(it.payload)) }
+        }
 
         fun prepared(request: AgentRuntimeWire.RunRequest) {
             check(request.runId == runId)
@@ -81,22 +76,13 @@ internal class RuntimeRunRegistry(private val capacity: Int = MAX_ACTIVE_RUNS) {
             onRequestIngested()
         }
 
-        fun supplement(text: String): AgentEvent.UserSupplementReceived? = session.steer(text) {
-            synchronized(supplementsLock) {
-                val supplement = AgentUiHandoffPayload.Supplement(
-                    index = nextSupplementIndex++,
-                    text = text,
-                    createdAt = System.currentTimeMillis(),
-                )
-                supplements += supplement
-                AgentEvent.UserSupplementReceived(supplement.index, supplement.text)
-            }
-        }
+        fun supplement(text: String, source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER, jobId: String = ""): AgentEvent.UserSupplementReceived? =
+            session.supplement(text, source, jobId)
 
         fun snapshotRequest(request: AgentRuntimeWire.RunRequest = this.request): AgentRuntimeWire.RunRequest {
             val handoff = request.handoff ?: return request
             if (handoff.source != AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE) return request
-            val snapshot = synchronized(supplementsLock) { supplements.toList() }
+            val snapshot = session.supplements
             if (snapshot.isEmpty()) return request
             return request.copy(handoff = handoff.copy(
                 payload = AgentUiHandoffPayload.from(handoff.payload).copy(supplements = snapshot).toJson(),

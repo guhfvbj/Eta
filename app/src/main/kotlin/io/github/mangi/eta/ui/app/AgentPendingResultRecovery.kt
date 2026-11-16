@@ -8,6 +8,7 @@ import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.SystemNoticeCode
 import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
+import io.github.mangi.eta.ui.model.UserMessageOrigin
 import io.github.mangi.eta.ui.model.UserMessageUi
 
 /** 将 Runtime outbox 的结果幂等折叠回 App 会话。 */
@@ -133,7 +134,9 @@ internal object AgentPendingResultRecovery {
         supplements.sortedBy { it.index }.forEach { supplement ->
             val id = supplementMessageId(runId, supplement.index)
             if (updated.any { it.id == id }) return@forEach
-            val userMessage = UserMessageUi(id = id, content = supplement.text)
+            val userMessage = UserMessageUi(id = id, content = supplement.text,
+                origin = if (supplement.source == AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB)
+                    UserMessageOrigin.BackgroundJob else UserMessageOrigin.Human)
             val assistantIndex = updated.indexOfLast {
                 it is AgentMessageUi &&
                     it.isAssistantForRun(runId) &&

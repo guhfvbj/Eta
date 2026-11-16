@@ -171,7 +171,8 @@ internal sealed interface AgentEvent {
 
     data class UserSupplementReceived(
         val index: Int,
-        val text: String
+        val text: String,
+        val source: String = AgentRuntimeWire.SUPPLEMENT_SOURCE_USER,
     ) : AgentEvent {
         override fun toLogLine(): String =
             "user_supplement_received index=$index, chars=${text.length}"

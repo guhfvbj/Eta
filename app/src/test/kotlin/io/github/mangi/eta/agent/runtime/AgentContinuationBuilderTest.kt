@@ -7,6 +7,57 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentContinuationBuilderTest {
+    @Test fun jobNoticePreservesHistoryAndSupplementProvenance() {
+        val payload = AgentUiHandoffPayload("conversation",
+            promptSupplement = AgentUiHandoffPayload.Supplement(7, "上轮续接", 1),
+            supplements = listOf(AgentUiHandoffPayload.Supplement(9, "人类补充", 2)))
+        val request = AgentRuntimeWire.RunRequest("old", "上轮续接", modelConfig(), emptyList(),
+            history = listOf(AgentModelClient.ConversationMessage("user", "早先任务")),
+            handoff = AgentRuntimeWire.EntryHandoff("old", AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE, payload.toJson()),
+            modelSessionId = "model-session")
+        val transcript = listOf(AgentModelClient.ConversationMessage("assistant", "完成上轮"))
+        val base = AgentContinuationBaseStore.Base("conversation", "old", request, null, transcript, 1)
+        val next = AgentContinuationBuilder.buildJobNotice(base, "完成通知", "job-1", "next", 123)
+        assertEquals(listOf("早先任务", "上轮续接", "完成上轮"), next.history.map { it.content })
+        assertEquals("user-old-supplement-7", next.history[1].messageId)
+        assertEquals("model-session", next.effectiveModelSessionId)
+        assertEquals(AgentRuntimeWire.OP_CHAT, next.operation)
+        assertEquals(null, next.rewriteTargetMessageId)
+        assertTrue(next.images.isEmpty())
+        assertEquals("完成通知", next.prompt)
+        assertEquals("next", next.runId)
+        assertEquals(AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE, next.handoff!!.source)
+        assertTrue(!next.handoff.dismissEntrySurfaceOnForegroundOperation)
+        val result = AgentUiHandoffPayload.from(next.handoff.payload)
+        assertEquals(AgentUiHandoffPayload.ORIGIN_JOB_WAKEUP, result.origin)
+        assertEquals(10, result.promptSupplement!!.index)
+        assertEquals(AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, result.promptSupplement.source)
+        assertEquals("job-1", result.promptSupplement.jobId)
+        assertEquals(123L, result.promptSupplement.createdAt)
+        assertEquals("user-next-supplement-10", result.promptMessageId("next"))
+    }
+
+    @Test fun jobNoticePrefersSnapshotToFallbackTranscript() {
+        val request = AgentRuntimeWire.RunRequest("old", "原输入", modelConfig(), emptyList())
+        val snapshot = io.github.mangi.eta.agent.model.AgentContextSnapshot(
+            operationId = "old", messages = listOf(AgentModelClient.ConversationMessage("user", "快照")))
+        val base = AgentContinuationBaseStore.Base("conversation", "old", request, snapshot,
+            listOf(AgentModelClient.ConversationMessage("assistant", "不应重复")), 1)
+        val next = AgentContinuationBuilder.buildJobNotice(base, "通知", "job")
+        assertEquals(snapshot.messages, next.history)
+    }
+
+    @Test fun oldHandoffAndRuntimeStateDefaultToHumanAndZeroJobWakes() {
+        val old = """{"type":"agent_ui_handoff","version":2,"conversationId":"c","supplements":[{"index":2,"text":"补充","createdAt":1}]}"""
+        val payload = AgentUiHandoffPayload.from(old)
+        assertEquals(AgentUiHandoffPayload.ORIGIN_USER, payload.origin)
+        assertEquals(AgentRuntimeWire.SUPPLEMENT_SOURCE_USER, payload.supplements.single().source)
+        assertEquals("", payload.supplements.single().jobId)
+        assertEquals(0, AgentConversationRuntimeState.decode("""{"version":1}""").consecutiveJobWakes)
+        assertEquals(3, AgentConversationRuntimeState.decode(AgentConversationRuntimeState(consecutiveJobWakes = 3).encode()).consecutiveJobWakes)
+    }
+
+
     @Test
     fun rewriteAndCompactionCannotBecomeAnOrdinaryToolEnabledContinuation() {
         listOf(AgentRuntimeWire.OP_REWRITE_REPLY, AgentRuntimeWire.OP_COMPACT).forEach { operation ->

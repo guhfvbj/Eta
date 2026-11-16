@@ -31,6 +31,7 @@ import io.github.mangi.eta.ui.model.TokenUsageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
+import io.github.mangi.eta.ui.model.UserMessageOrigin
 import io.github.mangi.eta.ui.model.UserMessageUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -414,7 +415,7 @@ internal object AgentConversationStore {
                 id = id,
                 conversationId = conversationId,
                 sortIndex = sortIndex,
-                type = TYPE_USER,
+                type = if (origin == UserMessageOrigin.BackgroundJob) TYPE_JOB_NOTICE else TYPE_USER,
                 content = content,
                 imagesJson = images.toJsonArrayString(),
                 isEdited = isEdited,
@@ -508,11 +509,12 @@ internal object AgentConversationStore {
 
     private fun ConversationMessageEntity.toMessageOrNull(): AgentChatMessageUi? =
         when (type) {
-            TYPE_USER -> UserMessageUi(
+            TYPE_USER, TYPE_JOB_NOTICE -> UserMessageUi(
                 id = id,
                 content = content,
                 images = imagesJson.toStringList(),
                 isEdited = isEdited,
+                origin = if (type == TYPE_JOB_NOTICE) UserMessageOrigin.BackgroundJob else UserMessageOrigin.Human,
             )
 
             TYPE_ASSISTANT -> AgentMessageUi(
@@ -628,7 +630,7 @@ internal object AgentConversationStore {
     private fun List<ConversationMessageEntity>.toLegacyHistory(): List<AgentModelClient.ConversationMessage> =
         mapNotNull { message ->
             when (message.type) {
-                TYPE_USER -> AgentModelClient.ConversationMessage(
+                TYPE_USER, TYPE_JOB_NOTICE -> AgentModelClient.ConversationMessage(
                     role = "user",
                     content = message.content,
                 )
@@ -645,6 +647,7 @@ internal object AgentConversationStore {
         }
 
     private const val TYPE_USER = "user"
+    private const val TYPE_JOB_NOTICE = "job_notice"
     private const val TYPE_ASSISTANT = "assistant"
     private const val TYPE_SYSTEM_NOTICE = "system_notice"
     private const val TYPE_THINKING = "thinking"

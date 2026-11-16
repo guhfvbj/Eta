@@ -12,22 +12,24 @@ internal object AgentTerminalToolCatalog {
                 name = "terminal",
                 description = "执行 Shell 命令，默认环境、身份与目录见运行上下文；已知文件优先用文件工具。" +
                     "保留 Shell 状态用 open → session_id exec → close，会话不随 environment 参数切换；exit=127 时查看 environment_hint。" +
-                    "勿用 & 挂后台；耗时命令用 terminal_job，跨运行服务用 terminal_daemon。",
+                    "勿用 & 挂后台；长命令用 promote_on_timeout 自动升级，不要自己 sleep 轮询；跨运行服务用 terminal_daemon。完成后系统会自动唤醒并继续当前对话，无需下一轮先 read 全部输出；需要细节时用 from_offset 只取增量。用户明确要求完成后不要打扰时用 background_delivery=quiet。",
                 parameters = parameters(
                     commandProperties()
                         .put("action", action("exec", "open", "close", "check_root")
                             .put("description", "默认 exec 执行命令；open 创建持久 Shell；close 关闭会话；check_root 用固定的 su -c 'id -u' 检测并更新 Root 授权，不需要 command，可能显示系统授权请求。"))
                         .put("session_id", text("open 返回的会话 ID。exec 沿用会话的目录、环境和身份；切换目录请在会话中执行 cd。"))
-                        .put("promote_on_timeout", bool("exec 未传 session_id 时可选，默认 false。显式 true 时，超过 timeout_ms 自动保留为后台命令，返回 status=promoted 和 job_id；用 terminal_job 的 read/wait/stop 继续查看或控制。")),
+                        .put("promote_on_timeout", bool("exec 未传 session_id 时可选，默认 false。显式 true 时，超过 timeout_ms 自动保留为后台命令，返回 status=promoted 和 job_id；用 terminal_job 的 read/wait/stop 继续查看或控制。"))
+                        .put("background_delivery", text("仅 promote_on_timeout=true 时生效，否则忽略；默认 wakeup 完成后自动继续当前对话。用户明确要求完成后不要打扰时选 quiet，只发通知，不唤醒新回合。")
+                            .put("enum", JSONArray(listOf("wakeup", "quiet"))).put("default", "wakeup")),
                 ),
             ),
         )
         tools.put(
             AgentToolSchema.function(
                 name = "terminal_job",
-                description = "后台命令使用独立 Shell，不继承 terminal 会话，回复后继续执行。start 返回 job_id；完成或失败时通知，通知可用性见 completion_notifications_enabled。" +
+                description = "后台命令使用独立 Shell，不继承 terminal 会话，回复后继续执行。start 返回 job_id；完成后系统自动唤醒并继续当前对话，无法唤醒时降级通知，通知可用性见 completion_notifications_enabled。" +
                     "list 查状态，read 读日志，依赖结果时 wait，stop 终止；状态含 elapsed_ms 和精简 output_tail。" +
-                    "完整日志在 output_path，截断时用 read_file 分页读取；启动后可继续工作或回复，无需轮询。",
+                    "无需在下一轮先 read 全部输出；read 用 from_offset 只取增量。完整日志在 output_path；启动后可继续工作或回复，无需自己 sleep 轮询。",
                 parameters = parameters(
                     executionProperties()
                         .put("action", action("start", "list", "read", "wait", "stop"))
@@ -37,7 +39,7 @@ internal object AgentTerminalToolCatalog {
                         .put("job_id", text("start 或 list 返回的任务 ID；read、wait、stop 使用。"))
                         .put("active_only", bool("list 是否只返回运行中的任务，默认 true。"))
                         .put("max_bytes", integer("read 返回的日志尾部字节数，默认 16000，最多 65536；完整日志保存在 output_path。"))
-                        .put("from_offset", integer("read 可选的绝对 UTF-8 字节偏移；返回 next_offset、total_bytes、lossy。按 next_offset 继续读取；落后于内存环时 lossy=true，较早输出仍可从 output_path 读取。"))
+                        .put("from_offset", integer("read 可选的绝对 UTF-8 字节偏移；完成通报后仅在需要细节时读取增量，不必先读全部输出。返回 next_offset、total_bytes、lossy。按 next_offset 继续读取；落后于内存环时 lossy=true，较早输出仍可从 output_path 读取。"))
                         .put("cursor", integer("read 的 from_offset 别名。"))
                         .put("incremental", bool("read 可选，默认 false；不传偏移且为 true 时使用并推进宿主消费游标。默认读取仍返回日志尾部。"))
                         .put("wait_ms", integer("wait 最长等待毫秒数，默认 30000，最多 60000；等待超时不会停止命令。")),
@@ -71,7 +73,7 @@ internal object AgentTerminalToolCatalog {
 
     private fun commandProperties(): JSONObject = executionProperties()
         .put("command", text("要执行的命令，使用实际环境支持的 Shell 语法。"))
-        .put("timeout_ms", integer("命令超时毫秒，默认 30000，最多 180000。安装、构建或长脚本请用 terminal_job，或显式提高此上限。超时会终止进程树；会话命令超时也会关闭会话。检查 timed_out/code；exit 143 可能是 SIGTERM，单凭退出码不代表工具超时。"))
+        .put("timeout_ms", integer("命令超时毫秒，默认 30000，最多 180000。安装、构建或长脚本请配合 promote_on_timeout 自动升级为后台任务，或用 terminal_job。超时会终止进程树；会话命令超时也会关闭会话。检查 timed_out/code；exit 143 可能是 SIGTERM，单凭退出码不代表工具超时。"))
         .put("merge_stderr", bool("是否把 stderr 合并到 stdout，默认 false。"))
 
     private fun parameters(properties: JSONObject, vararg required: String): JSONObject = JSONObject()

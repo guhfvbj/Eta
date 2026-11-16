@@ -13,6 +13,216 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 class BackgroundTerminalJobsTest {
+    @Test fun cancellingPromotableForegroundCommandKeepsInlineDelivery() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val controller = controller(supervisor, jobs)
+        val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val running = worker.submit<String> { controller.executeTool("terminal", JSONObject()
+                .put("command", "sleep 30").put("cwd", temporary.root.path)
+                .put("promote_on_timeout", true).put("timeout_ms", 30_000)) }
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (supervisor.list().isEmpty() && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(supervisor.list().isNotEmpty())
+            controller.interruptAll()
+            running.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            jobs.list(false)
+            assertEquals(JobDelivery.INLINE, supervisor.list().single().task.delivery)
+            assertEquals(0, notifications.get())
+        } finally { controller.closeAll(); worker.shutdownNow() }
+    }
+
+    @Test fun stoppingRunningCommandConsumesTheResultBeforeAutomaticDelivery() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val id = JSONObject(jobs.start(supervisor, "sleep 30", temporary.root.path,
+            "user", TerminalEnvironment.ANDROID, "模型主动停止", 0)).getString("job_id")
+        assertEquals("stopped", JSONObject(jobs.stop(id)).getString("status"))
+        assertTrue(supervisor.findTask(id)!!.consumedAt != null)
+        assertEquals(0, notifications.get())
+    }
+
+    /** 通知合同先观察未消费任务；read/wait/stop 的主动消费另由新增用例验证。 */
+    private fun awaitCompletionNotification(supervisor: DetachedTaskSupervisor, id: String) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+        while (supervisor.findTask(id)?.completionNotified != true && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue("无归属且未消费的任务完成后仍须通知", supervisor.findTask(id)?.completionNotified == true)
+    }
+
+    private fun completedFixture(delivery: JobDelivery = JobDelivery.WAKEUP): Pair<DetachedTaskSupervisor, String> {
+        val log = File(temporary.root, "finished.log").apply { writeText("完成输出") }
+        val task = DetachedTask("finished", Long.MAX_VALUE, "标记", "true", temporary.root.path, "user",
+            TerminalEnvironment.ANDROID, log.path, 1, commandTask = true, completedAt = 2, exitCode = 0,
+            conversationId = "conversation", originRunId = "run", delivery = delivery)
+        File(temporary.root, "tasks.json").writeText(org.json.JSONArray().put(task.toRecordJson()).toString())
+        return supervisor() to task.id
+    }
+
+    @Test fun successfulTerminalReadsConsumeAndSuppressPendingDelivery() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        val read = JSONObject(jobs.read(id))
+        assertEquals("完成输出", read.getString("output"))
+        assertTrue(read.getBoolean("consumed"))
+        val firstConsumedAt = supervisor.findTask(id)!!.consumedAt
+        assertTrue(firstConsumedAt != null)
+        jobs.read(id, fromOffset = 0)
+        jobs.list(false)
+        assertEquals(firstConsumedAt, supervisor.findTask(id)!!.consumedAt)
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun terminalIncrementalReadConsumesWithoutChangingDelivery() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        assertTrue(JSONObject(jobs.read(id, fromOffset = 0)).getBoolean("ok"))
+        assertTrue(supervisor.findTask(id)!!.consumedAt != null)
+        assertEquals(JobDelivery.WAKEUP, supervisor.findTask(id)!!.delivery)
+        jobs.list(false)
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun failedTerminalReadDoesNotConsume() {
+        val (supervisor, id) = completedFixture()
+        File(temporary.root, "finished.log").delete()
+        val jobs = host(supervisor)
+        assertFalse(JSONObject(jobs.read(id)).getBoolean("ok"))
+        assertEquals(null, supervisor.findTask(id)!!.consumedAt)
+    }
+
+    @Test fun terminalWaitConsumesBeforeRefreshingHost() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        assertFalse(JSONObject(jobs.waitFor(id, 0) { false }).getBoolean("running"))
+        assertTrue(supervisor.findTask(id)!!.consumedAt != null)
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun terminalStopConsumesBeforeRefreshingHost() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        assertTrue(JSONObject(jobs.stop(id)).getBoolean("ok"))
+        assertTrue(supervisor.findTask(id)!!.consumedAt != null)
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun inlineCompletionNeverCallsSinkOrNotification() {
+        val (supervisor, _) = completedFixture(JobDelivery.INLINE)
+        val jobs = host(supervisor)
+        var sinkCalls = 0
+        jobs.completionSink = object : JobCompletionSink {
+            override fun onJobCompleted(task: DetachedTask): Boolean { sinkCalls++; return true }
+        }
+        jobs.resume()
+        jobs.list(false)
+        assertEquals(0, sinkCalls)
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun handledSinkMarksAttemptAndSkipsNotification() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        var calls = 0
+        jobs.completionSink = object : JobCompletionSink {
+            override fun onJobCompleted(task: DetachedTask): Boolean { calls++; return true }
+        }
+        jobs.resume()
+        jobs.list(false)
+        assertEquals(1, calls)
+        assertEquals(0, notifications.get())
+        assertTrue(supervisor.findTask(id)!!.deliveryAttemptedAt != null)
+        assertTrue(supervisor.findTask(id)!!.completionNotified)
+        assertTrue(JSONObject(jobs.list(false)).getJSONArray("tasks").getJSONObject(0).getBoolean("wake_attempted"))
+    }
+
+    @Test fun declinedSinkFallsBackToNotificationOnlyOnce() {
+        val (supervisor, id) = completedFixture()
+        val jobs = host(supervisor)
+        jobs.completionSink = object : JobCompletionSink { override fun onJobCompleted(task: DetachedTask) = false }
+        jobs.resume()
+        jobs.list(false)
+        assertEquals(1, notifications.get())
+        assertEquals(null, supervisor.findTask(id)!!.deliveryAttemptedAt)
+        assertTrue(supervisor.findTask(id)!!.completionNotified)
+    }
+
+    @Test fun originlessCompletionStillUsesFallbackNotification() {
+        val (supervisor, id) = completedFixture()
+        val file = File(temporary.root, "tasks.json")
+        file.writeText(org.json.JSONArray().put(supervisor.findTask(id)!!.copy(conversationId = null, originRunId = null).toRecordJson()).toString())
+        val jobs = host(supervisor)
+        jobs.completionSink = io.github.mangi.eta.agent.runtime.AgentJobWakeCoordinator(
+            conversationExists = { error("无归属不能查询会话") },
+            injectIntoActiveRun = { _, _ -> error("无归属不能注入") },
+            wake = { _, _ -> error("无归属不能唤醒") }, loadBase = { null },
+            wakeBudget = object : io.github.mangi.eta.agent.runtime.AgentJobWakeCoordinator.WakeBudget {
+                override fun tryConsume(conversationId: String): Boolean = error("无归属不能扣预算")
+            }, removeBase = {})
+        jobs.resume()
+        assertEquals(1, notifications.get())
+    }
+
+    @Test fun completionIsDispatchedBeforeForegroundLeaseRelease() {
+        val supervisor = supervisor()
+        val leased = java.util.concurrent.atomic.AtomicBoolean(false)
+        val dispatched = java.util.concurrent.CountDownLatch(1)
+        val released = java.util.concurrent.CountDownLatch(1)
+        val leaseWasHeld = java.util.concurrent.atomic.AtomicBoolean(false)
+        val jobs = BackgroundTerminalJobs(supervisor, NoopLogger,
+            acquireLease = { leased.set(true); true },
+            releaseLease = { leased.set(false); released.countDown() },
+            onCompleted = { notifications.incrementAndGet() }).also { hosts += it }
+        jobs.completionSink = object : JobCompletionSink {
+            override fun onJobCompleted(task: DetachedTask): Boolean {
+                leaseWasHeld.set(leased.get()); dispatched.countDown(); return true
+            }
+        }
+        jobs.start(supervisor, "printf done", temporary.root.path, "user", TerminalEnvironment.ANDROID,
+            "租约接力", 0, origin = JobOrigin("conversation", "run"))
+        assertTrue(dispatched.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(released.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(leaseWasHeld.get())
+        assertEquals(0, notifications.get())
+    }
+
+    @Test fun promotableForegroundCompletionRemainsInlineAndSilent() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val controller = controller(supervisor, jobs)
+        try {
+            val result = JSONObject(controller.executeTool("terminal", JSONObject().put("command", "printf done")
+                .put("cwd", temporary.root.path).put("promote_on_timeout", true).put("timeout_ms", 5000)))
+            assertTrue(result.toString(), result.getBoolean("ok"))
+            val task = supervisor.list().single().task
+            assertEquals(JobDelivery.INLINE, task.delivery)
+            jobs.list(false)
+            assertEquals(0, notifications.get())
+        } finally { controller.closeAll() }
+    }
+
+    @Test fun promotionPreservesOwnershipAndChoosesWakeupOrQuiet() {
+        val supervisor = supervisor()
+        val jobs = host(supervisor)
+        val controller = RootShellTerminalController(NoopLogger, detachedSupervisor = supervisor,
+            backgroundJobs = jobs, rootAvailable = { false }, origin = JobOrigin("conversation", "run"))
+        try {
+            for (delivery in listOf(JobDelivery.WAKEUP, JobDelivery.QUIET)) {
+                val args = JSONObject().put("command", "sleep 30").put("cwd", temporary.root.path)
+                    .put("promote_on_timeout", true).put("timeout_ms", 10)
+                if (delivery == JobDelivery.QUIET) args.put("background_delivery", "quiet")
+                val result = JSONObject(controller.executeTool("terminal", args))
+                assertEquals("promoted", result.getString("status"))
+                val task = supervisor.findTask(result.getString("job_id"))!!
+                assertEquals(delivery, task.delivery)
+                assertEquals("conversation", task.conversationId)
+                assertEquals("run", task.originRunId)
+                jobs.stop(task.id)
+            }
+        } finally { controller.closeAll() }
+    }
+
+
     @get:Rule val temporary = TemporaryFolder()
     private val hosts = mutableListOf<BackgroundTerminalJobs>()
     private val notifications = AtomicInteger()
@@ -63,6 +273,7 @@ class BackgroundTerminalJobsTest {
         val second = controller(supervisor, jobs)
         try {
             val jobId = started.getString("job_id")
+            awaitCompletionNotification(supervisor, jobId)
             val waited = JSONObject(second.executeTool("terminal_job", JSONObject().put("action", "wait")
                 .put("job_id", jobId).put("wait_ms", 5000)))
             assertFalse(waited.toString(), waited.getBoolean("running"))
@@ -83,6 +294,7 @@ class BackgroundTerminalJobsTest {
         val started = JSONObject(jobs.start(supervisor, "head -c 70000 /dev/zero | tr '\\000' x", temporary.root.path,
             "user", TerminalEnvironment.ANDROID, "长日志", 5000))
         val id = started.getString("job_id")
+        awaitCompletionNotification(supervisor, id)
         jobs.waitFor(id, 5000) { false }
         val result = JSONObject(jobs.read(id, 1024))
         assertEquals("completed", result.getString("status"))
@@ -104,16 +316,20 @@ class BackgroundTerminalJobsTest {
         val jobs = host(supervisor)
         val failed = JSONObject(jobs.start(supervisor, "printf problem; exit 7", temporary.root.path,
             "user", TerminalEnvironment.ANDROID, "失败任务", 5000)).getString("job_id")
+        awaitCompletionNotification(supervisor, failed)
         jobs.waitFor(failed, 5000) { false }
         val failure = JSONObject(jobs.read(failed))
         assertEquals("failed", failure.getString("status"))
         assertEquals(7, failure.getInt("exit_code"))
         val expired = JSONObject(jobs.start(supervisor, "sleep 30", temporary.root.path,
             "user", TerminalEnvironment.ANDROID, "超时任务", 100)).getString("job_id")
+        awaitCompletionNotification(supervisor, expired)
         jobs.waitFor(expired, 5000) { false }
         assertEquals("timed_out", JSONObject(jobs.read(expired)).getString("status"))
         val stopped = JSONObject(jobs.start(supervisor, "sleep 30", temporary.root.path,
             "user", TerminalEnvironment.ANDROID, "停止任务", 0)).getString("job_id")
+        assertTrue(supervisor.stopCommand(stopped))
+        awaitCompletionNotification(supervisor, stopped)
         assertEquals("stopped", JSONObject(jobs.stop(stopped)).getString("status"))
         assertEquals("stopped", JSONObject(jobs.read(stopped)).getString("status"))
         assertEquals(3, notifications.get())
@@ -141,6 +357,7 @@ class BackgroundTerminalJobsTest {
                 "user", TerminalEnvironment.ANDROID, "快速命令", 5000))
             assertTrue(started.toString(), started.getBoolean("ok"))
             val id = started.getString("job_id")
+            awaitCompletionNotification(supervisor, id)
             jobs.waitFor(id, 5000) { false }
             assertEquals(index.toString(), JSONObject(jobs.read(id)).getString("output"))
         }

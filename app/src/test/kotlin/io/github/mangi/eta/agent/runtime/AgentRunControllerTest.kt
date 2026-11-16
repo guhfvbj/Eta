@@ -12,6 +12,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentRunControllerTest {
+    @Test fun steeringSourcesRemainOrderedUntilSeal() {
+        val controller = AgentRunController()
+        assertTrue(controller.steer("人类补充"))
+        assertTrue(controller.steer("任务完成", AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB))
+        assertEquals(SteeringMessage("人类补充", AgentRuntimeWire.SUPPLEMENT_SOURCE_USER), controller.pollSteeringMessage())
+        assertEquals(SteeringMessage("任务完成", AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB), controller.pollSteeringOrSeal())
+        assertNull(controller.pollSteeringOrSeal())
+        assertFalse(controller.steer("封口后通知", AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB))
+        assertNull(controller.pollSteeringMessage())
+    }
+
+
     @Test
     fun cancellationWakesLongRetryWait() {
         val controller = AgentRunController()
@@ -50,8 +62,8 @@ class AgentRunControllerTest {
         assertTrue(controller.steer("second"))
 
         assertEquals(0, cancellations.get())
-        assertEquals("first", controller.pollSteeringMessage())
-        assertEquals("second", controller.pollSteeringMessage())
+        assertEquals("first", controller.pollSteeringMessage()?.text)
+        assertEquals("second", controller.pollSteeringMessage()?.text)
         assertNull(controller.pollSteeringMessage())
     }
 
@@ -145,7 +157,7 @@ class AgentRunControllerTest {
             assertTrue(entered.await(1, TimeUnit.SECONDS))
             assertTrue(controller.steer("补充条件"))
             assertFalse(finished.await(100, TimeUnit.MILLISECONDS))
-            assertEquals("补充条件", controller.pollSteeringMessage())
+            assertEquals("补充条件", controller.pollSteeringMessage()?.text)
             controller.resume()
             assertTrue(finished.await(1, TimeUnit.SECONDS))
         } finally {

@@ -26,6 +26,10 @@ internal class BackgroundTerminalJobs(
     private var monitor: ScheduledFuture<*>? = null
     private var leased = false
     @Volatile private var closed = false
+    @Volatile var completionSink: JobCompletionSink? = null
+    private val refreshStateLock = Any()
+    private var refreshing = false
+    private var refreshAgain = false
     private class OutputView(var ring: JobOutputRing = JobOutputRing(), val cursor: JobOutputRing.Cursor = JobOutputRing.Cursor())
     private val outputViews = mutableMapOf<String, OutputView>()
     private val removeCompletionListener = supervisor.onCommandCompleted {
@@ -44,11 +48,12 @@ internal class BackgroundTerminalJobs(
         description: String,
         timeoutMs: Long,
         outputCapture: ShellOutputSpill? = null,
+        origin: JobOrigin? = null,
     ): String {
         if (closed) return failure("BACKGROUND_CLOSED", "后台命令宿主已关闭")
         if (!lease()) return failure("BACKGROUND_START_NOT_ALLOWED", "系统未允许启动后台执行，请返回 Eta 后重试")
         return when (val result = launcher.start(command, cwd, identity, environment,
-            commandTask = true, description = description, timeoutMs = timeoutMs.coerceAtLeast(0), outputCapture = outputCapture)) {
+            commandTask = true, description = description, timeoutMs = timeoutMs.coerceAtLeast(0), outputCapture = outputCapture, origin = origin)) {
             is DaemonStartResult.Failed -> {
                 if (monitor == null) release()
                 failure(result.code, result.message)
@@ -67,7 +72,6 @@ internal class BackgroundTerminalJobs(
     }
 
     fun read(id: String, maxBytes: Int = 16_000, fromOffset: Long? = null, incremental: Boolean = false): String {
-        refresh()
         val task = supervisor.findTask(id)?.takeIf { it.commandTask }
             ?: return failure("JOB_NOT_FOUND", "未找到后台命令，请用 terminal_job 的 list 查看任务")
         val result = taskJson(task, includeOutputTail = false).put("action", "read")
@@ -77,31 +81,42 @@ internal class BackgroundTerminalJobs(
                 if (fromOffset != null) view.ring.readFrom(fromOffset.coerceAtLeast(0), maxBytes.coerceIn(1_024, DetachedTaskSupervisor.MAX_LOG_READ_BYTES))
                 else view.ring.consumeFrom(view.cursor, maxBytes.coerceIn(1_024, DetachedTaskSupervisor.MAX_LOG_READ_BYTES))
             }
+            if (supervisor.findTask(id)?.completedAt != null) supervisor.markConsumed(id)
+            result.put("consumed", supervisor.findTask(id)?.consumedAt != null)
             return result.put("output", delta.text).put("output_truncated", delta.lossy || delta.nextOffset < delta.totalBytes)
                 .put("next_offset", delta.nextOffset).put("total_bytes", delta.totalBytes).put("lossy", delta.lossy).toString()
         }
         val logs = supervisor.readLogs(id, maxBytes)
         if (!logs.ok) return result.put("ok", false).put("code", logs.code).put("message", logs.message).toString()
+        if (supervisor.findTask(id)?.completedAt != null) supervisor.markConsumed(id)
+        result.put("consumed", supervisor.findTask(id)?.consumedAt != null)
         return result.put("output", logs.text).put("output_truncated", logs.truncated).toString()
     }
 
     fun stop(id: String): String {
-        val task = supervisor.findTask(id)?.takeIf { it.commandTask }
-            ?: return failure("JOB_NOT_FOUND", "未找到后台命令")
-        if (!supervisor.stopCommand(task.id)) return failure("JOB_STOP_FAILED", "无法停止后台命令，请检查当前身份授权")
+        val stopped = synchronized(this) {
+            val task = supervisor.findTask(id)?.takeIf { it.commandTask }
+                ?: return failure("JOB_NOT_FOUND", "未找到后台命令")
+            if (!supervisor.stopCommand(task.id)) return failure("JOB_STOP_FAILED", "无法停止后台命令，请检查当前身份授权")
+            supervisor.markConsumed(id)
+            supervisor.findTask(id) ?: task
+        }
         refresh()
-        return taskJson(supervisor.findTask(id) ?: task).put("action", "stop").toString()
+        return taskJson(stopped).put("action", "stop").toString()
     }
 
     fun waitFor(id: String, timeoutMs: Long, isCancelled: () -> Boolean): String {
+        val initial = supervisor.findTask(id)?.takeIf { it.commandTask }
+            ?: return failure("JOB_NOT_FOUND", "未找到后台命令")
+        if (isCancelled()) return failure("CANCELLED", "已取消等待；后台命令仍保留，可单独停止")
+        if (initial.completedAt != null) supervisor.markConsumed(id)
         resume()
-        if (supervisor.findTask(id)?.commandTask != true) return failure("JOB_NOT_FOUND", "未找到后台命令")
         val task = awaitCompletion(id, timeoutMs.coerceIn(0, 60_000), isCancelled)
             ?: return failure("JOB_NOT_FOUND", "后台命令已清理")
         if (isCancelled()) return failure("CANCELLED", "已取消等待；后台命令仍保留，可单独停止")
-        // 完成通知也应在 wait 返回前提交；不能让调用方观察到陈旧的通知计数。
+        if (supervisor.findTask(id)?.completedAt != null) supervisor.markConsumed(id)
         refresh()
-        return taskJson(task).put("action", "wait").put("wait_timed_out", task.completedAt == null).toString()
+        return taskJson(supervisor.findTask(id) ?: task).put("action", "wait").put("wait_timed_out", task.completedAt == null).toString()
     }
 
     /** 前台 promote 的等待可达 180 秒，独立于 terminal_job.wait 的 60 秒上限。 */
@@ -128,41 +143,84 @@ internal class BackgroundTerminalJobs(
     }
 
     /** 重新打开 App 后从同一份任务记录恢复观察，不重新执行命令。 */
-    @Synchronized
     fun resume() {
         if (closed) return
         refresh()
-        if (supervisor.list().any { it.task.commandTask && it.task.completedAt == null } && lease()) monitor()
+        synchronized(this) {
+            if (!closed && supervisor.list().any { it.task.commandTask && it.task.completedAt == null } && lease()) monitor()
+        }
     }
 
-    @Synchronized
+    fun markConsumed(id: String) = supervisor.markConsumed(id)
+    fun markDeliveryAttempted(id: String) = supervisor.markDeliveryAttempted(id)
+    fun setDelivery(id: String, delivery: JobDelivery) {
+        synchronized(this) {
+            if (closed) return
+            // 超时边界恰好完成时，INLINE 巡检可能已释放租约；升级先重新取得接力引用。
+            if (delivery != JobDelivery.INLINE && supervisor.findTask(id) != null) lease()
+            supervisor.setDelivery(id, delivery)
+        }
+        runCatching { executor.execute(::refresh) }
+    }
+
     private fun refresh() {
-        if (closed) return
+        synchronized(refreshStateLock) {
+            if (closed) return
+            if (refreshing) { refreshAgain = true; return }
+            refreshing = true
+        }
         try {
-            var tasks = supervisor.list().filter { it.task.commandTask }
-            val now = System.currentTimeMillis()
-            val expired = tasks.filter { it.running && it.task.timeoutMs > 0 && now - it.task.startedAt >= it.task.timeoutMs }
-            expired.forEach { supervisor.stopCommand(it.task.id, "timed_out") }
-            if (expired.isNotEmpty()) tasks = supervisor.list().filter { it.task.commandTask }
-            val retained = tasks.mapTo(mutableSetOf()) { it.task.id }
-            outputViews.keys.retainAll(retained)
-            tasks.filter { it.task.id in outputViews }.forEach { updateOutput(it.task) }
-            tasks.filter { it.task.completedAt != null && !it.task.completionNotified }.forEach { status ->
+            val pending = synchronized(this) {
+                var tasks = supervisor.list().filter { it.task.commandTask }
+                val now = System.currentTimeMillis()
+                val expired = tasks.filter { it.running && it.task.timeoutMs > 0 && now - it.task.startedAt >= it.task.timeoutMs }
+                expired.forEach { supervisor.stopCommand(it.task.id, "timed_out") }
+                if (expired.isNotEmpty()) tasks = supervisor.list().filter { it.task.commandTask }
+                outputViews.keys.retainAll(tasks.mapTo(mutableSetOf()) { it.task.id })
+                tasks.filter { it.task.id in outputViews }.forEach { updateOutput(it.task) }
+                tasks.map { it.task }.filter { it.completedAt != null && !it.completionNotified &&
+                    it.delivery != JobDelivery.INLINE && it.consumedAt == null && it.deliveryAttemptedAt == null }
+            }
+            // 不持记录锁或宿主锁调用 Runtime；主线程可能正在提交新的终端命令。
+            pending.forEach { candidate ->
+                val task = supervisor.findTask(candidate.id) ?: return@forEach
+                if (task.consumedAt != null || task.deliveryAttemptedAt != null || task.completionNotified ||
+                    task.delivery == JobDelivery.INLINE) return@forEach
                 try {
-                    onCompleted(status.task)
-                    supervisor.markCompletionNotified(status.task.id)
+                    val handled = runCatching { completionSink?.onJobCompleted(task) == true }.getOrDefault(false)
+                    if (handled) supervisor.markDeliveryAttempted(task.id) else onCompleted(task)
+                    supervisor.markCompletionNotified(task.id)
                 } catch (failure: Exception) {
-                    logger.warn("Background command notification failed: type=${failure.javaClass.simpleName}")
+                    logger.warn("后台命令完成派发失败：type=${failure.javaClass.simpleName}")
                 }
             }
             waitLock.withLock { changed.signalAll() }
-            if (tasks.none { it.running }) {
-                monitor?.cancel(false)
-                monitor = null
-                release()
+            synchronized(this) {
+                // 必须先派发再释放 terminal-background-commands 租约；唤醒在上面接管 run:<id> 租约，避免前台服务出现空窗。
+                val latest = supervisor.list().filter { it.task.commandTask }
+                val collectedIds = pending.mapTo(mutableSetOf()) { it.id }
+                val hasNewPending = latest.any { status ->
+                    val task = status.task
+                    task.id !in collectedIds && task.completedAt != null && !task.completionNotified &&
+                        task.delivery != JobDelivery.INLINE && task.consumedAt == null && task.deliveryAttemptedAt == null
+                }
+                if (hasNewPending) synchronized(refreshStateLock) { refreshAgain = true }
+                if (latest.none { it.running } && !hasNewPending) {
+                    monitor?.cancel(false)
+                    monitor = null
+                    release()
+                }
             }
         } catch (failure: Exception) {
-            logger.warn("Background command refresh failed: type=${failure.javaClass.simpleName}")
+            logger.warn("后台命令刷新失败：type=${failure.javaClass.simpleName}")
+        } finally {
+            synchronized(refreshStateLock) {
+                refreshing = false
+                if (refreshAgain && !closed) {
+                    refreshAgain = false
+                    runCatching { executor.execute(::refresh) }
+                }
+            }
         }
     }
 
@@ -182,22 +240,24 @@ internal class BackgroundTerminalJobs(
         }
     }
 
-    @Synchronized
     fun stopAll() {
-        supervisor.list().filter { it.task.commandTask && it.running }.forEach { supervisor.stopCommand(it.task.id) }
+        synchronized(this) {
+            supervisor.list().filter { it.task.commandTask && it.running }.forEach { supervisor.stopCommand(it.task.id) }
+        }
         refresh()
     }
 
-    @Synchronized
     override fun close() {
         stopAll()
-        closed = true
-        removeCompletionListener()
-        outputViews.clear()
-        monitor?.cancel(false)
-        monitor = null
-        executor.shutdownNow()
-        release()
+        synchronized(this) {
+            closed = true
+            removeCompletionListener()
+            outputViews.clear()
+            monitor?.cancel(false)
+            monitor = null
+            executor.shutdownNow()
+            release()
+        }
         waitLock.withLock { changed.signalAll() }
     }
 
@@ -210,6 +270,9 @@ internal class BackgroundTerminalJobs(
         .put("exit_code", task.exitCode ?: JSONObject.NULL).put("end_reason", task.endReason ?: JSONObject.NULL)
         .put("output_path", supervisor.hostDaemonPath(task, task.logPath)).put("output_environment", "android")
         .put("timeout_ms", task.timeoutMs)
+        .put("delivery", task.delivery.wireName)
+        .put("consumed", task.consumedAt != null)
+        .put("wake_attempted", task.deliveryAttemptedAt != null)
         .put("completion_notifications_enabled", completionNotificationsEnabled())
         .also { result ->
             if (includeOutputTail) {

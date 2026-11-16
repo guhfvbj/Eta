@@ -50,4 +50,35 @@ internal object AgentContinuationBuilder {
         )
     }
 
+    /** 后台完成作为系统来源的 supplement 续跑，保留既有用户与历史消息编号。 */
+    fun buildJobNotice(
+        base: AgentContinuationBaseStore.Base,
+        notice: String,
+        jobId: String,
+        newRunId: String = "run-${UUID.randomUUID()}",
+        createdAt: Long = System.currentTimeMillis(),
+    ): AgentRuntimeWire.RunRequest {
+        val request = base.request
+        val previous = request.handoff?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
+            ?.let { AgentUiHandoffPayload.from(it.payload) }
+        val history = base.snapshot?.messages ?: (request.history +
+            AgentModelClient.buildUserHistoryMessage(request.prompt, request.images).copy(
+                messageId = previous?.promptMessageId(base.runId) ?: "user-${base.runId}",
+            ) + base.transcript)
+        val payload = AgentUiHandoffPayload(
+            conversationId = base.conversationId,
+            promptSupplement = AgentUiHandoffPayload.Supplement(
+                index = (previous?.lastSupplementIndex ?: 0) + 1, text = notice, createdAt = createdAt,
+                source = AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB, jobId = jobId,
+            ),
+            origin = AgentUiHandoffPayload.ORIGIN_JOB_WAKEUP,
+        )
+        return request.copy(
+            runId = newRunId, operation = AgentRuntimeWire.OP_CHAT, rewriteTargetMessageId = null,
+            modelSessionId = request.effectiveModelSessionId, prompt = notice, images = emptyList(), history = history,
+            handoff = AgentRuntimeWire.EntryHandoff(newRunId, AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE,
+                payload.toJson(), dismissEntrySurfaceOnForegroundOperation = false),
+        )
+    }
+
 }

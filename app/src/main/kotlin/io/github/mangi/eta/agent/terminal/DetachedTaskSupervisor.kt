@@ -61,6 +61,7 @@ internal class DetachedTaskSupervisor(
         description: String = "",
         timeoutMs: Long = 0,
         outputCapture: ShellOutputSpill? = null,
+        origin: JobOrigin? = null,
     ): DaemonStartResult {
         if (identity != "root" && identity != "user") return DaemonStartResult.Failed("INVALID_ARGUMENT", "执行身份无效")
         if (identity == "root" && !rootAvailable()) return DaemonStartResult.Failed("ROOT_REQUIRED", "Root 授权不可用")
@@ -75,8 +76,8 @@ internal class DetachedTaskSupervisor(
         }
         val id = (if (commandTask) "job_" else "dm_") + UUID.randomUUID().toString().take(8)
         val token = UUID.randomUUID().toString().replace("-", "")
-        if (commandTask) return startCommand(id, command, cwd, identity, environment, description, timeoutMs, outputCapture)
-        if (identity == "user") return startUserDaemon(id, token, command, cwd, environment)
+        if (commandTask) return startCommand(id, command, cwd, identity, environment, description, timeoutMs, outputCapture, origin)
+        if (identity == "user") return startUserDaemon(id, token, command, cwd, environment, origin)
         val wireDir = wireDaemonDir(environment)
         val wirePidFile = "$wireDir/$id.pid"
         val wireLogFile = "$wireDir/$id.log"
@@ -127,6 +128,8 @@ internal class DetachedTaskSupervisor(
             commandTask = commandTask,
             description = description,
             timeoutMs = timeoutMs,
+            conversationId = origin?.conversationId, originRunId = origin?.runId,
+            delivery = origin?.delivery ?: JobDelivery.WAKEUP,
         )
         if (!synchronized(RECORDS_LOCK) { saveTasksLocked(loadTasksLocked() + task) }) {
             stopTaskProcess(task)
@@ -260,7 +263,7 @@ internal class DetachedTaskSupervisor(
     }
 
     private fun startCommand(id: String, command: String, cwd: String, identity: String,
-        environment: TerminalEnvironment, description: String, timeoutMs: Long, outputCapture: ShellOutputSpill?): DaemonStartResult {
+        environment: TerminalEnvironment, description: String, timeoutMs: Long, outputCapture: ShellOutputSpill?, origin: JobOrigin?): DaemonStartResult {
         val workspace = if (identity == "user") TerminalRuntime.userWorkspacePath else TerminalRuntime.ROOT_WORKSPACE_PATH
         val wireDir = when {
             environment.isLinux -> LINUX_DAEMON_DIR
@@ -282,7 +285,8 @@ internal class DetachedTaskSupervisor(
         }
         val task = DetachedTask(id, ownership.pid, ownership.token, command, cwd, identity, environment,
             logPath, System.currentTimeMillis(), LinuxEnvironmentPaths.backendOf(rootfsPath(environment)), workspace,
-            commandTask = true, description = description, timeoutMs = timeoutMs, isolatedGroup = ownership.isolatedGroup)
+            commandTask = true, description = description, timeoutMs = timeoutMs, isolatedGroup = ownership.isolatedGroup,
+            conversationId = origin?.conversationId, originRunId = origin?.runId, delivery = origin?.delivery ?: JobDelivery.WAKEUP)
         if (!synchronized(RECORDS_LOCK) { saveTasksLocked(loadTasksLocked() + task) }) {
             oneShotSupervisor.terminateAndReap(process)
             oneShotSupervisor.unregisterProcess(process)
@@ -336,6 +340,37 @@ internal class DetachedTaskSupervisor(
         if (index < 0) return@synchronized false
         tasks[index] = tasks[index].copy(completionNotified = true)
         saveTasksLocked(tasks)
+    }
+
+    /** 终态消费与投递尝试各只落盘一次，跨 supervisor 实例共用记录锁。 */
+    fun markConsumed(id: String, now: Long = System.currentTimeMillis()) = synchronized(RECORDS_LOCK) {
+        val tasks = loadTasksLocked()
+        val index = tasks.indexOfFirst { it.id == id && it.completedAt != null && it.consumedAt == null }
+        if (index >= 0) {
+            tasks[index] = tasks[index].copy(consumedAt = now)
+            saveTasksLocked(tasks)
+        }
+        Unit
+    }
+
+    fun markDeliveryAttempted(id: String, now: Long = System.currentTimeMillis()) = synchronized(RECORDS_LOCK) {
+        val tasks = loadTasksLocked()
+        val index = tasks.indexOfFirst { it.id == id && it.completedAt != null && it.deliveryAttemptedAt == null }
+        if (index >= 0) {
+            tasks[index] = tasks[index].copy(deliveryAttemptedAt = now)
+            saveTasksLocked(tasks)
+        }
+        Unit
+    }
+
+    fun setDelivery(id: String, delivery: JobDelivery) = synchronized(RECORDS_LOCK) {
+        val tasks = loadTasksLocked()
+        val index = tasks.indexOfFirst { it.id == id }
+        if (index >= 0 && tasks[index].delivery != delivery) {
+            tasks[index] = tasks[index].copy(delivery = delivery)
+            saveTasksLocked(tasks)
+        }
+        Unit
     }
 
     private fun completeCommand(id: String, exitCode: Int?, reason: String?): DetachedTask? {
@@ -440,7 +475,7 @@ internal class DetachedTaskSupervisor(
     private fun ownerProof(task: DetachedTask): String = "$ETA_PROCESS_OWNER_ENV=${task.token}"
 
     /** 普通守护任务保留完整宿主壳和 tracer；guest 内不能再次脱离 PRoot 的生命周期。 */
-    private fun startUserDaemon(id: String, token: String, command: String, cwd: String, environment: TerminalEnvironment): DaemonStartResult {
+    private fun startUserDaemon(id: String, token: String, command: String, cwd: String, environment: TerminalEnvironment, origin: JobOrigin?): DaemonStartResult {
         val workspace = if (environment.isLinux || daemonDir == DEFAULT_DAEMON_DIR) TerminalRuntime.userWorkspacePath else File(daemonDir).parent!!
         val hostDir = if (environment.isLinux || daemonDir == DEFAULT_DAEMON_DIR) File(workspace, "daemon") else File(daemonDir)
         if (!hostDir.mkdirs() && !hostDir.isDirectory) return DaemonStartResult.Failed("WORKSPACE_UNAVAILABLE", "工作目录不可访问")
@@ -490,7 +525,8 @@ internal class DetachedTaskSupervisor(
             }
             val task = DetachedTask(id, pid, token, command, cwd, "user", environment,
                 if (environment.isLinux) "$LINUX_DAEMON_DIR/$id.log" else logFile.absolutePath,
-                System.currentTimeMillis(), if (environment.isLinux) LinuxExecutionBackend.PROOT else LinuxExecutionBackend.CHROOT, workspace)
+                System.currentTimeMillis(), if (environment.isLinux) LinuxExecutionBackend.PROOT else LinuxExecutionBackend.CHROOT, workspace,
+                conversationId = origin?.conversationId, originRunId = origin?.runId, delivery = origin?.delivery ?: JobDelivery.WAKEUP)
             USER_WAITERS.add(id)
             if (!synchronized(RECORDS_LOCK) { saveTasksLocked(loadTasksLocked() + task) }) {
                 USER_WAITERS.remove(id)

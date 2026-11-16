@@ -14,6 +14,55 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 class DetachedTaskSupervisorTest {
+    @Test fun oldTaskJsonDefaultsToWakeupWithoutOwnershipOrConsumption() {
+        val record = DetachedTask("legacy", Long.MAX_VALUE, "标记", "true", "/tmp", "user",
+            TerminalEnvironment.ANDROID, "/tmp/legacy.log", 1).toRecordJson()
+        listOf("conversation_id", "origin_run_id", "delivery", "consumed_at", "delivery_attempted_at").forEach(record::remove)
+        val task = record.toDetachedTask()
+        assertEquals(JobDelivery.WAKEUP, task.delivery)
+        assertEquals(null, task.conversationId)
+        assertEquals(null, task.originRunId)
+        assertEquals(null, task.consumedAt)
+        assertEquals(null, task.deliveryAttemptedAt)
+        assertEquals(JobDelivery.WAKEUP, JobDelivery.fromWire("新版本未知值"))
+        assertEquals(JobDelivery.WAKEUP, JobDelivery.fromWire(null))
+    }
+
+    @Test fun terminalConsumptionAndDeliveryAttemptAreIdempotentAcrossSupervisors() {
+        val file = File(temporaryFolder.root, "idempotent.json")
+        val task = DetachedTask("finished", Long.MAX_VALUE, "标记", "true", "/tmp", "user",
+            TerminalEnvironment.ANDROID, "/tmp/finished.log", 1, commandTask = true, completedAt = 2,
+            conversationId = "conversation", originRunId = "run", delivery = JobDelivery.QUIET)
+        file.writeText(JSONArray().put(task.toRecordJson()).put(task.copy(id = "running", completedAt = null).toRecordJson()).toString())
+        val first = DetachedTaskSupervisor(NoopLogger, file)
+        val second = DetachedTaskSupervisor(NoopLogger, file)
+        first.markConsumed("finished", 10)
+        second.markConsumed("finished", 20)
+        first.markDeliveryAttempted("finished", 30)
+        second.markDeliveryAttempted("finished", 40)
+        second.markConsumed("running", 10)
+        second.markDeliveryAttempted("running", 10)
+        assertEquals(10L, first.findTask("finished")!!.consumedAt)
+        assertEquals(30L, first.findTask("finished")!!.deliveryAttemptedAt)
+        assertEquals(null, first.findTask("running")!!.consumedAt)
+        assertEquals(null, first.findTask("running")!!.deliveryAttemptedAt)
+        assertEquals("conversation", first.findTask("finished")!!.conversationId)
+        assertEquals(JobDelivery.QUIET, first.findTask("finished")!!.delivery)
+    }
+
+    @Test fun commandWithoutOriginStillDefaultsToWakeup() {
+        val launcher = DetachedTaskSupervisor(NoopLogger, File(temporaryFolder.root, "default.json"),
+            daemonDir = File(temporaryFolder.root, "logs").path, rootAvailable = { false })
+        val result = launcher.start("printf done", temporaryFolder.root.path, "user", TerminalEnvironment.ANDROID,
+            commandTask = true) as DaemonStartResult.Started
+        assertEquals(JobDelivery.WAKEUP, result.task.delivery)
+        assertEquals(null, result.task.originRunId)
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+        while (launcher.findTask(result.task.id)?.completedAt == null && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(launcher.findTask(result.task.id)?.completedAt != null)
+    }
+
+
 
     @get:Rule
     val temporaryFolder = TemporaryFolder()

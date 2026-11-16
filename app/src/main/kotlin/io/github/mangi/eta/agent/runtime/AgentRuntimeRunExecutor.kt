@@ -187,6 +187,7 @@ internal class AgentRuntimeRunExecutor(
                 logger = AndroidAgentLogger,
                 onRootChecked = capabilities::invalidate,
                 browserRunId = request.runId,
+                originConversationId = AgentConversationIdentity.fromHandoff(request.handoff, request.runId),
                 browserSession = BrowserSessionRegistry.get(browserKey),
                 guiControl = guiRun,
                 browserToolsEnabled = {

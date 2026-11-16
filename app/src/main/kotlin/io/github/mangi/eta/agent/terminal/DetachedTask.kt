@@ -2,6 +2,17 @@ package io.github.mangi.eta.agent.terminal
 
 import org.json.JSONObject
 
+/** 完成结果的投递方式；旧记录默认允许唤醒。 */
+internal enum class JobDelivery(val wireName: String) {
+    WAKEUP("wakeup"), QUIET("quiet"), INLINE("inline");
+
+    companion object {
+        fun fromWire(raw: String?): JobDelivery = entries.firstOrNull { it.wireName == raw } ?: WAKEUP
+    }
+}
+
+internal data class JobOrigin(val conversationId: String, val runId: String, val delivery: JobDelivery = JobDelivery.WAKEUP)
+
 /** 一条守护任务记录。pid + token 用于跨 App 重启后的认领，以及停止前防止 PID 复用误杀。 */
 internal data class DetachedTask(
     val id: String,
@@ -23,6 +34,11 @@ internal data class DetachedTask(
     val endReason: String? = null,
     val completionNotified: Boolean = false,
     val isolatedGroup: Boolean? = null,
+    val conversationId: String? = null,
+    val originRunId: String? = null,
+    val delivery: JobDelivery = JobDelivery.WAKEUP,
+    val consumedAt: Long? = null,
+    val deliveryAttemptedAt: Long? = null,
 )
 
 internal data class DetachedTaskStatus(
@@ -63,6 +79,11 @@ internal fun DetachedTask.toRecordJson(): JSONObject = JSONObject()
     .put("end_reason", endReason ?: JSONObject.NULL)
     .put("completion_notified", completionNotified)
     .put("isolated_group", isolatedGroup ?: JSONObject.NULL)
+    .put("conversation_id", conversationId ?: JSONObject.NULL)
+    .put("origin_run_id", originRunId ?: JSONObject.NULL)
+    .put("delivery", delivery.wireName)
+    .put("consumed_at", consumedAt ?: JSONObject.NULL)
+    .put("delivery_attempted_at", deliveryAttemptedAt ?: JSONObject.NULL)
 
 internal fun JSONObject.toDetachedTask(): DetachedTask = DetachedTask(
     id = getString("id"),
@@ -88,6 +109,11 @@ internal fun JSONObject.toDetachedTask(): DetachedTask = DetachedTask(
     endReason = if (isNull("end_reason")) null else getString("end_reason"),
     completionNotified = optBoolean("completion_notified", false),
     isolatedGroup = if (isNull("isolated_group")) null else getBoolean("isolated_group"),
+    conversationId = optString("conversation_id", "").takeIf(String::isNotBlank)?.takeUnless { it == "null" },
+    originRunId = optString("origin_run_id", "").takeIf(String::isNotBlank)?.takeUnless { it == "null" },
+    delivery = JobDelivery.fromWire(optString("delivery")),
+    consumedAt = optLong("consumed_at").takeIf { it > 0 },
+    deliveryAttemptedAt = optLong("delivery_attempted_at").takeIf { it > 0 },
 )
 
 internal val DetachedTask.commandStatus: String get() = when {
