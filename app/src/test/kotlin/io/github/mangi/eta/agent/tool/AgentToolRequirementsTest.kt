@@ -50,6 +50,13 @@ class AgentToolRequirementsTest {
         assertEquals(2, original.properties("terminal").getJSONObject("identity").getJSONArray("enum").length())
         assertFalse(projected.properties("press_key").getJSONObject("button").getJSONArray("enum").toString().contains("PASTE"))
         assertFalse(projected.toString().contains("/data/local/tmp/eta"))
+        listOf("terminal", "terminal_job", "terminal_daemon", "read_file").forEach { name ->
+            val description = projected.properties(name).getJSONObject("environment").getString("description")
+            assertTrue(description.contains("android"))
+            assertTrue(description.contains("linux"))
+            assertTrue(description.contains("PRoot"))
+            assertFalse(description.contains("/data/local/tmp/eta"))
+        }
         assertFalse(projected.properties("read_image").getJSONObject("path").toString().contains("Root"))
     }
 

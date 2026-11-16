@@ -1,11 +1,14 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
+@Category(PosixIntegrationTest::class)
 class OneShotShellTest {
     @Test
     fun transfersInputLargerThanPipeCapacityWithoutTruncation() {

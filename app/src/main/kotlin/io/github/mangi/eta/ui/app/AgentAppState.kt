@@ -54,6 +54,9 @@ import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.repository.EtaBackupRepository
 import io.github.mangi.eta.data.repository.EtaBackupSummary
 import io.github.mangi.eta.data.repository.ProviderRepository
+import io.github.mangi.eta.data.repository.ConversationRuntimeConfigResolver
+import io.github.mangi.eta.agent.runtime.AgentContinuationBaseStore
+import io.github.mangi.eta.agent.runtime.AgentRuntimePolicy
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.IncomingShareRequest
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
@@ -1712,9 +1715,8 @@ internal class AgentAppState(
         if (conversationId in pendingConversationDeletes || !runStore.register(runId, conversationId)) return
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
-        val runReasoningEffort = providers.enabledModel(runModelId)?.let { (provider, model) ->
-            RuntimeConfigRepository.reasoningCapabilities(provider, model)?.normalize(reasoningEffort)
-        } ?: ReasoningEffort.OFF
+        // 用户动作先使旧基座失效；即使新 run 准备或网络失败，也不能恢复到旧历史。
+        AgentContinuationBaseStore.default(appContext).remove(conversationId)
 
         updateConversation(
             conversationId,
@@ -1776,25 +1778,13 @@ internal class AgentAppState(
                     return@launch
                 }
             }
-            val permittedReasoningEffort = if (
-                agentBooleanForUi(Prefs.Keys.AGENT_THINKING_ENABLED)
-            ) {
-                runReasoningEffort
-            } else {
-                ReasoningEffort.OFF
-            }
-            val config = RuntimeConfigRepository.runtimeConfigFor(runModelId)?.copy(
-                terminalTools = agentBooleanForUi(Prefs.Keys.AGENT_TERMINAL_TOOLS),
-                browserTools = agentBooleanForUi(Prefs.Keys.AGENT_BROWSER_TOOLS),
-                deviceDirectTools = agentBooleanForUi(Prefs.Keys.AGENT_DEVICE_DIRECT_TOOLS),
-                deviceSensitiveReadTools =
-                    agentBooleanForUi(Prefs.Keys.AGENT_DEVICE_SENSITIVE_READ_TOOLS),
-                deviceSensitiveActionTools =
-                    agentBooleanForUi(Prefs.Keys.AGENT_DEVICE_SENSITIVE_ACTION_TOOLS),
-                subagentTools = agentBooleanForUi(Prefs.Keys.AGENT_SUBAGENT_ENABLED),
-                thinkingEnabled = permittedReasoningEffort.enablesReasoning,
-                reasoningEffort = permittedReasoningEffort,
+            val resolved = ConversationRuntimeConfigResolver.resolve(
+                modelId = runModelId,
+                effort = reasoningEffort,
+                permissions = AgentRuntimePolicy.permissions(Prefs.localAgentPreferences()),
+                supportsSearchSuggestions = true,
             )
+            val config = resolved?.config
             if (config == null) {
                 withContext(Dispatchers.Main) {
                     applyRunResult(
@@ -1830,7 +1820,7 @@ internal class AgentAppState(
                         rewriteTargetMessageId = rewriteTargetMessageId,
                         runId = runId,
                         prompt = prompt,
-                        config = config.copy(supportsSearchSuggestions = true),
+                        config = config,
                         images = modelImages,
                         history = history,
                         handoff = AgentRuntimeWire.EntryHandoff(

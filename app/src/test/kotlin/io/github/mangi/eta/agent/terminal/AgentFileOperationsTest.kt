@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.attribute.FileTime
@@ -213,6 +215,7 @@ class AgentFileOperationsTest {
         assertArrayEquals(before, file.readBytes())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun atomicOverwriteRetainsExistingPosixPermissions() {
         val file = temporary.newFile("permissions.txt").apply { writeText("original") }
         val permissions = PosixFilePermissions.fromString("rwxr-----")

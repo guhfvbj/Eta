@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import java.io.File
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -10,6 +12,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
+@Category(PosixIntegrationTest::class)
 class DebianAptRecoveryTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()

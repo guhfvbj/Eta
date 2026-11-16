@@ -43,6 +43,30 @@ class AgentContinuationBaseStoreTest {
         assertNull(store.load(original.conversationId))
     }
 
+    @Test fun provenanceRoundTripsAndOldJsonDefaultsRemainCompatible() {
+        val store = AgentContinuationBaseStore(temporary.root)
+        val original = base().copy(originModelId = "actual-wire-model", originModelDisplayName = "模型 A",
+            historyUserMessageId = "user-origin", historyUserDigest = "digest", appliedRuntimeRunIds = listOf("previous"))
+        store.save(original)
+        val restored = store.load("conversation")!!
+        assertEquals(original.originModelId, restored.originModelId)
+        assertEquals(original.originModelDisplayName, restored.originModelDisplayName)
+        assertEquals(original.historyUserMessageId, restored.historyUserMessageId)
+        assertEquals(original.historyUserDigest, restored.historyUserDigest)
+        assertEquals(original.appliedRuntimeRunIds, restored.appliedRuntimeRunIds)
+        val file = temporary.root.listFiles()!!.single()
+        val legacy = org.json.JSONObject(file.readText())
+        listOf("originModelId", "originModelDisplayName", "historyUserMessageId", "historyUserDigest", "appliedRuntimeRunIds")
+            .forEach(legacy::remove)
+        file.writeText(legacy.toString())
+        val loaded = store.load("conversation")!!
+        assertEquals("", loaded.originModelId)
+        assertEquals("", loaded.originModelDisplayName)
+        assertEquals("", loaded.historyUserMessageId)
+        assertTrue(loaded.appliedRuntimeRunIds.isEmpty())
+        assertEquals(original.request.history, loaded.request.history)
+    }
+
     @Test fun newerBaseReplacesTheSameConversationAtomically() {
         val store = AgentContinuationBaseStore(temporary.root)
         val first = base()

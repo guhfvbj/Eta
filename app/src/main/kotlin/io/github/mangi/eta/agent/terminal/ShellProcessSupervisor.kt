@@ -697,8 +697,12 @@ internal class ShellOutputSpill private constructor(
     }
 
     private fun privateStream(file: File): java.io.OutputStream {
-        java.nio.file.Files.createFile(file.toPath(), java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
-            java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")))
+        // Android/Linux 必须保留 0600；非 POSIX 文件系统使用其原生继承 ACL。
+        val attributes = if (java.nio.file.Files.getFileStore(file.parentFile.toPath()).supportsFileAttributeView("posix")) {
+            arrayOf(java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")))
+        } else emptyArray()
+        java.nio.file.Files.createFile(file.toPath(), *attributes)
         return file.outputStream()
     }
 

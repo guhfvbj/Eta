@@ -806,6 +806,8 @@ internal class RootShellTerminalController(
         require('\u0000' !in requested && requested.length <= 4096) { "工作目录无效或过长" }
         val environmentPath = when {
             requested == "~" || requested.startsWith("~/") || requested.startsWith("/") -> requested
+            // Android user 文件操作使用宿主 File 语义；Windows JVM 的盘符绝对路径不能再拼接工作区。
+            !environment.isLinux && identity == "user" && File(requested).isAbsolute -> requested
             else -> "$defaultCwd/$requested"
         }
         return if (environment.isLinux) {

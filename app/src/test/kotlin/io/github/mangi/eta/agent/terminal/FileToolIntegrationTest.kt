@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import java.util.UUID
@@ -9,6 +11,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@Category(PosixIntegrationTest::class)
 class FileToolIntegrationTest {
     @Test fun explicitUserFilesKeepUtf8PaginationAndRejectStaleEditsWithRootAvailable() {
         val directory = File(TerminalRuntime.userWorkspacePath, "file-contract-${System.nanoTime()}").apply { mkdirs() }

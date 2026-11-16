@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import android.app.Application
 import android.content.Context
 import android.os.Bundle
@@ -117,6 +119,7 @@ class AgentHistoryRetentionTest {
         assertThrows(Exception::class.java) { AgentConversationCodec.decodeTranscript("[invalid]") }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun largeRequestsAndResultsUseDescriptorsAndPreserveSummaryMetadata() {
         val text = "完整历史😀".repeat(100_000)
         val history = listOf(AgentModelClient.ConversationMessage("assistant", text,
@@ -157,6 +160,7 @@ class AgentHistoryRetentionTest {
         } finally { file.delete() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun incorrectDescriptorLengthIsRejectedAndClosed() {
         val bundle = Bundle()
         AgentWireText.put(bundle, "history", "abc".repeat(20_000), context.cacheDir)

@@ -13,6 +13,15 @@ internal interface ConversationDao : ChunkedTextDao {
     @Query("SELECT COUNT(*) FROM conversations WHERE id = :id")
     suspend fun conversationCount(id: String): Int
 
+    // 只增加读取查询，不改变 v28 schema。job_notice 不是用户手动推进的消息。
+    @Query("SELECT * FROM conversation_messages WHERE conversation_id = :conversationId AND type = 'user' " +
+        "ORDER BY sort_index DESC LIMIT 1")
+    suspend fun latestHumanMessageRow(conversationId: String): ConversationMessageEntity?
+
+    @Transaction
+    suspend fun latestHumanMessage(conversationId: String): ConversationMessageEntity? =
+        latestHumanMessageRow(conversationId)?.let { restoreMessage(it) }
+
     @Query(
         "SELECT c.id, c.title, c.reasoning_effort, c.created_at, c.updated_at, c.model_id, c.is_pinned, " +
             "(c.roleplay_json != '') AS has_roleplay, " +

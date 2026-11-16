@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -11,6 +13,7 @@ import org.junit.rules.TemporaryFolder
 class TerminalPrivateStorageTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun ordinaryDirectoriesCanBeCreatedWhenLegacyParentIsNotWritable() {
         val files = temporary.newFolder("files")
@@ -65,6 +68,7 @@ class TerminalPrivateStorageTest {
     fun bothOrdinaryLayoutsAreRecognizedWithoutChangingChrootIdentity() {
         listOf("terminal", "terminal-user").forEach { parent ->
             assertEquals(LinuxExecutionBackend.PROOT, LinuxEnvironmentPaths.backendOf("/data/user/0/app/files/$parent/proot/debian/rootfs"))
+            assertEquals(LinuxExecutionBackend.PROOT, LinuxEnvironmentPaths.backendOf("C:\\data\\user\\0\\app\\files\\$parent\\proot\\debian\\rootfs"))
         }
         assertEquals(LinuxExecutionBackend.CHROOT, LinuxEnvironmentPaths.backendOf("/data/user/0/app/files/terminal/debian/rootfs"))
         assertEquals(LinuxExecutionBackend.CHROOT, LinuxEnvironmentPaths.backendOf(null))

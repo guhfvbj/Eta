@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
@@ -13,6 +15,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 class BackgroundTerminalJobsTest {
+    @Category(PosixIntegrationTest::class)
     @Test fun cancellingPromotableForegroundCommandKeepsInlineDelivery() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -33,6 +36,7 @@ class BackgroundTerminalJobsTest {
         } finally { controller.closeAll(); worker.shutdownNow() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun stoppingRunningCommandConsumesTheResultBeforeAutomaticDelivery() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -163,6 +167,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(1, notifications.get())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun completionIsDispatchedBeforeForegroundLeaseRelease() {
         val supervisor = supervisor()
         val leased = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -186,6 +191,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(0, notifications.get())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun promotableForegroundCompletionRemainsInlineAndSilent() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -201,6 +207,7 @@ class BackgroundTerminalJobsTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun promotionPreservesOwnershipAndChoosesWakeupOrQuiet() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -238,6 +245,7 @@ class BackgroundTerminalJobsTest {
 
     @After fun closeHosts() { hosts.forEach { it.close() } }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun statusViewsIncludeBoundedTailAndElapsedTimeWithoutChangingReadOutput() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -262,6 +270,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(waited.getString("output_tail"), stopped.getString("output_tail"))
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun commandContinuesAfterReplyAndItsResultIsVisibleToTheNextRun() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -288,6 +297,7 @@ class BackgroundTerminalJobsTest {
         } finally { second.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun fullOutputSurvivesPreviewTruncationAndHostRecreation() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -311,6 +321,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(1, notifications.get())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun failureTimeoutAndStopRemainDistinguishable() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -335,6 +346,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(3, notifications.get())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun workingDirectoryFailureIsPreservedInTheLog() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -349,6 +361,7 @@ class BackgroundTerminalJobsTest {
         assertFalse(result.getString("output").contains("must-not-run"))
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun fastCommandsKeepTheirResultsAndNotifyOnce() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -364,6 +377,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(12, notifications.get())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun cancellingOrTimingOutTheWaitDoesNotStopTheCommand() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -376,6 +390,7 @@ class BackgroundTerminalJobsTest {
         jobs.stop(id)
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun incrementalOffsetsAndConsumerCursorDoNotChangeLegacyTailReads() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -409,6 +424,7 @@ class BackgroundTerminalJobsTest {
         assertFalse(legacy.getBoolean("output_truncated"))
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun incrementalReadsPageOnUtf8BoundariesAndReportEviction() {
         val supervisor = supervisor()
         val jobs = host(supervisor)
@@ -433,6 +449,7 @@ class BackgroundTerminalJobsTest {
         assertEquals(300000L, File(read.getString("output_path")).length())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun completionCallbackNotifiesBeforeThePeriodicMonitorTick() {
         val launcher = supervisor()
         val completed = java.util.concurrent.CountDownLatch(1)

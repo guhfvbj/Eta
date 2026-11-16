@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import java.nio.file.Files
@@ -14,8 +16,9 @@ import org.junit.rules.TemporaryFolder
 class RootlessTerminalAccessTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Category(PosixIntegrationTest::class)
     @Test fun ordinaryCommandUsesAppIdentityWithoutGrant() {
-        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        val controller = controller()
         try {
             val result = JSONObject(controller.executeTool("terminal", JSONObject()
                 .put("command", "printf hello").put("cwd", temporary.root.path)))
@@ -26,7 +29,7 @@ class RootlessTerminalAccessTest {
     }
 
     @Test fun explicitRootCommandIsRejectedWithoutGrant() {
-        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        val controller = controller()
         try {
             val result = JSONObject(controller.executeTool("terminal", JSONObject()
                 .put("command", "id").put("cwd", "/").put("identity", "root")))
@@ -35,9 +38,10 @@ class RootlessTerminalAccessTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun ordinaryFileReadFollowsAccessibleLinksOutsideWorkspace() {
-        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
-        val workspace = File(TerminalRuntime.userWorkspacePath).apply { mkdirs() }
+        val controller = controller()
+        val workspace = temporary.root.apply { mkdirs() }
         val link = File(workspace, "test-link-${System.nanoTime()}")
         val outside = temporary.newFile("outside").apply { writeText("private") }
         try {
@@ -53,7 +57,7 @@ class RootlessTerminalAccessTest {
     }
 
     @Test fun fileToolsWriteAndReadAccessiblePathsOutsideWorkspace() {
-        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
+        val controller = controller()
         val target = File(temporary.root, "notes/内存管理.md")
         try {
             val write = JSONObject(controller.fileTool("write_file", JSONObject()
@@ -69,8 +73,8 @@ class RootlessTerminalAccessTest {
     }
 
     @Test fun ordinaryReadsReportOffsetsForTheReturnedChunk() {
-        val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
-        val file = File(TerminalRuntime.userWorkspacePath, "test-read-${System.nanoTime()}")
+        val controller = controller()
+        val file = File(temporary.root, "test-read-${System.nanoTime()}")
         try {
             file.parentFile!!.mkdirs()
             file.writeText("a".repeat(20_000))
@@ -88,6 +92,9 @@ class RootlessTerminalAccessTest {
             file.delete()
         }
     }
+
+    private fun controller() = RootShellTerminalController(NoopLogger, rootAvailable = { false },
+        executionContext = TerminalExecutionContext(TerminalEnvironment.DEBIAN, null, temporary.root.path))
 
     private object NoopLogger : AgentLogger {
         override fun debug(message: () -> String) = Unit

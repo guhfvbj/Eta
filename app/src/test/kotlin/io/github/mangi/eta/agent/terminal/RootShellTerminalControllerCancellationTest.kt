@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -12,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Test
 
+@Category(PosixIntegrationTest::class)
 class RootShellTerminalControllerCancellationTest {
     private val hosts = mutableListOf<BackgroundTerminalJobs>()
     private val taskDirectories = mutableListOf<File>()

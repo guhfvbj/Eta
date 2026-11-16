@@ -15,7 +15,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 成功对话的续跑基座；完全不保存 config，唤醒时从 RuntimeConfigRepository 重新解析。 */
+/** 成功对话的续跑基座；不保存连接配置/密钥，仅保留非敏感模型与历史溯源。 */
 internal class AgentContinuationBaseStore(private val rootDir: File) {
     data class Base(
         val conversationId: String,
@@ -24,6 +24,11 @@ internal class AgentContinuationBaseStore(private val rootDir: File) {
         val snapshot: AgentContextSnapshot?,
         val transcript: List<AgentModelClient.ConversationMessage>,
         val savedAt: Long,
+        val originModelId: String = "",
+        val originModelDisplayName: String = "",
+        val historyUserMessageId: String = "",
+        val historyUserDigest: String = "",
+        val appliedRuntimeRunIds: List<String> = emptyList(),
     )
 
     fun save(base: Base) {
@@ -83,6 +88,9 @@ internal class AgentContinuationBaseStore(private val rootDir: File) {
         }
         return JSONObject().put("conversationId", base.conversationId).put("runId", base.runId)
             .put("savedAt", base.savedAt)
+            .put("originModelId", base.originModelId).put("originModelDisplayName", base.originModelDisplayName)
+            .put("historyUserMessageId", base.historyUserMessageId).put("historyUserDigest", base.historyUserDigest)
+            .put("appliedRuntimeRunIds", JSONArray(base.appliedRuntimeRunIds))
             .put("snapshot", safeSnapshot?.encode() ?: JSONObject.NULL)
             .put("transcript", JSONArray(AgentConversationCodec.encodeTranscriptForStorage(base.transcript)))
             .put("request", JSONObject().put("runId", request.runId).put("prompt", request.prompt)
@@ -110,6 +118,11 @@ internal class AgentContinuationBaseStore(private val rootDir: File) {
         return Base(
             conversationId = json.getString("conversationId"), runId = json.getString("runId"),
             savedAt = json.getLong("savedAt"),
+            originModelId = json.optString("originModelId"), originModelDisplayName = json.optString("originModelDisplayName"),
+            historyUserMessageId = json.optString("historyUserMessageId"), historyUserDigest = json.optString("historyUserDigest"),
+            appliedRuntimeRunIds = json.optJSONArray("appliedRuntimeRunIds")?.let { array ->
+                (0 until array.length()).map { array.getString(it) }
+            }.orEmpty(),
             request = AgentRuntimeWire.RunRequest(
                 runId = stored.getString("runId"), prompt = stored.getString("prompt"),
                 config = AgentModelClient.ModelConfig(baseUrl = "", apiKey = "", model = "", systemPrompt = ""),

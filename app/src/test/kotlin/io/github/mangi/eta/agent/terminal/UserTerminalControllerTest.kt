@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -20,6 +22,7 @@ class UserTerminalControllerTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun sessionKeepsCwdAndEnvironmentAcrossExec() {
         val controller = UserTerminalController(NoopLogger)
@@ -52,6 +55,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun sessionsCoexistAndKeepIndependentState() {
         val controller = UserTerminalController(NoopLogger)
@@ -89,6 +93,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun stopSessionOnlyTerminatesTargetSession() {
         val controller = UserTerminalController(NoopLogger)
@@ -113,6 +118,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun sessionLimitIsEnforced() {
         val controller = UserTerminalController(NoopLogger)
@@ -136,6 +142,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun execStreamsOutputBeforeCompletion() {
         val controller = UserTerminalController(NoopLogger)
@@ -166,6 +173,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun statusMarkerIsNotLeakedToOutput() {
         val controller = UserTerminalController(NoopLogger)
@@ -183,6 +191,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun nonZeroExitCodeIsReported() {
         val controller = UserTerminalController(NoopLogger)
@@ -199,6 +208,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun exitCommandClosesSessionAndReopenWorks() {
         val controller = UserTerminalController(NoopLogger)
@@ -225,6 +235,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun stopSessionTerminatesLongCommand() {
         val controller = UserTerminalController(NoopLogger)
@@ -257,6 +268,7 @@ class UserTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun interactiveCommandReadsStdinInputWithoutEatingStatusMarker() {
         val controller = UserTerminalController(NoopLogger)

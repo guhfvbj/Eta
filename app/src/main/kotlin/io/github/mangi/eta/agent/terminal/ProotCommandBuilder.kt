@@ -47,7 +47,9 @@ internal object ProotCommandBuilder {
             "unset LD_PRELOAD; " + args.joinToString(" ", transform = ::shellQuote)
     }
     internal fun permittedSharedSource(path: String, publicStorageGranted: Boolean): Boolean {
-        val canonical = File(path).canonicalPath
+        // Android 的绝对路径在 Windows JVM 上会附加当前盘符；先统一宿主分隔符，
+        // 仍使用 canonicalPath 消解 .. 与符号链接，不能让测试宿主改变公共存储授权边界。
+        val canonical = File(path).canonicalPath.replace('\\', '/').replace(Regex("^[A-Za-z]:"), "")
         val publicPath = canonical == "/sdcard" || canonical.startsWith("/sdcard/") ||
             canonical == "/storage" || canonical.startsWith("/storage/") ||
             canonical == "/mnt/media_rw" || canonical.startsWith("/mnt/media_rw/") ||

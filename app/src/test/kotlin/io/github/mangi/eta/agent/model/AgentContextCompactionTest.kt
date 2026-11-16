@@ -390,7 +390,8 @@ class AgentContextCompactionTest {
         val messages = JSONArray(source.map(AgentConversationCodec::toJsonObject))
         val result = AgentContextCompactor(config, provider { _, _ -> requests++; response("s".repeat(1_000)) }, AgentRunController())
             .compact(messages, 0, emptySet())
-        assertTrue(requests > 1)
+        // 前两个边界尾部本身已超目标，预检直接越过它们，仅请求可行边界。
+        assertEquals(1, requests)
         val summary = AgentConversationCodec.fromJsonObject(result.getJSONObject(0))
         assertEquals(2, summary.compactedUserTurns)
         assertEquals(3, summary.summaryThroughUserTurn)
@@ -656,7 +657,7 @@ class AgentContextCompactionTest {
     }
 
     @Test
-    fun smallEffectiveTokenReductionEntersCooldownEvenWhenCharacterReductionSucceeds() {
+    fun fixedPrefixBeyondWindowSkipsSummaryAndEntersCooldown() {
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", "固定规则".repeat(3_000)))
             .put(AgentConversationCodec.userTextMessage("当前任务"))
             .put(JSONObject().put("role", "assistant").put("content", "x".repeat(12_000)))
@@ -666,10 +667,12 @@ class AgentContextCompactionTest {
         session.observeInputTokens(1_000)
         session.compact()
         val saved = session.snapshot()!!
-        assertTrue(saved.messages.first().contextSummary)
+        // 12K 固定规则已超过 800-token 目标；必须在 LLM 前短路，保留完整上下文。
+        assertFalse(saved.messages.any { it.contextSummary })
+        assertEquals("x".repeat(12_000), messages.getJSONObject(2).getString("content"))
         assertTrue(saved.tokenBaseline!!.compactionCooldownRemaining > 0)
         session.compact()
-        assertEquals(1, calls)
+        assertEquals(0, calls)
     }
 
     @Test
@@ -856,7 +859,10 @@ class AgentContextCompactionTest {
                     assertEquals(0, request.tools.length())
                     assertNotEquals("private-main-session", request.sessionId)
                     assertFalse(request.messages.toString().contains("PRIVATE_MAIN_PREFIX"))
-                    assertEquals(2_048, request.outputLimit)
+                    // 扣除主工具目录和保留尾部后，动态摘要预算收窄到低于 custom 窗口的 1/4（2_048）。
+                    val limit = Regex("不超过 (\\d+) 字符").find(request.messages.toString())!!.groupValues[1].toInt()
+                    assertEquals(minOf(2_048, limit), request.outputLimit)
+                    assertTrue(limit in 128 until 2_048)
                     emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 100, cachedTokens = 20,
                         cacheWriteTokens = 10, outputTokens = 5)))
                     response("本批检查已完成。")
@@ -927,7 +933,9 @@ class AgentContextCompactionTest {
                     response(invalid)
                 } else {
                     assertEquals(0, request.tools.length())
-                    assertEquals(16_384, request.outputLimit)
+                    val limit = Regex("不超过 (\\d+) 字符").find(request.messages.toString())!!.groupValues[1].toInt()
+                    assertEquals(minOf(16_384, limit), request.outputLimit)
+                    assertTrue(limit in 128 until 24_000)
                     response("保留已核实的事实。")
                 }
             }, AgentRunController(), mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),

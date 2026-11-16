@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -11,6 +13,7 @@ import org.junit.rules.TemporaryFolder
 class ProotCommandBuilderTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Category(PosixIntegrationTest::class)
     @Test fun packagedExecutableReceivesQuotedGuestArgumentsAndPrivateLoader() {
         val native = temporary.newFolder("native")
         File(native, "libproot_exec.so").apply {
@@ -43,6 +46,7 @@ class ProotCommandBuilderTest {
         assertTrue(ProotCommandBuilder.permittedSharedSource(temporary.root.path, false))
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun missingNativeComponentsFailBeforeGuestLaunch() {
         val process = ProcessBuilder("sh", "-c", ProotCommandBuilder.payload("/rootfs", "echo hello", nativeDirectory = null)).start()
         assertEquals(127, process.waitFor())

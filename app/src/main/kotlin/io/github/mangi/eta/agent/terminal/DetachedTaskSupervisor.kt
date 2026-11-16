@@ -8,7 +8,6 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import org.json.JSONArray
-import org.json.JSONObject
 
 /**
  * 守护任务（detached task）宿主：启动脱离任何命令会话进程组的长驻进程，并托管其生命周期。
@@ -31,7 +30,43 @@ internal class DetachedTaskSupervisor(
     private val oneShotSupervisor: ShellProcessSupervisor = ShellProcessSupervisor(rootAvailable = rootAvailable),
     private val acquireUserLease: (String, () -> Unit) -> Boolean = TerminalRuntime::acquireUserTask,
     private val releaseUserLease: (String) -> Unit = TerminalRuntime::releaseUserTask,
+    private val commandLauncher: CommandLauncher? = null,
 ) {
+    /** 仅替换进程边界；记录、等待、完成事件和通知决策仍走生产路径。 */
+    internal data class CommandLaunch(
+        val identity: String, val script: String, val mergeStderr: Boolean,
+        val environment: TerminalEnvironment, val rootfsPath: String?, val sharedMounts: List<SharedFolderMount>,
+        val logPath: String,
+    )
+    internal fun interface CommandLauncher {
+        fun start(request: CommandLaunch): CommandHandle?
+    }
+    internal interface CommandHandle {
+        val process: Process
+        val ownership: ShellProcessOwnership
+        fun terminate()
+        fun retire()
+    }
+
+    private fun launchCommand(request: CommandLaunch): CommandHandle? {
+        commandLauncher?.let { return it.start(request) }
+        val process = oneShotSupervisor.startShellProcess(request.identity, request.script, request.mergeStderr,
+            request.environment, linuxRootfsPath = request.rootfsPath, linuxSharedMounts = request.sharedMounts)
+            ?: return null
+        val ownership = oneShotSupervisor.ownershipOf(process)
+        if (ownership == null) {
+            oneShotSupervisor.terminateAndReap(process)
+            oneShotSupervisor.unregisterProcess(process)
+            return null
+        }
+        return object : CommandHandle {
+            override val process: Process = process
+            override val ownership: ShellProcessOwnership = ownership
+            override fun terminate() = oneShotSupervisor.terminateAndReap(process)
+            override fun retire() = oneShotSupervisor.retireExitedProcess(process)
+        }
+    }
+
     companion object {
         const val DEFAULT_DAEMON_DIR = "/data/local/tmp/eta/daemon"
         const val LINUX_DAEMON_DIR = "/workspace/daemon"
@@ -258,7 +293,7 @@ internal class DetachedTaskSupervisor(
         }.getOrNull()
     }
 
-    private class CommandProcess(val process: Process, val supervisor: ShellProcessSupervisor) {
+    private class CommandProcess(val handle: CommandHandle) {
         @Volatile var stopReason: String? = null
     }
 
@@ -274,25 +309,21 @@ internal class DetachedTaskSupervisor(
         val script = if (outputCapture != null) "cd ${shellQuote(cwd)} && {\n$command\n}" else
             "mkdir -p ${shellQuote(wireDir)} && { cd ${shellQuote(cwd)} && " +
                 commandPayload(command, "$wireDir/$id.exit") + "; } > ${shellQuote(logPath)} 2>&1"
-        val process = oneShotSupervisor.startShellProcess(identity, script, outputCapture == null, environment,
-            linuxRootfsPath = rootfsPath(environment), linuxSharedMounts = linuxSharedMountsProvider())
+        val handle = launchCommand(CommandLaunch(identity, script, outputCapture == null, environment,
+            rootfsPath(environment), linuxSharedMountsProvider(), logPath))
             ?: return DaemonStartResult.Failed("PROCESS_START_FAILED", "无法启动后台命令")
-        val ownership = oneShotSupervisor.ownershipOf(process)
-        if (ownership == null) {
-            oneShotSupervisor.terminateAndReap(process)
-            oneShotSupervisor.unregisterProcess(process)
-            return DaemonStartResult.Failed("PROCESS_START_FAILED", "后台命令未完成进程归属确认")
-        }
+        val process = handle.process
+        val ownership = handle.ownership
         val task = DetachedTask(id, ownership.pid, ownership.token, command, cwd, identity, environment,
             logPath, System.currentTimeMillis(), LinuxEnvironmentPaths.backendOf(rootfsPath(environment)), workspace,
             commandTask = true, description = description, timeoutMs = timeoutMs, isolatedGroup = ownership.isolatedGroup,
             conversationId = origin?.conversationId, originRunId = origin?.runId, delivery = origin?.delivery ?: JobDelivery.WAKEUP)
         if (!synchronized(RECORDS_LOCK) { saveTasksLocked(loadTasksLocked() + task) }) {
-            oneShotSupervisor.terminateAndReap(process)
-            oneShotSupervisor.unregisterProcess(process)
+            handle.terminate()
+            handle.retire()
             return DaemonStartResult.Failed("RECORDS_WRITE_FAILED", "无法保存后台命令")
         }
-        val running = CommandProcess(process, oneShotSupervisor)
+        val running = CommandProcess(handle)
         COMMAND_PROCESSES[id] = running
         process.outputStream.close()
         val reader = thread(name = "eta-command-output", isDaemon = true) {
@@ -318,17 +349,27 @@ internal class DetachedTaskSupervisor(
                 completeCommand(id, if (running.stopReason == null) exitCode else null, running.stopReason)
             } finally {
                 outputCapture?.close()
-                oneShotSupervisor.retireExitedProcess(process)
+                handle.retire()
                 COMMAND_PROCESSES.remove(id, running)
             }
         }
         return DaemonStartResult.Started(task)
     }
 
-    fun stopCommand(id: String, reason: String = "stopped"): Boolean {
+    fun stopCommand(id: String, reason: String = "stopped", consume: Boolean = false): Boolean {
         val task = findTask(id)?.takeIf { it.commandTask } ?: return false
         if (task.completedAt != null) return true
         if (task.identity == "root" && !rootAvailable()) return false
+        // 主动 stop 的消费意图必须先于 terminate/waiter 完成事件落盘。
+        // 仅允许此路径消费运行中任务，普通 markConsumed 的终态合同保持不变。
+        if (consume && !synchronized(RECORDS_LOCK) {
+                val tasks = loadTasksLocked()
+                val index = tasks.indexOfFirst { it.id == id }
+                if (index < 0) false else {
+                    tasks[index] = tasks[index].copy(consumedAt = tasks[index].consumedAt ?: System.currentTimeMillis())
+                    saveTasksLocked(tasks)
+                }
+            }) return false
         COMMAND_PROCESSES[id]?.stopReason = reason
         if (!stopTaskProcess(task, removeFiles = false)) return false
         return completeCommand(id, null, reason) != null
@@ -429,7 +470,7 @@ internal class DetachedTaskSupervisor(
 
     private fun stopTaskProcess(task: DetachedTask, removeFiles: Boolean = true): Boolean {
         COMMAND_PROCESSES[task.id]?.let { live ->
-            live.supervisor.terminateAndReap(live.process)
+            live.handle.terminate()
             if (!removeFiles) return true
         }
         val stopScript = buildString {

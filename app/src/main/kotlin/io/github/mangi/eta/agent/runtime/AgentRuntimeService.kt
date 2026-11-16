@@ -43,11 +43,9 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.itos.coui.effect.LocalCouiContourGlowEnabled
-import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
 import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.media.AgentImageCodec
-import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.overlay.AgentHapticFeedback
 import io.github.mangi.eta.agent.overlay.AgentOverlayGlow
 import io.github.mangi.eta.agent.overlay.ScreenCornerRadii
@@ -67,6 +65,8 @@ import io.github.mangi.eta.core.ModuleConfig
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
+import androidx.room.withTransaction
+import io.github.mangi.eta.data.repository.ConversationRuntimeConfigResolver
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.app.AgentAppTheme
 import kotlin.concurrent.thread
@@ -83,9 +83,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import top.yukonga.miuix.kmp.squircle.LocalSquircleEnabled
-import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.theme.darkColorScheme
-import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 /**
  * 模块进程内的通用 Agent Runtime。
@@ -577,9 +574,26 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             request.handoff?.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE) {
             runCatching {
                 val payload = AgentUiHandoffPayload.from(request.handoff.payload)
+                val history = runBlocking(Dispatchers.IO) { jobWakeHistory(this@AgentRuntimeService, payload.conversationId) }
+                    ?: return@runCatching
+                val knownUserIds = request.history.filter { it.role == "user" }.map { it.messageId }.toSet() +
+                    payload.promptMessageId(request.runId)
+                if (history.second.userMessageId !in knownUserIds) {
+                    // 较新用户消息已提交，不能把旧 run 的结果登记成“当前”基座。
+                    AgentContinuationBaseStore.default(this).remove(payload.conversationId)
+                    return@runCatching
+                }
                 AgentContinuationBaseStore.default(this).save(AgentContinuationBaseStore.Base(
                     payload.conversationId, request.runId, request, result.contextSnapshot, result.transcript,
-                    System.currentTimeMillis(),
+                    System.currentTimeMillis(), originModelId = request.config.model,
+                    originModelDisplayName = request.config.modelDisplayName,
+                    historyUserMessageId = history.second.userMessageId,
+                    historyUserDigest = history.second.userDigest,
+                    // UI 应用结果可能晚于基座写入；已有 history 中的 user/supplement 所属 run
+                    // 与本链的 session 都属于已包含的历史，不能误判为后来的手动 run。
+                    appliedRuntimeRunIds = (history.second.appliedRunIds + request.effectiveModelSessionId +
+                        request.history.filter { it.role == "user" && it.messageId.startsWith("user-") }
+                            .map { it.messageId.removePrefix("user-").substringBefore("-supplement-") }).distinct(),
                 ))
             }.onFailure { AndroidAgentLogger.warn("保存后台续跑基座失败：${it.javaClass.simpleName}") }
         }
@@ -1572,22 +1586,16 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 }) return false
             var handedOver = false
             try {
-                // 基座完全不保存配置；按会话当前绑定模型重建，随后应用普通 Runtime 权限约束。
-                val config = runBlocking(Dispatchers.IO) {
-                    val conversation = io.github.mangi.eta.data.db.EtaDatabase.get(context).conversationDao()
-                        .conversationMetadataRow(base.conversationId) ?: return@runBlocking null
-                    RuntimeConfigRepository.runtimeConfigFor(conversation.modelId)
+                val resolved = runBlocking(Dispatchers.IO) {
+                    val (conversation, history) = jobWakeHistory(context, base.conversationId) ?: return@runBlocking null
+                    val current = ConversationRuntimeConfigResolver.resolve(conversation,
+                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true) ?: return@runBlocking null
+                    // 终端撤权或模型明确无工具时，无法读取 terminal_job 接手任务，直接降级通知。
+                    current.takeIf { AgentJobWakePolicy.canWake(base, it, history) }
                 } ?: return false
-                val permissions = AgentRuntimePolicy.permissions(Prefs.localAgentPreferences())
-                request = request.copy(config = AgentRuntimePolicy.constrain(config.copy(
-                    // 配置仓库只解析模型连接；工具开关按当前本地设置重建，才能继续 terminal_job.read。
-                    terminalTools = permissions.terminalTools,
-                    browserTools = permissions.browserTools,
-                    deviceDirectTools = permissions.deviceDirectTools,
-                    deviceSensitiveReadTools = permissions.deviceSensitiveReadTools,
-                    deviceSensitiveActionTools = permissions.deviceSensitiveActionTools,
-                    subagentTools = permissions.subagentTools,
-                ), permissions))
+                if ("terminal_job" in Prefs.disabledTools()) return false
+                request = AgentContinuationBuilder.buildJobNotice(base,
+                    AgentJobWakePolicy.notice(base, resolved, notice), jobId, newRunId).copy(config = resolved.config)
                 pendingJobWakes += newRunId
                 val app = context.applicationContext
                 // 前台服务的启动与限制处理由 acquire 复用现有 AgentExecutionService 路径完成。
@@ -1608,6 +1616,20 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                         }
                         runCatching {
                             if (!abandoned.get() && !stopped.get()) {
+                                // UI 发送先删除旧基座，再做 write-ahead 持久化；投递前再次检查，
+                                // 覆盖配置解析与 Main 接纳之间的并发窗口。只改标题/置顶不影响历史戳。
+                                val latestResolved = runBlocking(Dispatchers.IO) {
+                                    val stored = AgentContinuationBaseStore.default(context).load(base.conversationId)
+                                    if (stored?.runId != base.runId || "terminal_job" in Prefs.disabledTools()) return@runBlocking null
+                                    val latest = jobWakeHistory(context, base.conversationId) ?: return@runBlocking null
+                                    ConversationRuntimeConfigResolver.resolve(latest.first,
+                                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true)
+                                        ?.takeIf { AgentJobWakePolicy.canWake(base, it, latest.second) }
+                                }
+                                if (latestResolved == null || abandoned.get() || stopped.get()) { completed.countDown(); return }
+                                request = AgentContinuationBuilder.buildJobNotice(base,
+                                    AgentJobWakePolicy.notice(base, latestResolved, notice), jobId, newRunId)
+                                    .copy(config = latestResolved.config)
                                 accepted.set(instance.startRun(request, onStarted = { publishRun(request, true) }))
                                 if (abandoned.get() || stopped.get()) {
                                     instance.cancelRun(newRunId)
@@ -1648,6 +1670,17 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                         }
                     }
                 }
+            }
+        }
+
+        private suspend fun jobWakeHistory(context: Context, conversationId: String):
+            Pair<io.github.mangi.eta.data.db.ConversationMetadata, AgentJobWakePolicy.HistoryStamp>? {
+            val database = io.github.mangi.eta.data.db.EtaDatabase.get(context)
+            return database.withTransaction {
+                val dao = database.conversationDao()
+                val conversation = dao.conversation(conversationId) ?: return@withTransaction null
+                conversation to AgentJobWakePolicy.historyStamp(dao.latestHumanMessage(conversationId),
+                    conversation.appliedRuntimeRunIdsJson)
             }
         }
 

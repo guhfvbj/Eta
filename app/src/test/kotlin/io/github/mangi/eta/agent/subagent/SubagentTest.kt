@@ -736,6 +736,7 @@ class SubagentTest {
         val key = UUID.randomUUID().toString()
         var chats = 0
         var summaries = 0
+        val compactionToolCounts = mutableListOf<Int>()
         val failingProvider = object : AgentProviderClient {
             override val id = "failing-summary"
             override val capabilities = ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS, true, true, true, true, false, false)
@@ -743,6 +744,7 @@ class SubagentTest {
                 onEvent: (ProviderEvent) -> Unit): ProviderResponse {
                 if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                     summaries++
+                    compactionToolCounts += request.tools.length()
                     return ProviderResponse(JSONObject().put("role", "assistant").put("content", "partial").put("finish_reason", "length"))
                 }
                 assertTrue("read_file" in request.tools.toolNames())
@@ -758,7 +760,10 @@ class SubagentTest {
         assertTrue(result.getBoolean("incomplete"))
         assertEquals("CONTEXT_SUMMARY_INVALID", result.getString("wrap_up_reason"))
         assertEquals(1, chats)
-        assertEquals(1, summaries)
+        // 缓存复用路径收到 CONTEXT_SUMMARY_INVALID 后退回一次无工具的隔离摘要重试，失败后不再发起新的对话模型请求。
+        assertEquals(2, summaries)
+        assertTrue(compactionToolCounts.first() > 0)
+        assertEquals(0, compactionToolCounts.last())
         assertTrue(result.getString("summary").contains("evidence.kt:10"))
         assertTrue(result.getString("summary").contains("expected_revision=retained-hash"))
         assertTrue(session(key).history.any { it.contextSummary })

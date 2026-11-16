@@ -97,7 +97,7 @@ internal class BackgroundTerminalJobs(
         val stopped = synchronized(this) {
             val task = supervisor.findTask(id)?.takeIf { it.commandTask }
                 ?: return failure("JOB_NOT_FOUND", "未找到后台命令")
-            if (!supervisor.stopCommand(task.id)) return failure("JOB_STOP_FAILED", "无法停止后台命令，请检查当前身份授权")
+            if (!supervisor.stopCommand(task.id, consume = true)) return failure("JOB_STOP_FAILED", "无法停止后台命令，请检查当前身份授权")
             supervisor.markConsumed(id)
             supervisor.findTask(id) ?: task
         }

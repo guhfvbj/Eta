@@ -32,7 +32,8 @@ internal class AgentContextSession(
     private val systemCount: Int get() = systemCountProvider()
     private val contextWindow = config.knownContextWindow
     private var baseline = initialTokenBaseline
-    private var tools = JSONArray()
+    // 手动压缩可能发生在 prepareRequest 之前；它也必须计入主请求的工具 schema。
+    private var tools = mainToolsProvider()
     private var requestBaseline: AgentContextTokenBaseline? = null
     private var requestLocalTokens: Int? = null
     private var noProgressCount = initialTokenBaseline?.compactionNoProgressCount?.coerceIn(0, 8) ?: 0
@@ -134,6 +135,12 @@ internal class AgentContextSession(
             scale, noProgressCount, cooldownRemaining, estimatorVersion = AgentTokenEstimator.VERSION)
     }
 
+    /** 与 tokenBaseline 的未校准本地成本相同，候选评估不改变 usage 锚点/会话状态。 */
+    private fun candidateTokens(candidate: JSONArray): Int = AgentTokenEstimator.bounded(
+        maxOf(AgentTokenEstimator.messages(requestProjection(candidate)),
+            AgentTokenEstimator.messages(durableHistory(candidate))).toLong() + AgentTokenEstimator.json(tools),
+    )
+
     private fun createSnapshot(candidate: JSONArray): AgentContextSnapshot {
         val history = AgentToolBatchRecovery.completeInterrupted(durableHistory(candidate))
         val tokens = tokenBaseline(candidate)
@@ -174,6 +181,7 @@ internal class AgentContextSession(
             val compactor = AgentContextCompactor(config, provider, runController, roleplay = roleplay,
                 dynamicMcpGroupsProvider = dynamicMcpGroupsProvider,
                 mainTools = mainToolsProvider(), mainSessionId = mainSessionId,
+                candidateTokens = ::candidateTokens,
                 messageProjector = messageProjector, enableCacheReuse = enableCacheReuse)
             val outcome = try {
                 compactor.compactWithOutcome(messages, systemCount, sensitiveIds())

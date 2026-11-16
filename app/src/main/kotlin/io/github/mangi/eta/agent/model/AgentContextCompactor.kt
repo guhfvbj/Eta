@@ -21,6 +21,7 @@ internal class AgentContextCompactor(
     private val messageProjector: ((JSONArray) -> JSONArray)? = null,
     private val enableCacheReuse: Boolean = false,
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
+    private val candidateTokens: ((JSONArray) -> Int)? = null,
     private val resolveSummaryModel: suspend () -> Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = {
         val settings = AgentFeaturePreferences.load()
         ModelFeatureSelection(settings.optBoolean("compaction_custom"),
@@ -42,7 +43,7 @@ internal class AgentContextCompactor(
     fun compactWithOutcome(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): CompactionOutcome {
         var resolved = false
         var target: Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = null
-        return compactWith(messages, systemCount, sensitiveIds) { durable, currentTask, prefix, protectedUser ->
+        return compactWith(messages, systemCount, sensitiveIds) { durable, currentTask, prefix, protectedUser, summaryBudgetTokens ->
             if (!resolved) {
                 // Resolve only when there is a non-empty, safely compactable prefix.
                 target = runBlocking(Dispatchers.IO) {
@@ -67,6 +68,7 @@ internal class AgentContextCompactor(
                 mainTools = mainTools.takeIf { target == null && enableCacheReuse },
                 mainSessionId = mainSessionId.takeIf { target == null },
                 hasProtectedUser = protectedUser,
+                summaryBudgetTokens = summaryBudgetTokens,
             ).summarizeWithUsage(durable, currentTask)
         }
     }
@@ -76,15 +78,16 @@ internal class AgentContextCompactor(
         fallbackCompactWithOutcome(messages, systemCount, sensitiveIds).messages
 
     fun fallbackCompactWithOutcome(messages: JSONArray, systemCount: Int, sensitiveIds: Set<String>): CompactionOutcome =
-        compactWith(messages, systemCount, sensitiveIds) { durable, _, _, _ ->
-            AgentContextSummarizer.SummaryResult(AgentContextSummarizer.fallbackSummary(durable), null, 0L)
+        compactWith(messages, systemCount, sensitiveIds) { durable, _, _, _, budget ->
+            AgentContextSummarizer.SummaryResult(AgentContextSummarizer.fallbackSummary(durable,
+                AgentContextSummarizer.maxCharsForTokenBudget(budget)), null, 0L)
         }
 
     private fun compactWith(
         messages: JSONArray,
         systemCount: Int,
         sensitiveIds: Set<String>,
-        summarize: (List<AgentModelClient.ConversationMessage>, String, JSONArray?, Boolean) -> AgentContextSummarizer.SummaryResult,
+        summarize: (List<AgentModelClient.ConversationMessage>, String, JSONArray?, Boolean, Int) -> AgentContextSummarizer.SummaryResult,
     ): CompactionOutcome {
         controller.throwIfCancelled()
         if (SignedToolContext.hasPendingResponse(messages)) throw SignedToolContext.compactionFailure(messages)
@@ -123,7 +126,12 @@ internal class AgentContextCompactor(
         val currentTask = history.getOrNull(latestUser)?.let {
             AgentContextSummarizer.taskText(AgentConversationCodec.transcript(JSONArray().put(it), 0, redactedIds).single())
         }.orEmpty()
-        val originalSize = messages.toString().length
+        val originalSize = messages.toString().length.toLong()
+        val beforeTokens = costOf(messages).toLong()
+        // 至少减少 15%；已知窗口另预留 20% 给下一轮输出/工具增量。
+        // 固定前缀或最新请求本身放不下时不放宽目标，而是有界返回 CONTEXT_NO_REDUCTION。
+        val targetTokens = minOf(beforeTokens * 85 / 100,
+            config.knownContextWindow?.let { it.toLong() * 80 / 100 } ?: Long.MAX_VALUE)
         var summaryResult: AgentContextSummarizer.SummaryResult? = null
         while (true) {
             controller.throwIfCancelled()
@@ -132,25 +140,6 @@ internal class AgentContextCompactor(
             val source = JSONArray(history.take(end).filterNot { it === protectedUser || it.optBoolean("_eta_observation") })
             val durable = AgentConversationCodec.transcript(source, 0, redactedIds)
             if (durable.isNotEmpty()) {
-                // Invalid/failed LLM responses propagate immediately; only a valid summary
-                // that does not reduce size is allowed to retry with a smaller tail.
-                val prefix = if (enableCacheReuse) {
-                    val rawPrefix = JSONArray()
-                    for (index in 0 until systemCount) {
-                        rawPrefix.put(JSONObject(messages.getJSONObject(index).toString()).apply {
-                            remove("_eta_assistant_screen_context")
-                        })
-                    }
-                    // Codec projection strips images, sensitive data and opaque provider state.
-                    // Ordinary text/tool messages retain the main request's reusable prefix.
-                    val prefixHistory = JSONArray(history.take(end).filterNot { it.optBoolean("_eta_observation") })
-                    AgentConversationCodec.transcript(prefixHistory, 0, redactedIds).forEach {
-                        rawPrefix.put(AgentConversationCodec.toJsonObject(it.copy(reasoningContent = "")))
-                    }
-                    messageProjector?.invoke(rawPrefix) ?: rawPrefix
-                } else null
-                val attempt = summarize(durable, currentTask, prefix, protectedUser != null)
-                summaryResult = attempt.after(summaryResult)
                 val previousSummaries = history.take(end).filter { it.optBoolean("_eta_context_summary") }
                 val archiveSeq = maxOf(previousSummaries.size, previousSummaries.maxOfOrNull {
                     ARCHIVE_ID_REGEX.matchEntire(it.optString("_eta_compaction_archive_id"))
@@ -173,29 +162,55 @@ internal class AgentContextCompactor(
                     append(" 按 query 检索或按 message_index 分页展开。]\n")
                 }
                 val groups = AgentMcpContext.compactedGroupIds(durable, dynamicMcpGroupsProvider())
-                val result = JSONArray()
-                for (index in 0 until systemCount) result.put(messages.getJSONObject(index))
-                result.put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
-                    role = "assistant",
-                    content = AgentMcpContext.appendMarker(
-                        "$archiveHeader${AgentContextSummarizer.stripSummaryHeader(attempt.summary)}", groups,
-                    ),
-                    contextSummary = true,
-                    compactedUserTurns = covered,
-                    compactionArchiveId = archiveId,
-                    summaryThroughUserTurn = maxOf(covered + if (protectedUser != null) 1 else 0,
-                        durable.maxOfOrNull { it.summaryThroughUserTurn } ?: 0),
-                )))
-                protectedUser?.let { result.put(retainedMessage(it, redactedIds)) }
-                history.drop(end).forEach { result.put(retainedMessage(it, redactedIds)) }
-                // Metadata is part of the candidate and must also fit the reduction check.
-                if (result.toString().length <= originalSize * 0.85) return CompactionOutcome(
-                    messages = result,
-                    archiveId = archiveId,
-                    coveredUserTurns = covered,
-                    usage = summaryResult.usage,
-                    llmMs = summaryResult.llmMs,
-                )
+                fun buildResult(summary: String): JSONArray {
+                    val result = JSONArray()
+                    for (index in 0 until systemCount) result.put(messages.getJSONObject(index))
+                    result.put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
+                        role = "assistant",
+                        content = AgentMcpContext.appendMarker("$archiveHeader$summary", groups),
+                        contextSummary = true,
+                        compactedUserTurns = covered,
+                        compactionArchiveId = archiveId,
+                        summaryThroughUserTurn = maxOf(covered + if (protectedUser != null) 1 else 0,
+                            durable.maxOfOrNull { it.summaryThroughUserTurn } ?: 0),
+                    )))
+                    protectedUser?.let { result.put(retainedMessage(it, redactedIds)) }
+                    history.drop(end).forEach { result.put(retainedMessage(it, redactedIds)) }
+                    return result
+                }
+                // 空正文仍计入真实归档头、MCP 标记、系统前缀、最新 user 与完整尾部的成本。
+                val summaryBudget = targetTokens - costOf(buildResult(""))
+                if (summaryBudget >= MIN_SUMMARY_BUDGET_TOKENS) {
+                    // Invalid/failed LLM responses propagate immediately; only a valid summary
+                    // that does not reduce size is allowed to retry with a smaller tail.
+                    val prefix = if (enableCacheReuse) {
+                        val rawPrefix = JSONArray()
+                        for (index in 0 until systemCount) {
+                            rawPrefix.put(JSONObject(messages.getJSONObject(index).toString()).apply {
+                                remove("_eta_assistant_screen_context")
+                            })
+                        }
+                        // Codec projection strips images, sensitive data and opaque provider state.
+                        // Ordinary text/tool messages retain the main request's reusable prefix.
+                        val prefixHistory = JSONArray(history.take(end).filterNot { it.optBoolean("_eta_observation") })
+                        AgentConversationCodec.transcript(prefixHistory, 0, redactedIds).forEach {
+                            rawPrefix.put(AgentConversationCodec.toJsonObject(it.copy(reasoningContent = "")))
+                        }
+                        messageProjector?.invoke(rawPrefix) ?: rawPrefix
+                    } else null
+                    val attempt = summarize(durable, currentTask, prefix, protectedUser != null,
+                        AgentTokenEstimator.bounded(summaryBudget))
+                    summaryResult = attempt.after(summaryResult)
+                    val result = buildResult(AgentContextSummarizer.stripSummaryHeader(attempt.summary))
+                    // 字符仅为序列化安全兜底，缩减合同以请求投影后的 token 为准。
+                    // 允许短历史增加有界的归档头，但不允许候选无界膨胀（例如投影遗漏附件）。
+                    val serializedLimit = originalSize + maxOf(4_096L, originalSize / 10)
+                    if (!attempt.exceededBudget && costOf(result) <= targetTokens &&
+                        result.toString().length.toLong() <= serializedLimit) return CompactionOutcome(
+                        messages = result, archiveId = archiveId, coveredUserTurns = covered,
+                        usage = summaryResult.usage, llmMs = summaryResult.llmMs,
+                    )
+                }
             }
             if (splitIndex == splits.lastIndex) break
             val smallerTail = suffixChars[end] / 2
@@ -203,8 +218,13 @@ internal class AgentContextCompactor(
                 suffixChars[splits[it]] <= smallerTail || it == splits.lastIndex
             }
         }
-        throw failure("CONTEXT_NO_REDUCTION", "摘要未能缩小上下文，原始上下文已保留。")
+        throw failure("CONTEXT_NO_REDUCTION", "保留前缀、最新消息或摘要超出压缩预算，原始上下文已保留。")
     }
+
+    private fun costOf(messages: JSONArray): Int = candidateTokens?.invoke(messages) ?: AgentTokenEstimator.bounded(
+        AgentTokenEstimator.messages((messageProjector ?: AssistantScreenContextProjection::project)(messages)).toLong() +
+            (mainTools?.let { AgentTokenEstimator.json(it) } ?: 0),
+    )
 
     private fun retainedMessage(message: JSONObject, sensitiveIds: Set<String>): JSONObject {
         // Live observations still belong to the next provider round. They never enter
@@ -219,6 +239,7 @@ internal class AgentContextCompactor(
     }
 
     companion object {
+        private const val MIN_SUMMARY_BUDGET_TOKENS = 128L
         private val ARCHIVE_ID_REGEX = Regex("^fold-(\\d+)$")
 
         /** Scan once: long tool-heavy histories must not require quadratic split checks. */

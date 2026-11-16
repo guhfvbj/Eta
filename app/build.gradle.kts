@@ -122,6 +122,12 @@ android {
         unitTests.isIncludeAndroidResources = true
         // Robolectric 在高版本 JDK 下需要访问内部 API，参数只作用于测试 JVM。
         unitTests.all {
+            // 默认完整执行；Windows 门禁只排除真正依赖 POSIX 系统语义的集成用例。
+            if (providers.gradleProperty("eta.excludePosixTests").orNull == "true") {
+                it.useJUnit {
+                    excludeCategories("io.github.mangi.eta.testing.PosixIntegrationTest")
+                }
+            }
             it.jvmArgs(
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
                 "--add-opens=java.base/java.util=ALL-UNNAMED",

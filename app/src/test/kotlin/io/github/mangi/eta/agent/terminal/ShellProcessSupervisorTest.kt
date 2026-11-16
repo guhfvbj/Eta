@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import java.io.File
 import java.io.IOException
 import org.junit.Assert.assertEquals
@@ -102,6 +104,7 @@ class ShellProcessSupervisorTest {
         )
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun interactiveRootConsoleAvoidsBusyBoxAshWithSigwinchBug() {
         val supervisor = ShellProcessSupervisor()

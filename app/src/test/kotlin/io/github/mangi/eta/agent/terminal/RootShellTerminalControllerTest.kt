@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import org.json.JSONObject
@@ -15,6 +17,7 @@ class RootShellTerminalControllerTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
+    @Category(PosixIntegrationTest::class)
     @Test fun sessionEvalHandlesMultilineHeredocEmptyStdinAndKeepsCwd() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
         val directory = temporaryFolder.newFolder("child")
@@ -36,6 +39,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun sessionWaitsForCompleteStatusWithoutLeadingNewline() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
         val directory = temporaryFolder.newFolder("split-status")
@@ -55,6 +59,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun sessionDrainsStderrTailAndReportsBoundedOutputTruncation() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
         try {
@@ -76,6 +81,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun sessionExecKeepsShellEnvironment() {
         val controller = RootShellTerminalController(NoopLogger)
@@ -115,6 +121,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun stoppingBackgroundJobDoesNotCloseTerminalSession() {
         val supervisor = DetachedTaskSupervisor(NoopLogger, File(temporaryFolder.root, "jobs.json"),
@@ -150,6 +157,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun terminalLogsDoNotContainCommandOrWorkingDirectory() {
         val logger = RecordingLogger()
@@ -180,6 +188,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun terminalExecAcceptsExtraFieldsAndUsesExecutionDefaults() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
@@ -195,6 +204,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun sessionExecUsesStoredEnvironmentDespiteRedundantArguments() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
@@ -212,6 +222,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun longCommandsCanWriteFiles() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false })
@@ -225,6 +236,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun oneShotReturnsObservedRuntimeWithoutMixingMetadataIntoOutput() {
         val controller = RootShellTerminalController(NoopLogger)
@@ -246,6 +258,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun outputJustOverDisplayLimitIsMarkedTruncated() {
         val controller = RootShellTerminalController(NoopLogger)
@@ -356,6 +369,7 @@ class RootShellTerminalControllerTest {
     private fun executionContext(workspace: File = temporaryFolder.root) = TerminalExecutionContext(
         linuxEnvironment = TerminalEnvironment.ALPINE, linuxRootfsPath = null, userWorkspacePath = workspace.path)
 
+    @Category(PosixIntegrationTest::class)
     @Test fun oneShotSpillsBothStreamsBeyondMemoryBudgetsWithoutLosingOutput() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext())
         try {
@@ -380,6 +394,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun jsonPreviewNeverSplitsSurrogatePairsAndSmallOutputLeavesNoSpill() {
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext())
         try {
@@ -404,6 +419,7 @@ class RootShellTerminalControllerTest {
         } finally { controller.closeAll() }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun unwritableSpillWorkspaceFallsBackWithoutFailingCommand() {
         val workspace = temporaryFolder.newFile("workspace-is-a-file")
         val controller = RootShellTerminalController(NoopLogger, rootAvailable = { false }, executionContext = executionContext(workspace))
@@ -453,6 +469,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun optedInFastExecReturnsOrdinaryResultIncludingSeparateStderrAndRuntime() {
         withBackgroundController { controller, _ ->
             val result = JSONObject(controller.executeTool("terminal", JSONObject()
@@ -482,6 +499,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun promotionContinuesTheSameProcessAfterForegroundTimeoutAndControllerClose() {
         withBackgroundController { controller, jobs ->
             val launches = File(temporaryFolder.root, "launches")
@@ -505,6 +523,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun cancellingOptedInForegroundWaitStopsItsTaskAndReturnsCancelled() {
         withBackgroundController { controller, jobs ->
             val marker = File(temporaryFolder.root, "running")
@@ -529,6 +548,7 @@ class RootShellTerminalControllerTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test fun sessionExecIgnoresPromotionAndFallbackKeepsDefaultTimeoutBehavior() {
         withBackgroundController { controller, jobs ->
             val id = JSONObject(controller.executeTool("terminal", JSONObject()

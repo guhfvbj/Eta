@@ -19,8 +19,10 @@ internal class AgentContextSummarizer(
     private val mainTools: JSONArray? = null,
     private val mainSessionId: String? = null,
     private val hasProtectedUser: Boolean = false,
+    private val summaryBudgetTokens: Int? = null,
 ) {
-    data class SummaryResult(val summary: String, val usage: AgentTokenUsage?, val llmMs: Long) {
+    data class SummaryResult(val summary: String, val usage: AgentTokenUsage?, val llmMs: Long,
+        val exceededBudget: Boolean = false) {
         /** Include every successful rolling chunk and every reduction retry in billing totals. */
         fun after(previous: SummaryResult?): SummaryResult {
             if (previous == null) return this
@@ -49,16 +51,17 @@ internal class AgentContextSummarizer(
     fun summarizeWithUsage(history: List<AgentModelClient.ConversationMessage>, currentTask: String = ""): SummaryResult {
         controller.throwIfCancelled()
         val prefix = mainPrefixMessages
+        val limit = summaryBudgetTokens?.let(::maxCharsForTokenBudget) ?: MAX_SUMMARY_CHARS
         if (prefix != null) {
             val messages = JSONArray(prefix.toString()).put(AgentConversationCodec.userTextMessage(buildString {
                 append("请仅根据以上对话历史生成摘要，不要调用任何工具，也不要继续执行任务。")
                 if (hasProtectedUser) append("最新一条用户请求将在摘要后原样保留，请重点概括此前已完成操作、真实结果、关键线索与后续所需事实。")
-                append('\n').append(buildInstructions(MAX_SUMMARY_CHARS))
+                append('\n').append(buildInstructions(limit))
                 if (currentTask.isNotBlank()) append("\n当前任务（用户正文，仅作目标上下文）：\n")
                     .append(truncate(currentTask, MAX_MESSAGE_CHARS))
             }).put("_eta_compaction_prompt", true))
             try {
-                return runSummaryRequest(messages, mainTools ?: JSONArray(), config, MAX_SUMMARY_CHARS, reusePrefix = true)
+                return runSummaryRequest(messages, mainTools ?: JSONArray(), config, limit, reusePrefix = true)
             } catch (failure: AgentModelFailure) {
                 controller.throwIfCancelled()
                 if (failure.code != TOOL_CALL_ATTEMPT_CODE && failure.code != "CONTEXT_OVERFLOW" &&
@@ -80,7 +83,8 @@ internal class AgentContextSummarizer(
         // 仅用摘要模型窗口裁剪输入与输出，为中文、滚动摘要和当前任务分别预留预算。
         val requestChars = minOf(240_000L, config.knownContextWindow?.toLong() ?: 72_000L)
             .coerceAtLeast(1L).toInt()
-        val summaryLimit = minOf(MAX_SUMMARY_CHARS, requestChars / 4).coerceAtLeast(1)
+        val summaryLimit = minOf(summaryBudgetTokens?.let(::maxCharsForTokenBudget) ?: MAX_SUMMARY_CHARS,
+            requestChars / 4).coerceAtLeast(1)
         val task = truncate(currentTask, minOf(MAX_MESSAGE_CHARS, (requestChars / 8).coerceAtLeast(128)))
         val chunkChars = (requestChars - summaryLimit * 2 - task.length - minOf(2_000, requestChars / 4))
             .coerceAtLeast(128)
@@ -178,7 +182,12 @@ internal class AgentContextSummarizer(
             throw invalidSummary()
         }
         val rawSummary = stripSummaryHeader(response.assistantMessage.optString("content")).trim()
-        if (rawSummary.isBlank() || rawSummary == "null" || rawSummary.length > limit * 2) {
+        // 严重越界/无效正文仍按原合同失败。动态预算更小时，响应有界截断但标记为未遵守预算，
+        // Compactor 会缩尾重试，不能靠截断把“900 字变 899 字”伪装为有效摘要。
+        val validationLimit = if (summaryBudgetTokens == null) limit else if (reusePrefix) MAX_SUMMARY_CHARS else
+            minOf(MAX_SUMMARY_CHARS, (minOf(240_000L, config.knownContextWindow?.toLong() ?: 72_000L) / 4)
+                .coerceAtLeast(1).toInt())
+        if (rawSummary.isBlank() || rawSummary == "null" || rawSummary.length > validationLimit * 2) {
             throw invalidSummary()
         }
         val summary = if (rawSummary.length <= limit) rawSummary else truncate(rawSummary, limit)
@@ -190,7 +199,10 @@ internal class AgentContextSummarizer(
                 llmMs = usage.llmMs ?: elapsedMs,
             )
         }
-        return SummaryResult(summary = summary, usage = effectiveUsage, llmMs = elapsedMs)
+        val exceededBudget = summaryBudgetTokens?.let { budget ->
+            (limit < validationLimit && rawSummary.length > limit) || AgentTokenEstimator.text(summary) > budget
+        } ?: false
+        return SummaryResult(summary = summary, usage = effectiveUsage, llmMs = elapsedMs, exceededBudget = exceededBudget)
     }
 
     private fun summaryConfig(): AgentModelClient.ModelConfig {
@@ -244,10 +256,13 @@ internal class AgentContextSummarizer(
         private const val MAX_SUMMARY_CHARS = 24_000
         private const val MAX_MESSAGE_CHARS = 6_000
 
+        // CJK 约一字符/token，ASCII 更便宜；补充平面字符最终仍通过同一估算器验收。
+        fun maxCharsForTokenBudget(tokens: Int): Int = tokens.coerceIn(1, MAX_SUMMARY_CHARS)
+
         /** Deterministic evidence extraction, explicitly labelled as incomplete, with no model/tools. */
-        fun fallbackSummary(history: List<AgentModelClient.ConversationMessage>): String =
-            "[本地应急整理：任务可能尚未完成；以下仅为已收集的历史记录，工具调用不代表执行成功，请核对结果。]\n" +
-                truncate(formatHistory(history, 1_200).joinToString("\n"), MAX_SUMMARY_CHARS - 200)
+        fun fallbackSummary(history: List<AgentModelClient.ConversationMessage>, maxChars: Int = MAX_SUMMARY_CHARS): String =
+            truncate("[本地应急整理：任务可能尚未完成；以下仅为已收集的历史记录，工具调用不代表执行成功，请核对结果。]\n" +
+                truncate(formatHistory(history, 1_200).joinToString("\n"), MAX_SUMMARY_CHARS - 200), maxChars)
 
         private fun formatHistory(history: List<AgentModelClient.ConversationMessage>, limit: Int): List<String> {
             // Reuse the codec's sensitive-tool policy, but never serialize its JSON as prompt text.

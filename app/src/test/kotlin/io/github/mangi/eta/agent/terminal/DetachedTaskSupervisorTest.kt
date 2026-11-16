@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.terminal
 
+import io.github.mangi.eta.testing.PosixIntegrationTest
+import org.junit.experimental.categories.Category
 import io.github.mangi.eta.core.AgentLogger
 import java.io.File
 import org.json.JSONArray
@@ -52,7 +54,8 @@ class DetachedTaskSupervisorTest {
 
     @Test fun commandWithoutOriginStillDefaultsToWakeup() {
         val launcher = DetachedTaskSupervisor(NoopLogger, File(temporaryFolder.root, "default.json"),
-            daemonDir = File(temporaryFolder.root, "logs").path, rootAvailable = { false })
+            daemonDir = File(temporaryFolder.root, "logs").path, rootAvailable = { false },
+            commandLauncher = ControlledCommandLauncher(completeImmediately = true))
         val result = launcher.start("printf done", temporaryFolder.root.path, "user", TerminalEnvironment.ANDROID,
             commandTask = true) as DaemonStartResult.Started
         assertEquals(JobDelivery.WAKEUP, result.task.delivery)
@@ -120,6 +123,7 @@ class DetachedTaskSupervisorTest {
         assertEquals("ROOT_REQUIRED", (result as DaemonStartResult.Failed).code)
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun startedTaskKeepsRunningAfterLauncherExits() {
         val supervisor = newSupervisor()
@@ -143,6 +147,7 @@ class DetachedTaskSupervisorTest {
         assertTrue(supervisor.list().isEmpty())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun logsRemainReadableAfterTaskExits() {
         val supervisor = newSupervisor()
@@ -168,6 +173,7 @@ class DetachedTaskSupervisorTest {
         assertFalse(supervisor.readLogs(task.id).ok)
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun runningTaskIsAdoptedByNewSupervisorInstance() {
         val first = newSupervisor()
@@ -189,6 +195,7 @@ class DetachedTaskSupervisorTest {
         assertTrue(second.stop(task.id))
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun rejectsStartBeyondCapacity() {
         val supervisor = newSupervisor()
@@ -217,6 +224,7 @@ class DetachedTaskSupervisorTest {
         }
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun stopCleansRecordOfDeadTask() {
         val supervisor = newSupervisor()
@@ -227,6 +235,7 @@ class DetachedTaskSupervisorTest {
         assertTrue(supervisor.list().isEmpty())
     }
 
+    @Category(PosixIntegrationTest::class)
     @Test
     fun stopWithMismatchedTokenDoesNotSignalProcess() {
         // PID 复用防护依赖 /proc/<pid>/environ 的 token 校验，无 /proc 的宿主上没有可校验通道。

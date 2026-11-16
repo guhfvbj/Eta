@@ -11,6 +11,7 @@ import org.junit.rules.TemporaryFolder
 
 class TerminalExecutionContextTest {
     @get:Rule val temporary = TemporaryFolder()
+    private fun hostPath(relative: String): String = File(temporary.root, relative).path
 
     @Test fun rootChangesDefaultIdentityWithoutMovingTheWorkspace() {
         val context = TerminalExecutionContext(TerminalEnvironment.DEBIAN, null, "/eta/workspace")
@@ -22,10 +23,10 @@ class TerminalExecutionContextTest {
     }
 
     @Test fun ordinaryAndroidAndProotShareThePrivateWorkspace() {
-        val workspace = File(temporary.root, "terminal-user/workspace").path
+        val workspace = hostPath("terminal-user/workspace")
         val context = TerminalExecutionContext(
             linuxEnvironment = TerminalEnvironment.DEBIAN,
-            linuxRootfsPath = File(temporary.root, "terminal-user/proot/debian/rootfs").path,
+            linuxRootfsPath = hostPath("terminal-user/proot/debian/rootfs"),
             userWorkspacePath = workspace,
         )
 
@@ -38,10 +39,10 @@ class TerminalExecutionContextTest {
     }
 
     @Test fun chrootKeepsTheRootWorkspaceSeparateFromDefaultAndroid() {
-        val workspace = File(temporary.root, "terminal-user/workspace").path
+        val workspace = hostPath("terminal-user/workspace")
         val context = TerminalExecutionContext(
             linuxEnvironment = TerminalEnvironment.ALPINE,
-            linuxRootfsPath = File(temporary.root, "terminal/alpine/rootfs").path,
+            linuxRootfsPath = hostPath("terminal/alpine/rootfs"),
             userWorkspacePath = workspace,
         )
 
@@ -52,10 +53,10 @@ class TerminalExecutionContextTest {
     }
 
     @Test fun legacyProotKeepsTheExistingPrivateWorkspace() {
-        val workspace = File(temporary.root, "terminal/workspace").path
+        val workspace = hostPath("terminal/workspace")
         val context = TerminalExecutionContext(
             linuxEnvironment = TerminalEnvironment.DEBIAN,
-            linuxRootfsPath = File(temporary.root, "terminal/proot/debian/rootfs").path,
+            linuxRootfsPath = hostPath("terminal/proot/debian/rootfs"),
             userWorkspacePath = workspace,
         )
 
@@ -67,7 +68,7 @@ class TerminalExecutionContextTest {
     @Test fun descriptionReportsSelectedEnvironmentAndEscapesPaths() {
         val rootfs = File(temporary.root, "terminal-user/proot/debian/rootfs").apply { mkdirs() }
         File(rootfs, LinuxEnvironmentPaths.READY_MARKER).writeText("ready")
-        val workspace = File(temporary.root, "work\n\"space").path
+        val workspace = hostPath("work\n\"space")
         val context = TerminalExecutionContext(TerminalEnvironment.DEBIAN, rootfs.path, workspace)
 
         val description = context.description(rootAvailable = false)
@@ -93,7 +94,7 @@ class TerminalExecutionContextTest {
     @Test fun descriptionIncludesConfiguredSharedFolderMappings() {
         val context = TerminalExecutionContext(
             linuxEnvironment = TerminalEnvironment.DEBIAN,
-            linuxRootfsPath = File(temporary.root, "terminal-user/proot/debian/rootfs").path,
+            linuxRootfsPath = hostPath("terminal-user/proot/debian/rootfs"),
             userWorkspacePath = "/eta/workspace",
             sharedMounts = listOf(
                 SharedFolderMount(name = "Download", sourcePath = "/sdcard/Download"),

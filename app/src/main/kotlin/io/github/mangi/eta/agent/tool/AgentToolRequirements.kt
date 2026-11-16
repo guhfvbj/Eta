@@ -146,6 +146,8 @@ internal object AgentToolRequirements {
         if (function.getString("name") in AgentFileToolCatalog.names + AgentTerminalToolCatalog.names) {
             properties?.optJSONObject("identity")?.put("enum", JSONArray().put("user"))
                 ?.put("description", "显式选择宿主身份；当前可用 user（Eta App UID）。省略时沿用本次运行的默认身份。")
+            properties?.optJSONObject("environment")?.put("description",
+                "android 使用 Eta App 身份可访问的宿主路径；linux 使用已选择的 PRoot Linux 私有工作区，/workspace 与应用私有工作区互通。共享存储仅在用户授权后可用，额外共享目录以本次运行公布的挂载为准。")
         }
         when (function.getString("name")) {
             "read_image" -> properties?.getJSONObject("path")?.put("description",
