@@ -18,6 +18,19 @@ import org.robolectric.annotation.Config
 class FileToolDispatcherTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Test fun readDefaultsAgreeWithActualByteAndLineCaps() {
+        val backend = LocalFileToolBackend(temporary.root)
+        val bytes = temporary.newFile("large.kt").apply { writeText("a".repeat(70_000)) }
+        val first = JSONObject(FileToolDispatcher.execute(backend, "read_file", JSONObject().put("path", bytes.name)))
+        assertEquals(51_200, first.getInt("bytes_read"))
+        assertEquals(1, first.getInt("total_lines"))
+        val lines = temporary.newFile("lines.kt").apply { writeText("line\n".repeat(2_100)) }
+        val page = JSONObject(FileToolDispatcher.execute(backend, "read_file", JSONObject().put("path", lines.name)))
+        assertEquals(2_000, page.getInt("line_count"))
+        assertEquals(2_100, page.getInt("total_lines"))
+        assertEquals("line_limit", page.getString("stop_reason"))
+    }
+
     @Test
     fun missingOrNonTextFileArgumentsNeverWrite() {
         val file = temporary.newFile("memo.txt").apply { writeText("original") }

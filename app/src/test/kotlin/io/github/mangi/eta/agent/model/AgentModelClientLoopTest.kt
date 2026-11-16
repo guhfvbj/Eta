@@ -19,6 +19,63 @@ import org.junit.Test
 
 class AgentModelClientLoopTest {
     @Test
+    fun longReadHeavyRunKeepsEveryPreviousRequestPrefixAndReturnsAnAnswer() {
+        var prefix = emptyList<String>()
+        var calls = 0
+        val provider = ScriptedProvider((1..46).map { round ->
+            { request, _ ->
+                val current = (0 until request.messages.length()).map { request.messages.getJSONObject(it).toString() }
+                assertEquals("request prefix at round $round", prefix, current.take(prefix.size))
+                prefix = current
+                assertFalse(request.messages.toString().contains("older_tool_output_folded"))
+                if (round <= 45) assistant(finishReason = "tool_calls", toolCalls = listOf(
+                    toolCall("read-$round", "read_file", JSONObject().put("path", "file-${round % 7}.kt").toString()),
+                )) else assistant(content = "已完成分析", finishReason = "stop")
+            }
+        })
+        val response = AgentModelClient.complete(modelConfig().copy(contextWindow = 575_000, terminalTools = true),
+            "分析代码并完成任务", AgentModelClient.ToolExecutor { call ->
+                calls++
+                AgentModelClient.ToolResult(JSONObject().put("ok", true).put("tool", "read_file")
+                    .put("path", JSONObject(call.argumentsJson).getString("path")).put("revision", "unchanged")
+                    .put("offset_bytes", 0).put("next_offset_bytes", 12_000)
+                    .put("content", "CODE".repeat(3_000)).toString())
+            }, provider = provider)
+        assertEquals("已完成分析", response.content)
+        assertEquals(45, calls) // Advisory detection must never veto legitimate reads.
+        assertEquals(46, provider.requests.size)
+        assertTrue(provider.requests.last().toString().contains("repeat_read_reminder"))
+        assertFalse(response.transcript.any { it.role == "tool" && it.content.contains("repeat_read_reminder") })
+        assertFalse(response.contextSnapshot!!.messages.any { it.content.contains("older_tool_output_folded") })
+    }
+
+    @Test
+    fun repeatedParallelReadsRemindTheModelAfterOrderingWhileLeavingTheJournalRaw() {
+        val executed = AtomicInteger()
+        val provider = ScriptedProvider((1..4).map { round ->
+            { request, _ ->
+                val outputs = (0 until request.messages.length()).map(request.messages::getJSONObject)
+                    .filter { it.optString("role") == "tool" }
+                if (round == 3) assertFalse(outputs.any { it.getString("content").contains("repeat_read_reminder") })
+                if (round == 4) assertEquals(2, outputs.count { it.getString("content").contains("repeat_read_reminder") })
+                if (round <= 3) assistant(finishReason = "tool_calls", toolCalls = (1..2).map { file ->
+                    toolCall("read-$round-$file", "read_file", JSONObject().put("path", "file-$file.kt").toString())
+                }) else assistant(content = "完成", finishReason = "stop")
+            }
+        })
+        val response = AgentModelClient.complete(modelConfig().copy(terminalTools = true), "检查文件",
+            AgentModelClient.ToolExecutor { call ->
+                executed.incrementAndGet()
+                AgentModelClient.ToolResult(JSONObject().put("ok", true).put("revision", "same")
+                    .put("path", JSONObject(call.argumentsJson).getString("path"))
+                    .put("offset_bytes", 0).put("next_offset_bytes", 4).put("content", "CODE").toString())
+            }, provider = provider)
+        assertEquals(6, executed.get())
+        assertEquals(6, response.transcript.count { it.role == "tool" })
+        assertFalse(response.transcript.any { it.content.contains("repeat_read_reminder") })
+    }
+
+    @Test
     fun rootProbeStatesKeepThePrefixStableUntilGrantActuallyChanges() {
         var root = RootAccessState(isChecking = true)
         val calls = mutableListOf<String>()

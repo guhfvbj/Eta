@@ -207,10 +207,10 @@ class AgentContextRecoveryTest {
     }
 
     @Test
-    fun singleContinueTurnFoldsTwenty60KToolResultsBeforeTheProviderRequest() {
+    fun contextPressurePrunesTwenty60KToolResultsBeforeTheProviderRequest() {
         val source = JSONArray().put(JSONObject().put("role", "system").put("content", "fixed"))
             .put(AgentConversationCodec.userTextMessage("继续"))
-        // 每步四条 15K 结果，模拟绕过单条 16K 限制的并发读取，共 60K × 20 步。
+        // 每步四条 15K 终端结果，共 60K × 20 步；估算成本超过 300K 窗口的 85%。
         val output = "fun step() = value + 1\n".repeat(750).take(15_000)
         repeat(20) { index ->
             val calls = (0 until 4).map { tool ->

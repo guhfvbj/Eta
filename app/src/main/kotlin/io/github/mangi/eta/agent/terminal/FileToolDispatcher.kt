@@ -14,9 +14,9 @@ internal object FileToolDispatcher {
             "read_file" -> operations.readFile(
                 path = args.requiredText("path"),
                 offsetBytes = args.optLong("offset_bytes", 0),
-                maxBytes = args.optInt("max_bytes", 16_000),
+                maxBytes = args.optInt("max_bytes", FileToolReadLimits.MAX_BYTES),
                 startLine = if (args.has("start_line")) args.getInt("start_line") else null,
-                maxLines = args.optInt("max_lines", 200),
+                maxLines = args.optInt("max_lines", FileToolReadLimits.MAX_LINES),
                 expectedRevision = revision,
             )
             "write_file" -> operations.writeFile(args.requiredText("path"), args.requiredText("content"), args.optBoolean("append", false), revision)

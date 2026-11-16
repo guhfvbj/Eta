@@ -75,7 +75,7 @@ class AgentPromptBuilderTest {
         val enabled = prompt(true)
         assertEquals(enabled, prompt(true))
         for (guidance in listOf("grep_files", "glob_files", "同一轮批量", "最多 4 路并行", "max_lines=2000",
-            "max_bytes=16000", "先后顺序", "partial=true", "skipped/stop_reason", "cursor")) {
+            "max_bytes=51200", "先后顺序", "partial=true", "skipped/stop_reason", "cursor", "不要重读", "continuation", "scan_limit")) {
             assertTrue(guidance, enabled.contains(guidance))
         }
         assertFalse(prompt(false).contains("最多 4 路并行"))
@@ -87,7 +87,7 @@ class AgentPromptBuilderTest {
         }
         val read = functions.single { it.getString("name") == "read_file" }.getJSONObject("parameters").getJSONObject("properties")
         assertEquals(2_000, read.getJSONObject("max_lines").getInt("maximum"))
-        assertTrue(read.getJSONObject("max_bytes").getInt("maximum") >= 16_000)
+        assertTrue(read.getJSONObject("max_bytes").getInt("maximum") >= 51_200)
     }
 
     @Test

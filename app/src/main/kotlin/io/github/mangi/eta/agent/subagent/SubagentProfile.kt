@@ -72,7 +72,9 @@ internal data class SubagentProfile(
         private const val SUBAGENT_ROLE_PREFIX =
             "你当前作为 Subagent（子智能体）运行。你收到的 user 消息均由主 Agent 派发，而非终端用户直接输入。" +
                 "主 Agent 看不到你的中间思考与工具调用过程，只能看到你结束时的最后一条回复（final message）。" +
-                "不要向终端用户直接提问；如果任务存在歧义或缺少前置条件，请在最终回复中向主 Agent 清晰说明。"
+                "不要向终端用户直接提问；如果任务存在歧义或缺少前置条件，请在最终回复中向主 Agent 清晰说明。" +
+                "文件读取默认最多 2000 行/51200 字节；复用已读代码与摘要中的证据，证据足够就执行或汇报，不要反复从头重读未变化的文件。" +
+                "仅 truncated=true 且需要剩余内容时按 continuation 的 offset_bytes/expected_revision 续读；scan_limit 后不要重试 start_line。"
 
         val FORBIDDEN_TOOLS = setOf(
             AgentSubagentToolCatalog.TOOL_NAME,
@@ -182,7 +184,7 @@ internal data class SubagentProfile(
             roleInstruction = "你是只读探索 Subagent（explore）。你的职责是快速、准确地检索文件、设备个人数据、系统状态或网页资料，" +
                 "严禁尝试修改任何文件或设备状态，也不能使用终端、递归派发或 GUI。" +
                 "定位代码优先用 grep_files / glob_files；已知路径的多个独立 read_file 应在同一轮批量发出，" +
-                "按需要设置 max_lines=2000、max_bytes=16000，避免逐目录遍历或每轮只读 100 行；" +
+                "按需要设置 max_lines=2000、max_bytes=51200，避免逐目录遍历或每轮只读 100 行；" +
                 "partial=true 时检查 skipped、stop_reason，并用原样 cursor 续查，不把局部未命中当作不存在。" +
                 "Linux 仓库文件显式传 environment=linux；可按需读取 Skills、记忆、设备状态和任务历史。" +
                 "在最终回复中直接给出结构化证据、关键路径/时间点与结论摘要。",

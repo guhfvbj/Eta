@@ -67,6 +67,7 @@ internal class AgentLoop(
     private val toolBatchLock = Any()
     private var pendingToolImageMessage: JSONObject? = null
     private val turnMetrics = TurnMetricsAccumulator()
+    private val readRepeatGuard = AgentReadRepeatGuard()
     private var precedingTools: JSONArray? = null
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
@@ -278,7 +279,10 @@ internal class AgentLoop(
                 // cancellation. Only the model projection is ordered by call position.
                 val resultStart = messages.length() - outcomes.size
                 outcomes.forEachIndexed { index, outcome ->
-                    messages.put(resultStart + index, AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
+                    // Observe once in source order after parallel results are complete.
+                    // Enrich only the new model projection; keep the raw journal intact.
+                    val observed = readRepeatGuard.observe(outcome.call.name, outcome.result)
+                    messages.put(resultStart + index, AgentConversationCodec.toolResultMessage(outcome.call, observed))
                 }
                 appendToolImages(round, outcomes)
                 round += 1
@@ -348,7 +352,10 @@ internal class AgentLoop(
         val supplement = runController.pollSteeringMessage() ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) turnMetrics.reset()
+        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) {
+            turnMetrics.reset()
+            readRepeatGuard.reset()
+        }
         return true
     }
 
@@ -356,7 +363,10 @@ internal class AgentLoop(
         val supplement = runController.pollSteeringOrSeal() ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) turnMetrics.reset()
+        if (supplement.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) {
+            turnMetrics.reset()
+            readRepeatGuard.reset()
+        }
         return true
     }
 

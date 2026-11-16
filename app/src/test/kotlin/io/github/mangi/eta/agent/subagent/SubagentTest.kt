@@ -244,7 +244,7 @@ class SubagentTest {
         assertFalse(narrowed.isToolAllowed("terminal"))
         assertFalse(narrowed.isToolAllowed("write_file"))
         val prompt = SubagentProfile.EXPLORE.buildSystemPrompt()
-        for (guidance in listOf("grep_files / glob_files", "同一轮", "max_lines=2000", "max_bytes=16000",
+        for (guidance in listOf("grep_files / glob_files", "同一轮", "max_lines=2000", "max_bytes=51200",
             "environment=linux", "partial=true", "cursor", "GUI")) assertTrue(guidance, prompt.contains(guidance))
         assertTrue(AgentSubagentToolCatalog.schema().toString().contains("no shell or GUI"))
     }
@@ -732,6 +732,56 @@ class SubagentTest {
     }
 
     @Test
+    fun longChildRunsPreserveFullReadsOnSuccessAndRoundLimitResumeForEveryProfile() {
+        for (type in listOf(SubagentProfile.TYPE_EXPLORE, SubagentProfile.TYPE_CODER, SubagentProfile.TYPE_PLAN, "custom-worker")) {
+            for (limit in listOf(20, 21)) {
+                val key = UUID.randomUUID().toString()
+                var rounds = 0
+                val outputs = linkedMapOf<String, String>()
+                var prefix = emptyList<String>()
+                val childProvider = provider { request ->
+                    assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+                    assertFalse("conversation_history" in request.tools.toolNames())
+                    val current = (0 until request.messages.length()).map { request.messages.getJSONObject(it).toString() }
+                    assertEquals(prefix, current.take(prefix.size))
+                    prefix = current
+                    assertFalse(request.messages.toString().contains("older_tool_output_folded"))
+                    rounds++
+                    if (rounds <= 20) response(toolCall("read_file", JSONObject().put("path", "file-$rounds.kt").toString()))
+                    else response()
+                }
+                val executor = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, childProvider,
+                    AgentModelClient.ToolExecutor { call ->
+                        val path = JSONObject(call.argumentsJson).getString("path")
+                        val content = "HEAD-$path\n" + "code".repeat(5_000) + "\nTAIL-$path"
+                        outputs[path] = content
+                        AgentModelClient.ToolResult(JSONObject().put("ok", true).put("tool", "read_file")
+                            .put("path", path).put("revision", "r-$path").put("content", content).toString())
+                    }, maxToolRounds = limit, terminalTools = true,
+                    configTransform = { it.copy(contextWindow = 575_000) })
+                val result = executeSubagent(executor, type)
+                assertEquals(limit == 20, result.optBoolean("incomplete"))
+                assertEquals(20, outputs.size)
+                val stored = session(key).history.filter { it.role == "tool" }
+                assertEquals(20, stored.size)
+                stored.forEach { message ->
+                    val body = JSONObject(message.content)
+                    assertEquals(outputs[body.getString("path")], body.getString("content"))
+                }
+                val resumed = subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
+                    assertEquals(20, request.toolContents().size)
+                    request.toolContents().forEach { raw ->
+                        val body = JSONObject(raw)
+                        assertEquals(outputs[body.getString("path")], body.getString("content"))
+                    }
+                    response()
+                }, terminalTools = true, configTransform = { it.copy(contextWindow = 575_000) })
+                executeSubagent(resumed, type = null, resume = result.getString("subagent_id"))
+            }
+        }
+    }
+
+    @Test
     fun subagentCompactionFailureWrapsUpWithoutAnotherModelCallAndKeepsFallbackOnResume() {
         val key = UUID.randomUUID().toString()
         var chats = 0
@@ -772,6 +822,7 @@ class SubagentTest {
         executeSubagent(subagentExecutor(key, Prefs.Keys.MCP_LOADING_MODE_OFF, provider { request ->
             assertTrue(request.messages.toString().contains("retained-hash"))
             assertTrue(request.messages.toString().contains("本地应急整理"))
+            assertFalse(request.messages.toString().contains("可调用 conversation_history"))
             response()
         }), type = null, resume = result.getString("subagent_id"))
     }

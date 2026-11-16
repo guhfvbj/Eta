@@ -17,6 +17,23 @@ class ShellFileToolBackendTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
+    @Test fun modelReadsUseFiftyKiBWindowsAndBoundedLineMetadataOnShellAndLocalBackends() {
+        val file = temporaryFolder.newFile("medium code.kt").apply { writeText("汉😀".repeat(10_000) + "\nend") }
+        val shell = newBackend { command, input, _ -> runShell(command, input) }
+        val first = org.json.JSONObject(AgentFileOperations(shell).readFile(file.path, maxBytes = 262_144))
+        assertTrue(first.toString(), first.getBoolean("ok"))
+        assertTrue(first.getBoolean("truncated"))
+        assertTrue(first.getInt("bytes_read") in 51_197..51_200)
+        assertEquals(2, first.getInt("total_lines"))
+        val local = org.json.JSONObject(AgentFileOperations(LocalFileToolBackend(temporaryFolder.root)).readFile(file.path))
+        assertEquals(local.getString("content"), first.getString("content"))
+        assertEquals(local.getLong("next_offset_bytes"), first.getLong("next_offset_bytes"))
+        val second = org.json.JSONObject(FileToolDispatcher.execute(shell, "read_file", first.getJSONObject("continuation")))
+        assertTrue(second.toString(), second.getBoolean("ok"))
+        assertFalse(second.getBoolean("truncated"))
+        assertEquals(file.readText(), first.getString("content") + second.getString("content"))
+    }
+
     @Test
     fun resolvePreservesQuotedPathsAndUsesEnvironmentHome() {
         val backend = newBackend { command, _, _ ->

@@ -249,7 +249,8 @@ internal class LocalFileToolBackend(
     private companion object {
         val writeLock = Any()
         const val SEARCH_READ_BYTES = 64_000
-        const val MAX_READ_BYTES = 16_384
+        // Allows one bounded metadata snapshot; read_file output remains capped at 50 KiB.
+        const val MAX_READ_BYTES = FileToolReadLimits.METADATA_SCAN_BYTES
         const val MAX_WRITE_BYTES = 512 * 1024
         const val MAX_DIRECTORY_PAGE = 200
         const val MAX_DIRECTORY_POSITION = 1_000_000

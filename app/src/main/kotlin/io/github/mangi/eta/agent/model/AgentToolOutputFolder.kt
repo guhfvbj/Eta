@@ -5,7 +5,8 @@ import org.json.JSONObject
 
 /**
  * 折叠旧工具结果，保留最近 8 组 assistant 交换与最近 120K 字符尾部，不改 transcript 或签名链。
- * 同一用户轮次内的早期结果也会折叠，只有最近保护区不受影响。
+ * 仅由 AgentContextSession 在上下文压力触发后调用；普通步骤不得改写旧结果。
+ * 同一用户轮次内也只在压力触发后折叠，最近保护区不受影响。
  */
 internal object AgentToolOutputFolder {
     const val LARGE_OUTPUT_CHARS = 6_000
@@ -102,7 +103,7 @@ internal object AgentToolOutputFolder {
         if (head > 0 && text[head - 1].isHighSurrogate()) head--
         if (tail > 0 && text[text.length - tail].isLowSurrogate()) tail--
         val hint = if (readFile) {
-            "已折叠旧文件输出，需要细节时用 offset/limit 分段重读该文件（read_file 使用 offset_bytes/max_lines/max_bytes，续读带 expected_revision）"
+            "上下文压力下已裁剪旧文件输出；优先沿用已确认的证据继续任务，仅在关键代码确实缺失时按范围补查（offset_bytes/max_lines/max_bytes，续读带 expected_revision），不要从头重读"
         } else "已折叠旧工具输出，需要细节时按范围查询"
         return text.take(head) + "\n[... $hint；省略 ${text.length - head - tail} 字符 ...]\n" + text.takeLast(tail)
     }

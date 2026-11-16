@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.terminal.FileToolSearch
+import io.github.mangi.eta.agent.terminal.FileToolReadLimits
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -8,12 +9,12 @@ internal object AgentFileToolCatalog {
     val names = setOf("read_file", "write_file", "edit_file", "stat_file", "list_directory", "glob_files", "grep_files")
 
     fun appendTo(tools: JSONArray) {
-        tools.put(tool("read_file", "读取 UTF-8 文本。已知路径直接读取；多个独立文件在同一轮批量调用，需要大段代码时设 max_lines=2000、max_bytes=16000，避免逐轮读取小片段。返回的 next_offset_bytes 是准确续读位置，续读同时传 expected_revision。支持 start_line 定位；超长行可分段，二进制请使用对应媒体工具。", properties()
+        tools.put(tool("read_file", "读取 UTF-8 文本。已知路径直接读取；多个独立文件在同一轮批量调用，需要大段代码时设 max_lines=2000、max_bytes=51200，避免逐轮读取小片段。优先复用已读结果；仅缺少关键范围或文件变化时补读。返回 total_lines（超过 256 KiB 扫描预算时可为 null）、行范围和 continuation；仅 truncated=true 时按 next_offset_bytes + expected_revision 续读。start_line 定位遇到 scan_limit 时改用 continuation，不要重试原 start_line。超长行可分段，二进制请使用对应媒体工具。", properties()
             .put("path", path())
             .put("offset_bytes", integer("字节起点，默认 0；续读使用上次 next_offset_bytes，不要自行推算。", 0))
-            .put("max_bytes", integer("单次文本字节预算，默认 16000；为兼容旧调用接受更大值，但实际最多返回 16000 字节。", 4, 262144))
+            .put("max_bytes", integer("单次文本字节预算，默认/实际最多 51200（50 KiB）；为兼容旧调用接受更大值并钳制到此上限。", 4, 262144).put("default", FileToolReadLimits.MAX_BYTES))
             .put("start_line", integer("可选的 1 起始行号，按行读取时 offset_bytes 应省略或为 0；远距离定位受扫描预算限制，检查 start_line_reached。", 1))
-            .put("max_lines", integer("最多返回多少行，默认 200；超长单行也受字节预算限制。", 1, 2000))
+            .put("max_lines", integer("最多返回多少行，默认/最多 2000；超长单行也受字节预算限制。", 1, FileToolReadLimits.MAX_LINES).put("default", FileToolReadLimits.MAX_LINES))
             .put("expected_revision", revision()), listOf("path")))
         tools.put(tool("write_file", "创建、完整覆盖或追加 UTF-8 文件；会创建父目录。局部修改请用 edit_file。expected_revision 可防止覆盖已变化的文件；atomic 说明后端是否原子替换。", properties()
             .put("path", path()).put("content", text("完整文件内容或追加内容，UTF-8 编码后最多 512 KiB。", 524288))

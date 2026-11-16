@@ -15,6 +15,24 @@ import org.junit.Test
 
 class AgentContextCompactionTest {
     @Test
+    fun archiveRecoveryInstructionsRespectHistoryToolAvailabilityForSummaryAndFallback() {
+        for (historyAvailable in listOf(false, true)) for (fallback in listOf(false, true)) {
+            val messages = JSONArray().put(AgentConversationCodec.userTextMessage("current task"))
+            repeat(12) { index ->
+                val call = AgentModelClient.ToolCall("read-$index", "read_file", "{}")
+                messages.put(AgentConversationCodec.assistantHistoryMessage(JSONObject().put("content", ""), listOf(call)))
+                    .put(AgentConversationCodec.toolResultMessage(call, AgentModelClient.ToolResult("code".repeat(4_000))))
+            }
+            val compactor = AgentContextCompactor(config, provider { _, _ -> response("已读文件和确认结论") }, AgentRunController(),
+                historyToolAvailable = historyAvailable, resolveSummaryModel = { null })
+            val result = if (fallback) compactor.fallbackCompact(messages, 0, emptySet()) else compactor.compact(messages, 0, emptySet())
+            val archive = result.getJSONObject(0).getString("content")
+            assertEquals(historyAvailable, archive.contains(AgentConversationToolCatalog.READ_HISTORY))
+            if (!historyAvailable) assertTrue(archive.contains("避免从头重读"))
+        }
+    }
+
+    @Test
     fun automaticScreenContentIsNotCopiedIntoCompactionInput() {
         val messages = jsonHistory()
         val user = AgentConversationCodec.userTextMessage("保留最新问题")
@@ -756,6 +774,7 @@ class AgentContextCompactionTest {
             // observed usage triggers the single compaction exercised below.
             config = config,
             prompt = "当前问题",
+            additionalTools = JSONArray().put(AgentConversationToolCatalog.schema()),
             toolExecutor = AgentModelClient.ToolExecutor {
                 AgentModelClient.ToolResult(
                     content = """{"ok":true}""",

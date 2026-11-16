@@ -134,7 +134,7 @@ internal object AgentPromptBuilder {
             messages.put(systemMessage(
                 "Eta 内置文件与终端工具。文件和命令共用本次运行的默认身份与工作区；已知路径可直接读取或写入，不必先查目录。" +
                     "独立的 read_file、grep_files、glob_files 可与设备只读查询、web_search、fetch_url 在同一轮批量调用，只读批次最多 4 路并行；" +
-                    "定位内容优先 grep_files，定位路径用 glob_files；需要整段代码时用 max_lines=2000、max_bytes=16000，避免每轮串行读取 100 行小片段。" +
+                    "定位内容优先 grep_files，定位路径用 glob_files；需要整段代码时用 max_lines=2000、max_bytes=51200，避免每轮串行读取 100 行小片段。复用上下文中已读代码，证据足够就执行编辑或汇报；文件未变且范围已覆盖时不要重读。只在 truncated=true 且需要后续内容时按 continuation 的 offset_bytes/expected_revision 续读；scan_limit 后不要重试 start_line。" +
                     "依赖前次结果或涉及写入的调用保持先后顺序；partial=true 时检查 skipped/stop_reason 并使用 cursor 续查。" +
                     rootInstructions(rootAvailable) +
                     "普通命令调用 terminal，只需 command；单次进程会回收，不要用 & 起后台进程。保留 Shell 状态用 action=open 和 session_id，目录变化用会话内 cd。" +

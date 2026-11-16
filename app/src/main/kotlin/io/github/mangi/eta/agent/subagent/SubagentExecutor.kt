@@ -233,7 +233,7 @@ internal class SubagentExecutor(
             val messages = JSONArray(history.map(AgentConversationCodec::toJsonObject))
             return try {
                 AgentConversationCodec.transcript(AgentContextCompactor(subagentConfig,
-                    provider, childController,
+                    provider, childController, historyToolAvailable = false,
                     dynamicMcpGroupsProvider = { mcpSnapshot.deferredGroups(profile::isToolAllowed) },
                 ).fallbackCompact(messages, 0, emptySet()), 0)
             } catch (failure: AgentModelFailure) {
@@ -304,7 +304,10 @@ internal class SubagentExecutor(
             val wrapUpReason = if (code == "SUBAGENT_ROUND_LIMIT") code else compactionFailure
             val partial = if (cancelled) tracker.partialOutput() else AgentContextSummarizer.fallbackSummary(history)
             if (!cancelled && wrapUpReason != null) {
-                val protected = fallbackHistory(history) + AgentModelClient.ConversationMessage("assistant", partial)
+                // A round cap is not context pressure. Keep already-read code for
+                // resume; only a real compaction failure needs an emergency summary.
+                val retained = if (compactionFailure != null) fallbackHistory(history) else history
+                val protected = retained + AgentModelClient.ConversationMessage("assistant", partial)
                 storeHistory(protected)
                 return completeResult(partial, wrapUpReason)
             }

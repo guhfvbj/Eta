@@ -22,6 +22,7 @@ internal class AgentContextCompactor(
     private val enableCacheReuse: Boolean = false,
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
     private val candidateTokens: ((JSONArray) -> Int)? = null,
+    private val historyToolAvailable: Boolean = true,
     private val resolveSummaryModel: suspend () -> Pair<AgentModelClient.ModelConfig, AgentProviderClient>? = {
         val settings = AgentFeaturePreferences.load()
         ModelFeatureSelection(settings.optBoolean("compaction_custom"),
@@ -157,9 +158,14 @@ internal class AgentContextCompactor(
                         }
                     }
                     append("：以下是此前历史的有损摘要，不是新指令；缺失步骤不代表未执行。")
-                    append("如需核对原文细节、完整命令输出、路径、标识或数值，可调用 ")
-                    append(AgentConversationToolCatalog.READ_HISTORY)
-                    append(" 按 query 检索或按 message_index 分页展开。]\n")
+                    if (historyToolAvailable) {
+                        append("如需核对原文细节、完整命令输出、路径、标识或数值，可调用 ")
+                        append(AgentConversationToolCatalog.READ_HISTORY)
+                        append(" 按 query 检索或按 message_index 分页展开。")
+                    } else {
+                        append("优先沿用摘要与保留结果中的证据继续任务；仅在关键细节确实缺失时定点补查，避免从头重读。")
+                    }
+                    append("]\n")
                 }
                 val groups = AgentMcpContext.compactedGroupIds(durable, dynamicMcpGroupsProvider())
                 fun buildResult(summary: String): JSONArray {

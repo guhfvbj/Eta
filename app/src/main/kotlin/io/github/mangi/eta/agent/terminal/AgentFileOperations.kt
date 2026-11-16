@@ -16,20 +16,42 @@ internal class AgentFileOperations(private val backend: FileToolBackend) {
     fun readFile(
         path: String,
         offsetBytes: Long = 0,
-        maxBytes: Int = 16_000,
+        maxBytes: Int = FileToolReadLimits.MAX_BYTES,
         startLine: Int? = null,
-        maxLines: Int = 200,
+        maxLines: Int = FileToolReadLimits.MAX_LINES,
         expectedRevision: String? = null,
     ): String = fileToolOperation("read_file") {
         require(offsetBytes >= 0 && maxBytes > 0 && maxLines > 0)
         require(startLine == null || (startLine > 0 && offsetBytes == 0L))
         val stat = regularFile(path, expectedRevision)
+        // One bounded raw snapshot supplies exact LF line metadata and the selected
+        // window. Reuse its bytes instead of reading the selected code a second time.
+        // Large files keep bounded I/O and explicitly report an unknown total.
+        val snapshot = if (stat.sizeBytes <= FileToolReadLimits.METADATA_SCAN_BYTES) {
+            backend.readBytes(stat.path, 0, stat.sizeBytes.toInt().coerceAtLeast(1)).also {
+                if (it.size.toLong() != stat.sizeBytes) throw FileToolException("FILE_CHANGED", "文件在读取期间已变化")
+            }
+        } else null
+        val totalLines = snapshot?.let { bytes ->
+            bytes.count { it == '\n'.code.toByte() } + if (bytes.isNotEmpty() && bytes.last() != '\n'.code.toByte()) 1 else 0
+        }
+        fun readAt(offset: Long, limit: Int): FileToolTextChunk {
+            if (snapshot == null) return textReader.read(stat, offset, limit)
+            val from = offset.coerceAtMost(snapshot.size.toLong()).toInt()
+            val end = (from + limit).coerceAtMost(snapshot.size)
+            return textReader.decode(stat, offset, snapshot.copyOfRange(from, end))
+        }
+        fun continuation(offset: Long) = JSONObject().put("path", stat.path)
+            .put("environment", backend.environment).put("identity", backend.identity)
+            .put("offset_bytes", offset).put("expected_revision", stat.revision)
         var offset = offsetBytes
-        var line: Int? = if (offset == 0L) 1 else null
+        var line: Int? = if (offset == 0L) 1 else snapshot?.let { bytes ->
+            (0 until offset.coerceAtMost(bytes.size.toLong()).toInt()).count { bytes[it] == '\n'.code.toByte() } + 1
+        }
         if (startLine != null && startLine > 1) {
             var scanBytes = 0
-            while (line!! < startLine && offset < stat.sizeBytes && MAX_LINE_SCAN_BYTES - scanBytes >= 4) {
-                val chunk = textReader.read(stat, offset, minOf(16_000, MAX_LINE_SCAN_BYTES - scanBytes))
+            while (line!! < startLine && offset < stat.sizeBytes && FileToolReadLimits.METADATA_SCAN_BYTES - scanBytes >= 4) {
+                val chunk = readAt(offset, minOf(FileToolReadLimits.MAX_BYTES, FileToolReadLimits.METADATA_SCAN_BYTES - scanBytes))
                 var consumedChars = 0
                 while (consumedChars < chunk.text.length && line < startLine) {
                     val newline = chunk.text.indexOf('\n', consumedChars)
@@ -44,18 +66,21 @@ internal class AgentFileOperations(private val backend: FileToolBackend) {
             if (line < startLine && offset < stat.sizeBytes) {
                 verifyUnchanged(stat)
                 return@fileToolOperation base("read_file").put("path", stat.path).put("revision", stat.revision)
-                    .put("content", "").put("bytes_read", 0).put("offset_bytes", offsetBytes)
+                    .put("content", "").put("bytes_read", 0).put("offset_bytes", offset)
+                    .put("size_bytes", stat.sizeBytes).put("total_lines", JSONObject.NULL).put("line_count", 0)
                     .put("next_offset_bytes", offset).put("next_line", line)
                     .put("start_line_reached", false).put("truncated", true).put("stop_reason", "scan_limit")
+                    .put("continuation", continuation(offset))
+                    .put("message", "start_line 定位达到 256 KiB 扫描上限；请用 offset_bytes=$offset 和 expected_revision 续读，勿重试同一 start_line。next_line 可能仍在超长行中；total_lines 未扫描。")
             }
         }
-        val chunk = textReader.read(stat, offset, maxBytes.coerceAtMost(16_000))
+        val chunk = readAt(offset, maxBytes.coerceAtMost(FileToolReadLimits.MAX_BYTES))
         var end = chunk.text.length
         var newlineCount = 0
         for (index in chunk.text.indices) {
             if (chunk.text[index] == '\n') {
                 newlineCount++
-                if (newlineCount == maxLines.coerceAtMost(2_000)) { end = index + 1; break }
+                if (newlineCount == maxLines.coerceAtMost(FileToolReadLimits.MAX_LINES)) { end = index + 1; break }
             }
         }
         val content = chunk.text.substring(0, end)
@@ -63,15 +88,27 @@ internal class AgentFileOperations(private val backend: FileToolBackend) {
         val nextOffset = offset + consumed
         val truncated = nextOffset < stat.sizeBytes
         val newlines = content.count { it == '\n' }
+        val lineCount = newlines + if (content.isNotEmpty() && !content.endsWith('\n')) 1 else 0
+        val endLine = line?.let { it.toLong() + lineCount - 1 }
+        val knownTotal = totalLines?.toLong() ?: if (!truncated && line != null && content.isNotEmpty()) endLine else null
         verifyUnchanged(stat)
         base("read_file").put("path", stat.path).put("revision", stat.revision)
             .put("size_bytes", stat.sizeBytes).put("offset_bytes", offset).put("bytes_read", consumed)
             .put("next_offset_bytes", nextOffset).put("content", content)
             .put("start_line", line ?: JSONObject.NULL).put("next_line", line?.plus(newlines) ?: JSONObject.NULL)
-            .put("line_count", newlines + if (content.isNotEmpty() && !content.endsWith('\n')) 1 else 0)
+            .put("end_line", endLine ?: JSONObject.NULL).put("total_lines", knownTotal ?: JSONObject.NULL)
+            .put("line_count", lineCount)
             .put("line_truncated", truncated && content.isNotEmpty() && !content.endsWith('\n'))
             .put("start_line_reached", startLine == null || line!! >= startLine)
-            .put("truncated", truncated).put("stop_reason", if (!truncated) "eof" else if (end < chunk.text.length) "line_limit" else "byte_limit")
+            .put("truncated", truncated).put("stop_reason", if (!truncated) "eof" else if (newlineCount >= maxLines.coerceAtMost(FileToolReadLimits.MAX_LINES)) "line_limit" else "byte_limit")
+            .put("message", buildString {
+                if (line != null && lineCount > 0) append("Showing lines $line-$endLine")
+                else append("Showing $lineCount lines from byte $offset")
+                if (knownTotal != null) append(" of $knownTotal.")
+                else append("; total_lines unknown (file exceeds the bounded metadata scan).")
+                if (truncated) append(" Use offset_bytes=$nextOffset with expected_revision to continue; do not restart from the beginning.")
+                else append(" End of file.")
+            }).apply { if (truncated) put("continuation", continuation(nextOffset)) }
     }
 
     fun listDirectory(
@@ -207,7 +244,6 @@ internal class AgentFileOperations(private val backend: FileToolBackend) {
 
     private companion object {
         const val MAX_EDIT_BYTES = 512 * 1024
-        const val MAX_LINE_SCAN_BYTES = 256 * 1024
         const val MAX_DIRECTORY_JSON_CHARS = 16_000
     }
 }

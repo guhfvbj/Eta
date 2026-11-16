@@ -20,24 +20,94 @@ class AgentFileOperationsTest {
     private fun operations(): AgentFileOperations = AgentFileOperations(LocalFileToolBackend(temporary.root))
 
     @Test fun bytePaginationNeverSkipsContentHiddenByOutputLimit() {
-        val file = temporary.newFile("large.txt").apply { writeText("a".repeat(20_000)) }
+        val file = temporary.newFile("large.txt").apply { writeText("a".repeat(70_000)) }
         val operations = operations()
         val first = JSONObject(operations.readFile(file.name, maxBytes = 65_536))
         assertTrue(first.toString(), first.getBoolean("truncated"))
-        assertEquals(16_000, first.getInt("bytes_read"))
+        assertEquals(51_200, first.getInt("bytes_read"))
         val second = JSONObject(operations.readFile(file.name, offsetBytes = first.getLong("next_offset_bytes")))
         assertFalse(second.getBoolean("truncated"))
         assertEquals(file.readText(), first.getString("content") + second.getString("content"))
     }
 
     @Test fun chineseAndSupplementaryCharactersSurviveByteBoundaries() {
-        val original = "a".repeat(15_999) + "汉😀字"
+        val original = "a".repeat(51_199) + "汉😀字"
         val file = temporary.newFile("utf8.txt").apply { writeText(original) }
         val first = JSONObject(operations().readFile(file.name))
-        assertEquals(15_999, first.getInt("bytes_read"))
+        assertEquals(51_199, first.getInt("bytes_read"))
         val second = JSONObject(operations().readFile(file.name, offsetBytes = first.getLong("next_offset_bytes")))
         assertEquals(original, first.getString("content") + second.getString("content"))
         assertEquals(file.length(), second.getLong("next_offset_bytes"))
+    }
+
+    @Test fun mediumFileIsReadInOneCallWithExactLineMetadataAndNoDuplicateIo() {
+        val original = (1..800).joinToString("\n", postfix = "\n") { "line $it " + "code".repeat(8) }
+        val file = temporary.newFile("medium.kt").apply { writeText(original) }
+        var reads = 0
+        val local = LocalFileToolBackend(temporary.root)
+        val backend = object : FileToolBackend by local {
+            override fun readBytes(path: String, offset: Long, limit: Int): ByteArray {
+                reads++
+                return local.readBytes(path, offset, limit)
+            }
+        }
+        val result = JSONObject(AgentFileOperations(backend).readFile(file.name))
+        assertEquals(original, result.getString("content"))
+        assertEquals(800, result.getInt("total_lines"))
+        assertEquals(1, result.getInt("start_line"))
+        assertEquals(800, result.getInt("end_line"))
+        assertFalse(result.getBoolean("truncated"))
+        assertEquals(1, reads)
+        assertTrue(result.getString("message").contains("End of file"))
+    }
+
+    @Test fun defaultLineLimitAndContinuationCoverEveryLineWithKnownTotal() {
+        val original = (1..2_105).joinToString("\n") { "line $it" }
+        val file = temporary.newFile("many.kt").apply { writeText(original) }
+        val first = JSONObject(operations().readFile(file.name))
+        assertEquals(2_000, first.getInt("line_count"))
+        assertEquals(2_105, first.getInt("total_lines"))
+        assertEquals("line_limit", first.getString("stop_reason"))
+        assertTrue(first.getString("message").contains("Showing lines 1-2000 of 2105"))
+        val continuation = first.getJSONObject("continuation")
+        assertFalse(continuation.has("start_line"))
+        val second = JSONObject(FileToolDispatcher.execute(LocalFileToolBackend(temporary.root), "read_file", continuation))
+        assertEquals(2_001, second.getInt("start_line"))
+        assertEquals(2_105, second.getInt("end_line"))
+        assertFalse(second.getBoolean("truncated"))
+        assertEquals(original, first.getString("content") + second.getString("content"))
+    }
+
+    @Test fun emptyTrailingNewlineAndUnterminatedFilesHaveExactTotals() {
+        for ((index, pair) in listOf("" to 0, "one" to 1, "one\n" to 1, "one\r\n" to 1, "\n\n" to 2).withIndex()) {
+            val file = temporary.newFile("count-$index").apply { writeText(pair.first) }
+            val result = JSONObject(operations().readFile(file.name))
+            assertEquals(pair.second, result.getInt("total_lines"))
+            assertEquals(pair.second, result.getInt("line_count"))
+        }
+    }
+
+    @Test fun scanLimitGivesByteContinuationInsteadOfInvitingSameStartLineRetry() {
+        val file = temporary.newFile("huge.kt").apply { writeText("long".repeat(75_000) + "\ntarget\n") }
+        val operations = operations()
+        val limited = JSONObject(operations.readFile(file.name, startLine = 2))
+        assertEquals("scan_limit", limited.getString("stop_reason"))
+        assertEquals(0, limited.getInt("bytes_read"))
+        assertTrue(limited.isNull("total_lines"))
+        assertFalse(limited.getBoolean("start_line_reached"))
+        assertEquals(256 * 1024L, limited.getLong("next_offset_bytes"))
+        assertTrue(limited.getString("message").contains("offset_bytes="))
+        assertTrue(limited.getString("message").contains("勿重试同一 start_line"))
+        val continuation = limited.getJSONObject("continuation")
+        assertEquals(limited.getLong("next_offset_bytes"), continuation.getLong("offset_bytes"))
+        assertEquals(limited.getString("revision"), continuation.getString("expected_revision"))
+        val next = JSONObject(FileToolDispatcher.execute(LocalFileToolBackend(temporary.root), "read_file", continuation))
+        assertTrue(next.toString(), next.getBoolean("ok"))
+        assertTrue(next.getString("content").endsWith("\ntarget\n"))
+        assertFalse(next.getBoolean("truncated"))
+        assertTrue(next.isNull("total_lines")) // Never invent totals for an unscanned prefix.
+        file.appendText("changed")
+        assertEquals("FILE_CHANGED", JSONObject(FileToolDispatcher.execute(LocalFileToolBackend(temporary.root), "read_file", continuation)).getString("code"))
     }
 
     @Test fun invalidUtf8AndBinaryFilesHaveExplicitFailures() {
@@ -59,7 +129,7 @@ class AgentFileOperationsTest {
     }
 
     @Test fun lineRangeAndLargeSingleLineReturnRecoverableOffsets() {
-        val file = temporary.newFile("lines.txt").apply { writeText("一\n二\n" + "长".repeat(8_000) + "\n四") }
+        val file = temporary.newFile("lines.txt").apply { writeText("一\n二\n" + "长".repeat(20_000) + "\n四") }
         val second = JSONObject(operations().readFile(file.name, startLine = 2, maxLines = 1))
         assertEquals("二\n", second.getString("content"))
         assertEquals(3, second.getInt("next_line"))
@@ -67,7 +137,7 @@ class AgentFileOperationsTest {
         assertTrue(longLine.getBoolean("line_truncated"))
         assertEquals(3, longLine.getInt("next_line"))
         val remainder = JSONObject(operations().readFile(file.name, offsetBytes = longLine.getLong("next_offset_bytes")))
-        assertEquals("长".repeat(8_000) + "\n四", longLine.getString("content") + remainder.getString("content"))
+        assertEquals("长".repeat(20_000) + "\n四", longLine.getString("content") + remainder.getString("content"))
     }
 
     @Test fun directoryPagesEnumerateEveryEntryAndRejectChangedDirectory() {

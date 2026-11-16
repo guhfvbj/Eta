@@ -52,17 +52,8 @@ internal class AgentContextSession(
         tools = roundTools
         requestBaseline = null
         requestLocalTokens = null
-        val previous = tokenBaseline(messages)
-        val folded = AgentToolOutputFolder.fold(messages, systemCount)
-        if (folded.changedMessages > 0) {
-            val history = durableHistory(messages)
-            // 折叠仅减去已知改动的本地成本，不丢弃服务端 usage 锚点。
-            baseline = previous.copy(
-                lastContextTokens = (previous.lastContextTokens - folded.savedTokens).coerceAtLeast(0),
-                messageCount = history.size,
-                fingerprint = AgentTokenEstimator.fingerprint(history),
-            )
-        }
+        // Normal steps are append-only. Pruning belongs to pressure compaction,
+        // otherwise it hides already-read code and invalidates the provider cache.
     }
 
     fun captureRequest() {
@@ -160,7 +151,7 @@ internal class AgentContextSession(
     }
 
     fun compact(force: Boolean = false, final: Boolean = false, emergency: Boolean = false) {
-        val before = effectiveTokens()
+        var before = effectiveTokens()
         if (SignedToolContext.hasPendingResponse(messages)) {
             if (force) throw SignedToolContext.compactionFailure(messages)
             checkpoint()
@@ -176,13 +167,22 @@ internal class AgentContextSession(
             return
         }
         val operation = java.util.UUID.randomUUID().toString()
-        onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
+            // Prune only after pressure qualifies (or confirmed overflow). Remeasure
+            // before paying for a summary; manual compaction still explicitly summarizes.
+            if (!force || emergency) {
+                pruneToolOutputs()
+                before = effectiveTokens()
+                if (!force && contextWindow != null && before < contextWindow * TRIGGER_RATIO) return
+            }
+            onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
             val compactor = AgentContextCompactor(config, provider, runController, roleplay = roleplay,
                 dynamicMcpGroupsProvider = dynamicMcpGroupsProvider,
                 mainTools = mainToolsProvider(), mainSessionId = mainSessionId,
                 candidateTokens = ::candidateTokens,
-                messageProjector = messageProjector, enableCacheReuse = enableCacheReuse)
+                messageProjector = messageProjector, enableCacheReuse = enableCacheReuse,
+                historyToolAvailable = toolNames(tools).contains(AgentConversationToolCatalog.READ_HISTORY) ||
+                    toolNames(mainToolsProvider()).contains(AgentConversationToolCatalog.READ_HISTORY))
             val outcome = try {
                 compactor.compactWithOutcome(messages, systemCount, sensitiveIds())
             } catch (failure: Exception) {
@@ -232,6 +232,38 @@ internal class AgentContextSession(
         }
     }
 
+    /** Commit a pressure-only replacement without mutating the append-only transcript. */
+    private fun pruneToolOutputs() {
+        runController.throwIfCancelled()
+        val candidate = JSONArray((0 until messages.length()).map(messages::getJSONObject))
+        val previous = tokenBaseline(messages)
+        val folded = AgentToolOutputFolder.fold(candidate, systemCount)
+        if (folded.changedMessages == 0) return
+        runController.throwIfCancelled()
+        val history = durableHistory(candidate)
+        val candidatePrefix = tokenBaseline(candidate).prefixTokens
+        val savedTokens = (AgentTokenEstimator.messages(requestProjection(messages)) -
+            AgentTokenEstimator.messages(requestProjection(candidate))).coerceAtLeast(0)
+        val previousBaseline = baseline
+        // Preserve the server usage anchor and subtract only calibrated local savings.
+        baseline = previous.copy(
+            lastContextTokens = (previous.lastContextTokens -
+                (savedTokens * previous.boundedEstimateScale).toInt()).coerceAtLeast(0),
+            prefixTokens = candidatePrefix,
+            messageCount = history.size,
+            fingerprint = AgentTokenEstimator.fingerprint(history),
+        )
+        val snapshot = try {
+            createSnapshot(candidate).also { saveContext(it, it.encode()) }
+        } catch (failure: Exception) {
+            baseline = previousBaseline
+            throw failure
+        }
+        for (index in 0 until candidate.length()) messages.put(index, candidate.getJSONObject(index))
+        baseline = snapshot.tokenBaseline
+        committedSnapshot = snapshot
+    }
+
     private fun recordNoProgress() {
         noProgressCount = (noProgressCount + 1).coerceAtMost(8)
         cooldownRemaining = (noProgressCount * 8).coerceAtMost(64)
@@ -244,6 +276,10 @@ internal class AgentContextSession(
             if (!message.optBoolean("_eta_observation")) durable.put(message)
         }
         return AgentConversationCodec.transcript(durable, 0, sensitiveIds())
+    }
+
+    private fun toolNames(source: JSONArray): Set<String> = (0 until source.length()).mapNotNullTo(mutableSetOf()) { index ->
+        source.optJSONObject(index)?.optJSONObject("function")?.optString("name")
     }
 
     private companion object {

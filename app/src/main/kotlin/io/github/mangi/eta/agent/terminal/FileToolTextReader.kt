@@ -5,6 +5,13 @@ import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 
+/** Model-facing read budgets; directory/search/edit budgets are independent. */
+internal object FileToolReadLimits {
+    const val MAX_BYTES = 50 * 1024
+    const val MAX_LINES = 2_000
+    const val METADATA_SCAN_BYTES = 256 * 1024
+}
+
 internal data class FileToolTextChunk(
     val text: String,
     val bytesConsumed: Int,
@@ -54,16 +61,16 @@ internal class FileToolTextReader(private val backend: FileToolBackend) {
         return bytes
     }
 
-    fun read(stat: FileToolStat, offset: Long, maxBytes: Int, maxChars: Int = 16_000): FileToolTextChunk {
-        return decode(stat, offset, backend.readBytes(stat.path, offset, maxBytes.coerceIn(1, 16_000)), maxChars)
+    fun read(stat: FileToolStat, offset: Long, maxBytes: Int, maxChars: Int = FileToolReadLimits.MAX_BYTES): FileToolTextChunk {
+        return decode(stat, offset, backend.readBytes(stat.path, offset, maxBytes.coerceIn(1, FileToolReadLimits.MAX_BYTES)), maxChars)
     }
 
-    /** Decode a checked search snapshot with the exact same 16K boundaries as read_file. */
-    fun decode(stat: FileToolStat, offset: Long, bytes: ByteArray, maxChars: Int = 16_000): FileToolTextChunk {
+    /** Decode a checked snapshot; callers such as search retain their own smaller byte budgets. */
+    fun decode(stat: FileToolStat, offset: Long, bytes: ByteArray, maxChars: Int = FileToolReadLimits.MAX_BYTES): FileToolTextChunk {
         if (bytes.any { it == 0.toByte() }) throw FileToolException("BINARY_FILE", "文件包含二进制内容，请使用文件导出或终端工具处理")
         val eof = offset + bytes.size >= stat.sizeBytes
         val input = ByteBuffer.wrap(bytes)
-        val output = CharBuffer.allocate(maxChars.coerceIn(2, 16_000))
+        val output = CharBuffer.allocate(minOf(maxChars.coerceIn(2, FileToolReadLimits.MAX_BYTES), bytes.size.coerceAtLeast(2)))
         val decoder = Charsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)

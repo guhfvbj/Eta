@@ -77,7 +77,7 @@ class RootlessTerminalAccessTest {
         val file = File(temporary.root, "test-read-${System.nanoTime()}")
         try {
             file.parentFile!!.mkdirs()
-            file.writeText("a".repeat(20_000))
+            file.writeText("a".repeat(70_000))
             val first = JSONObject(controller.fileTool("read_file", JSONObject()
                 .put("path", file.path).put("max_bytes", 200_000)))
             assertTrue(first.getBoolean("truncated"))
@@ -86,7 +86,7 @@ class RootlessTerminalAccessTest {
                 .put("path", file.path).put("offset_bytes", first.getInt("bytes_read"))
                 .put("max_bytes", 200_000)))
             assertFalse(second.getBoolean("truncated"))
-            assertEquals(20_000, first.getString("content").length + second.getString("content").length)
+            assertEquals(70_000, first.getString("content").length + second.getString("content").length)
         } finally {
             controller.closeAll()
             file.delete()

@@ -23,7 +23,7 @@ class AgentToolOutputFolderTest {
         assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
     }
 
-    @Test fun sameUserTurnFoldsEarlyResultsButPreservesLastEightExchangesAnd120KTail() {
+    @Test fun pressurePrunerCanFoldSameTurnButPreservesLastEightExchangesAnd120KTail() {
         // 12K 输出由字符尾部主导，20K 输出由最近八组交换主导；均按索引验证保护区。
         for (outputChars in listOf(12_000, 20_000)) {
             val rounds = 200
@@ -58,7 +58,8 @@ class AgentToolOutputFolderTest {
         assertEquals(891, result.getInt("limit"))
         assertEquals(12_000, result.getInt("total_chars"))
         assertTrue(result.getString("preview").length in 3_000..6_000)
-        assertTrue(result.getString("preview").contains("offset/limit 分段重读"))
+        assertTrue(result.getString("preview").contains("不要从头重读"))
+        assertFalse(result.getString("preview").contains("分段重读该文件"))
     }
 
     @Test fun protectsAtLeast120KOfTailAndDoesNotFoldSmallOrStructuredContent() {
@@ -184,47 +185,113 @@ class AgentToolOutputFolderTest {
         }
     }
 
-    @Test fun sessionRetainsObservedUsageWhenFoldingAndSavesAMatchingBaseline() {
-        val messages = history(rounds = 3, endTurn = false)
-        val journal = JSONArray((0 until messages.length()).map(messages::getJSONObject))
-        val journalBefore = journal.toString()
-        val config = AgentModelClient.ModelConfig(baseUrl = "https://example.invalid", apiKey = "key", model = "fixture", systemPrompt = "",
-            autoCompactionEnabled = false)
-        val provider = object : AgentProviderClient {
-            override val id = "unused"
-            override val capabilities = ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS, true, true, false, false, false, true)
-            override fun complete(request: ProviderRequest, runController: AgentRunController, onEvent: (ProviderEvent) -> Unit): ProviderResponse = error("Folding is local")
+    @Test fun normalRequestsNeverFoldEvenInLongSingleTurnsOrWhenCompactionIsDisabled() {
+        for ((window, enabled) in listOf(575_000 to true, 575_000 to false, 10_000 to false, null to true)) {
+            val messages = history(rounds = 45, output = "CODE".repeat(5_000), endTurn = false)
+            val before = messages.toString()
+            val config = config(window, enabled)
+            val session = AgentContextSession(config, messages, 1, "stable", unusedProvider(), AgentRunController(),
+                { emptySet() }, {}, {})
+            session.captureRequest()
+            session.observeInputTokens(328_000)
+            repeat(3) {
+                session.prepareRequest(JSONArray())
+                session.compact()
+                assertEquals(before, messages.toString())
+                assertEquals(328_000, session.effectiveTokens())
+            }
+            session.checkpoint()
+            val snapshot = checkNotNull(session.snapshot())
+            assertFalse(snapshot.messages.any { it.content.contains("older_tool_output_folded") })
+            assertTrue(snapshot.tokenBaseline!!.matches(snapshot.messages, config))
         }
-        val session = AgentContextSession(config, messages, 1, "fold", provider, AgentRunController(),
+    }
+
+    @Test fun pressurePrunesBeforeSummarizingAndPreservesCalibratedUsageJournalAndCheckpoint() {
+        val messages = history(rounds = 32, output = "CODE".repeat(5_000), endTurn = false)
+        val journal = JSONArray((0 until messages.length()).map(messages::getJSONObject))
+        val original = journal.toString()
+        val config = config()
+        val session = AgentContextSession(config, messages, 1, "pressure", unusedProvider(), AgentRunController(),
             { emptySet() }, {}, {}, { journal.length() })
         session.prepareRequest(JSONArray())
         session.captureRequest()
-        session.observeInputTokens(90_000)
-        assertEquals(90_000, session.effectiveTokens())
-        session.prepareRequest(JSONArray())
-        assertEquals(90_000, session.effectiveTokens())
-        for (i in 4..14) appendExchange(messages, i, "x".repeat(12_000))
-        messages.put(AgentConversationCodec.userTextMessage("next"))
+        session.observeInputTokens(500_000)
+        session.checkpoint()
+        val scale = session.snapshot()!!.tokenBaseline!!.boundedEstimateScale
         val expected = JSONArray(messages.toString())
         val saved = AgentToolOutputFolder.fold(expected, 1).savedTokens
-        val beforeFold = session.effectiveTokens()
+        assertTrue(saved > 0)
         session.prepareRequest(JSONArray())
-        assertEquals(beforeFold - saved, session.effectiveTokens())
-        session.checkpoint()
-        assertTrue(session.snapshot()!!.tokenBaseline!!.matches(session.snapshot()!!.messages, config))
-        assertTrue(session.effectiveTokens() > AgentTokenEstimator.messages(messages))
+        assertEquals(original, messages.toString())
+        session.compact() // The provider throws if pruning unnecessarily invokes a summary.
+        assertEquals(500_000 - (saved * scale).toInt(), session.effectiveTokens())
+        assertTrue(session.effectiveTokens() < 575_000 * 0.85)
+        assertEquals(expected.toString(), messages.toString())
+        assertEquals(original, journal.toString())
+        val snapshot = checkNotNull(session.snapshot())
+        assertTrue(snapshot.tokenBaseline!!.matches(snapshot.messages, config))
+        assertEquals(journal.length(), snapshot.consumedTranscriptMessages)
+        val after = messages.toString()
+        repeat(3) { session.prepareRequest(JSONArray()); session.compact() }
+        assertEquals(after, messages.toString())
         session.captureRequest()
         session.observeInputTokens(12_345)
         session.prepareRequest(JSONArray())
         assertEquals(12_345, session.effectiveTokens())
         session.checkpoint()
-        val snapshot = checkNotNull(session.snapshot())
-        val baseline = checkNotNull(snapshot.tokenBaseline)
-        assertEquals(12_345, baseline.lastContextTokens)
-        assertTrue(snapshot.messages.any { it.role == "tool" && it.content.contains("older_tool_output_folded") })
-        assertTrue(baseline.matches(snapshot.messages, config))
-        assertEquals(journalBefore, journal.toString())
-        assertEquals(journal.length(), snapshot.consumedTranscriptMessages)
+        assertEquals(12_345, session.snapshot()!!.tokenBaseline!!.lastContextTokens)
+        assertTrue(session.snapshot()!!.tokenBaseline!!.matches(session.snapshot()!!.messages, config))
+    }
+
+    @Test fun pressurePruningPersistenceFailureLeavesLivePrefixAndUsageUntouched() {
+        val messages = history(rounds = 32, output = "CODE".repeat(5_000), endTurn = false)
+        val original = messages.toString()
+        var fail = true
+        val session = AgentContextSession(config(), messages, 1, "atomic", unusedProvider(), AgentRunController(),
+            { emptySet() }, {}, { if (fail) error("storage unavailable") })
+        session.captureRequest()
+        session.observeInputTokens(500_000)
+        assertThrows(IllegalStateException::class.java) { session.compact() }
+        assertEquals(original, messages.toString())
+        assertEquals(500_000, session.effectiveTokens())
+        assertNull(session.snapshot())
+        fail = false
+        session.compact()
+        assertNotEquals(original, messages.toString())
+        assertNotNull(session.snapshot())
+    }
+
+    @Test fun cancelledPressurePruningDoesNotPersistOrRewriteAndFinalStorageFailureKeepsAnswer() {
+        val controller = AgentRunController()
+        val messages = history(rounds = 32, output = "CODE".repeat(5_000), endTurn = false)
+        val original = messages.toString()
+        val cancelled = AgentContextSession(config(), messages, 1, "cancelled", unusedProvider(), controller,
+            { emptySet() }, {}, { fail("cancelled pruning must not persist") })
+        cancelled.captureRequest()
+        cancelled.observeInputTokens(500_000)
+        controller.cancel()
+        assertThrows(Exception::class.java) { cancelled.compact() }
+        assertEquals(original, messages.toString())
+        val finalSession = AgentContextSession(config(), messages, 1, "final", unusedProvider(), AgentRunController(),
+            { emptySet() }, {}, { error("storage unavailable") })
+        finalSession.captureRequest()
+        finalSession.observeInputTokens(500_000)
+        finalSession.compact(final = true)
+        assertEquals(original, messages.toString())
+        assertNotNull(finalSession.snapshot())
+    }
+
+    private fun config(window: Int? = 575_000, enabled: Boolean = true) = AgentModelClient.ModelConfig(
+        baseUrl = "https://example.invalid", apiKey = "key", model = "fixture", systemPrompt = "",
+        contextWindow = window, autoCompactionEnabled = enabled,
+    )
+
+    private fun unusedProvider() = object : AgentProviderClient {
+        override val id = "unused"
+        override val capabilities = ProviderCapabilities(EndpointKind.CHAT_COMPLETIONS, true, true, false, false, false, true)
+        override fun complete(request: ProviderRequest, runController: AgentRunController,
+            onEvent: (ProviderEvent) -> Unit): ProviderResponse = error("No summary expected")
     }
 
     private fun history(rounds: Int = 14, output: String = "x".repeat(12_000), endTurn: Boolean = true) = JSONArray()
