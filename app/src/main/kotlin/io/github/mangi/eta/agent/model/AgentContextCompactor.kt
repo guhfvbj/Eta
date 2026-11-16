@@ -102,9 +102,11 @@ internal class AgentContextCompactor(
         if (splits.isEmpty()) throw failure("CONTEXT_NOT_COMPACTABLE", "没有可安全压缩的完整历史批次。")
         val suffixChars = LongArray(history.size + 1)
         for (index in history.indices.reversed()) suffixChars[index] = suffixChars[index + 1] + history[index].toString().length
-        // Estimate four characters/token. Prefer two complete recent exchanges even when
-        // they exceed 30%; a single huge exchange can still be compacted as a last resort.
-        val targetChars = minOf(96_000L, suffixChars[0] * 3 / 10)
+        // 源码约 0.4–0.6 token/字符；窗口 × 1.2 字符在 300K 下保留预算 360K 字符，
+        // 约 144K–216K tokens（48%–72%）。同时限制为历史的 40%，预算上限最多 480K 字符。
+        // 优先保留最近四轮完整用户交换，可暂超预算；不够缩减时仍按既有逻辑缩尾重试。
+        val windowCapChars = config.knownContextWindow?.let { (it.toLong() * 12L) / 10L } ?: 96_000L
+        val targetChars = minOf(maxOf(96_000L, windowCapChars), 480_000L, suffixChars[0] * 4 / 10)
         val budgetSplit = splits.first { suffixChars[it] <= targetChars || it == splits.last() }
         val users = history.indices.filter { history[it].optString("role") == "user" && !history[it].optBoolean("_eta_observation") }
         val closedUsers = users.filterIndexed { index, start ->
@@ -113,10 +115,10 @@ internal class AgentContextCompactor(
             val lastSplit = if (found >= 0) found else -found - 2
             lastSplit >= 0 && allSplits[lastSplit] > start
         }
-        val keepFrom = closedUsers.takeLast(2).firstOrNull()
+        val keepFrom = closedUsers.takeLast(4).firstOrNull()
         val recentSplit = keepFrom?.let { start -> allSplits.lastOrNull { it <= start } }
             ?: allSplits[(allSplits.size - 3).coerceAtLeast(0)]
-        // 最近两轮约束若只能保留到旧摘要边界，就改用预算边界，不能只重写旧摘要。
+        // 最近四轮约束若只能保留到旧摘要边界，就改用预算边界，不能只重写旧摘要。
         var splitIndex = splits.indexOf(if (recentSplit < splits.first()) budgetSplit else minOf(budgetSplit, recentSplit))
         val currentTask = history.getOrNull(latestUser)?.let {
             AgentContextSummarizer.taskText(AgentConversationCodec.transcript(JSONArray().put(it), 0, redactedIds).single())

@@ -80,8 +80,8 @@ class AgentContextRecoveryTest {
     }
 
     @Test
-    fun automaticCompactionUsesObservedBaselinePlusEstimatedDeltaAtSeventyFivePercent() {
-        for (input in listOf(null, 300_000, 674_000, 675_000)) {
+    fun automaticCompactionUsesObservedBaselinePlusEstimatedDeltaAtEightyFivePercent() {
+        for (input in listOf(null, 300_000, 764_000, 765_000)) {
             var summaries = 0
             val events = mutableListOf<AgentEvent>()
             val result = AgentModelClient.complete(config, "继续",
@@ -96,11 +96,11 @@ class AgentContextRecoveryTest {
                         response("完成")
                     }
                 })
-            assertEquals(if (input == 675_000) 1 else 0, summaries)
+            assertEquals(if (input == 765_000) 1 else 0, summaries)
             assertEquals("完成", result.content)
             val completed = events.filterIsInstance<AgentEvent.ContextCompaction>().lastOrNull()
-            if (input == 675_000) {
-                assertTrue(completed!!.tokensBefore!! >= 675_000)
+            if (input == 765_000) {
+                assertTrue(completed!!.tokensBefore!! >= 765_000)
                 assertNull(completed.tokensAfter)
             } else assertNull(completed)
         }
@@ -142,7 +142,7 @@ class AgentContextRecoveryTest {
             summaries++
             response("历史已完成。")
         }, AgentRunController(), { emptySet() }, {}, {})
-        session.observeInputTokens(675_000)
+        session.observeInputTokens(765_000)
         session.compact()
         session.compact()
         assertEquals(1, summaries)
@@ -169,7 +169,7 @@ class AgentContextRecoveryTest {
 
     @Test
     fun invalidSummaryDoesNotRetryAndKeepsOriginalHistory() {
-        for ((content, stop) in listOf("" to "stop", "半截" to "length", "长".repeat(12_001) to "stop")) {
+        for ((content, stop) in listOf("" to "stop", "半截" to "length", "长".repeat(48_001) to "stop")) {
             val messages = messages()
             val original = messages.toString()
             var requests = 0
@@ -182,6 +182,65 @@ class AgentContextRecoveryTest {
             assertEquals(1, requests)
             assertEquals(original, messages.toString())
         }
+    }
+
+    @Test
+    fun slightlyOversizedSummaryIsSafelyTruncatedAndCommitted() {
+        val source = messages()
+        val summaries = mutableListOf<AgentContextSnapshot>()
+        var requests = 0
+        val session = AgentContextSession(config, source, 1, "oversized-summary", provider { request, _ ->
+            requests++
+            assertEquals(16_384, request.outputLimit)
+            response("头" + "长".repeat(24_498) + "尾")
+        }, AgentRunController(), { emptySet() }, {}, summaries::add)
+        session.compact(force = true)
+        assertEquals(1, requests)
+        assertEquals(1, summaries.size)
+        val snapshot = checkNotNull(session.snapshot())
+        val summary = AgentContextSummarizer.stripSummaryHeader(snapshot.messages.first().content)
+        assertTrue(snapshot.messages.first().contextSummary)
+        assertTrue(summary.length <= 24_000)
+        assertTrue(summary.startsWith("头") && summary.endsWith("尾"))
+        assertTrue(summary.contains("已截断"))
+        assertEquals(snapshot.messages, AgentConversationCodec.transcript(source, 1))
+    }
+
+    @Test
+    fun singleContinueTurnFoldsTwenty60KToolResultsBeforeTheProviderRequest() {
+        val source = JSONArray().put(JSONObject().put("role", "system").put("content", "fixed"))
+            .put(AgentConversationCodec.userTextMessage("继续"))
+        // 每步四条 15K 结果，模拟绕过单条 16K 限制的并发读取，共 60K × 20 步。
+        val output = "fun step() = value + 1\n".repeat(750).take(15_000)
+        repeat(20) { index ->
+            val calls = (0 until 4).map { tool ->
+                AgentModelClient.ToolCall("read-$index-$tool", "terminal", """{"command":"sed -n '1,500p' File$tool.kt"}""")
+            }
+            source.put(AgentConversationCodec.assistantHistoryMessage(JSONObject().put("content", ""), calls))
+            calls.forEach { source.put(AgentConversationCodec.toolResultMessage(it, AgentModelClient.ToolResult(output))) }
+        }
+        val before = source.toString().length
+        val protectedStart = 2 + (20 - 8) * 5
+        val tail = (protectedStart until source.length()).map { source.getJSONObject(it).toString() }
+        var requests = 0
+        val loop = AgentLoop(config.copy(contextWindow = 300_000), source, JSONArray(), provider { request, _ ->
+            requests++
+            assertEquals(ProviderRequestPurpose.CHAT, request.purpose)
+            val after = request.messages.toString().length
+            assertTrue("original history chars=$before", before > 1_200_000)
+            assertTrue("folded request chars=$after", after in 480_000..660_000)
+            assertTrue(after < before * 0.55)
+            assertEquals(48, (0 until protectedStart).count { index ->
+                val message = request.messages.getJSONObject(index)
+                message.optString("role") == "tool" && JSONObject(message.getString("content")).optBoolean("older_tool_output_folded")
+            })
+            tail.forEachIndexed { index, original ->
+                assertEquals(original, request.messages.getJSONObject(protectedStart + index).toString())
+            }
+            response("完成")
+        }, { error("历史工具不应重放") }, AgentRunController(), AgentTraceFormatter(), {}, systemCount = 1)
+        assertEquals("完成", loop.run().content)
+        assertEquals(1, requests)
     }
 
     @Test
@@ -248,7 +307,7 @@ class AgentContextRecoveryTest {
         )
         assertEquals("完成", loop.run().content)
         assertEquals(2, requests)
-        assertTrue(loop.contextSnapshot()!!.lastContextTokens!! < 675_000)
+        assertTrue(loop.contextSnapshot()!!.lastContextTokens!! < 765_000)
     }
 
     @Test
@@ -340,7 +399,7 @@ class AgentContextRecoveryTest {
 
     @Test
     fun failedRunPersistsEstimateAndRetryCompactsBeforeRequest() {
-        val large = history().map { if (it.role == "assistant") it.copy(content = "代码".repeat(50_000)) else it }
+        val large = history().map { if (it.role == "assistant") it.copy(content = "代码".repeat(60_000)) else it }
         val bounded = config.copy(contextWindow = 128_000)
         val failure = assertThrows(AgentModelExecutionException::class.java) {
             AgentModelClient.complete(bounded.copy(autoCompactionEnabled = false), "继续", { error("no tools") },
@@ -374,7 +433,7 @@ class AgentContextRecoveryTest {
             val failure = assertThrows(AgentModelExecutionException::class.java) {
                 AgentModelClient.complete(bounded.copy(autoCompactionEnabled = false), reason,
                     { controller.cancel(); controller.throwIfCancelled(); error("cancelled") },
-                    history = history(), runController = controller, provider = provider { _, _ ->
+                    history = history(120_000), runController = controller, provider = provider { _, _ ->
                         ProviderResponse(JSONObject().put("role", "assistant").put("content", "")
                             .put("finish_reason", "tool_calls").put("tool_calls", JSONArray().put(JSONObject()
                                 .put("id", "pending").put("type", "function").put("function", JSONObject()
@@ -382,7 +441,7 @@ class AgentContextRecoveryTest {
                     })
             }
             val snapshot = AgentContextSnapshot.decode(failure.contextSnapshot!!.encode())!!
-            assertTrue(snapshot.lastContextTokens!! >= bounded.contextWindow!! * 0.75)
+            assertTrue(snapshot.lastContextTokens!! >= bounded.contextWindow!! * 0.85)
             assertEquals("pending", snapshot.messages.last().toolCallId)
             assertTrue(snapshot.messages.last().content.contains("TOOL_INTERRUPTED"))
             assertEquals(failure.transcript.size, snapshot.consumedTranscriptMessages)
@@ -404,7 +463,7 @@ class AgentContextRecoveryTest {
 
     @Test
     fun switchingToSmallerWindowInvalidatesObservedBaselineAndCompactsFirst() {
-        val original = AgentModelClient.complete(config, "原模型", { error("no tools") }, history = history(),
+        val original = AgentModelClient.complete(config, "原模型", { error("no tools") }, history = history(120_000),
             provider = provider { _, emit ->
                 emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 10))) // intentionally low old-model count
                 response("原模型已完成")
@@ -428,10 +487,12 @@ class AgentContextRecoveryTest {
     fun highContextEmptyResponseFallsBackLocallyIfEmergencySummarizationFails() {
         var chats = 0
         var summaries = 0
+        val compactionToolCounts = mutableListOf<Int>()
         val result = AgentModelClient.complete(config.copy(contextWindow = 256_000, autoCompactionEnabled = false),
             "继续", { error("no tools") }, history = history(200_000), provider = provider { request, emit ->
                 if (request.purpose == ProviderRequestPurpose.COMPACTION) {
                     summaries++
+                    compactionToolCounts += request.tools.length()
                     response("无效摘要", "length")
                 } else if (++chats == 1) {
                     emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 99_000_000)))
@@ -442,7 +503,9 @@ class AgentContextRecoveryTest {
                 }
             })
         assertEquals(2, chats)
-        assertEquals(1, summaries)
+        // CONTEXT_SUMMARY_INVALID 现在会退回隔离摘要重试一次：主模型一次 + 无工具的隔离一次。
+        assertEquals(2, summaries)
+        assertEquals(0, compactionToolCounts.last())
         assertEquals("恢复完成", result.content)
         assertTrue(result.contextSnapshot!!.lastContextTokens!! < 99_000_000)
     }

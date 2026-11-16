@@ -239,6 +239,7 @@ internal class AgentContextSession(
     }
 
     private companion object {
-        const val TRIGGER_RATIO = 0.75
+        // 300K 窗口在 255K 触发；冷却不保证不溢出，硬溢出仍走 force/emergency 恢复。
+        const val TRIGGER_RATIO = 0.85
     }
 }

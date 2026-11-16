@@ -16,23 +16,34 @@ class AgentToolOutputFolderTest {
         assertEquals(original, journal.toString())
         assertEquals(pairing, AgentConversationCodec.transcript(messages, 1).map { it.role to it.toolCallId })
         assertTrue(messages.getJSONObject(3).getString("content").length <= AgentToolOutputFolder.MAX_READ_FILE_FOLDED_CHARS)
-        for (i in 6..8) assertEquals(journal.getJSONObject(i * 2 + 1).toString(), messages.getJSONObject(i * 2 + 1).toString())
+        for (i in 7..14) assertEquals(journal.getJSONObject(i * 2 + 1).toString(), messages.getJSONObject(i * 2 + 1).toString())
         for (i in 0 until messages.length()) if (messages.getJSONObject(i).getString("role") != "tool") {
             assertSame(journal.getJSONObject(i), messages.getJSONObject(i))
         }
         assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
     }
 
-    @Test fun currentUserTurnIsNeverFoldedEvenAfterHundredsOfTools() {
-        val messages = history(rounds = 200, endTurn = false)
-        val before = messages.toString()
-        assertEquals(0, AgentToolOutputFolder.fold(messages, 1).changedMessages)
-        assertEquals(before, messages.toString())
+    @Test fun sameUserTurnFoldsEarlyResultsButPreservesLastEightExchangesAnd120KTail() {
+        // 12K 输出由字符尾部主导，20K 输出由最近八组交换主导；均按索引验证保护区。
+        for (outputChars in listOf(12_000, 20_000)) {
+            val rounds = 200
+            val messages = history(rounds = rounds, output = "x".repeat(outputChars), endTurn = false)
+            val before = (0 until messages.length()).map { messages.getJSONObject(it).toString() }
+            var tailStart = messages.length()
+            var tailChars = 0
+            while (tailStart > 1 && tailChars < 120_000) tailChars += before[--tailStart].length
+            val protectedAssistantStart = 2 + (rounds - 8) * 2
+            assertTrue(AgentToolOutputFolder.fold(messages, 1).changedMessages > 0)
+            assertTrue(JSONObject(messages.getJSONObject(3).getString("content")).getBoolean("older_tool_output_folded"))
+            for (index in minOf(tailStart, protectedAssistantStart) until messages.length()) {
+                assertEquals("protected message $index", before[index], messages.getJSONObject(index).toString())
+            }
+        }
     }
 
-    @Test fun readFileKeepsThreeThousandCharactersAndRangeMetadata() {
+    @Test fun readFileKeepsThreeToSixThousandCharactersAndRangeMetadata() {
         val content = JSONObject().put("tool", "read_file").put("path", "src/File.kt")
-            .put("start_line", 10).put("end_line", 900).put("offset", 9).put("limit", 891)
+            .put("start_line", 10).put("end_line", 900).put("offset", 9).put("limit", 891).put("total_chars", 12_000)
             .put("content", "CODE".repeat(3_000)).toString()
         val messages = history(output = content)
         val before = AgentTokenEstimator.messages(messages)
@@ -45,20 +56,21 @@ class AgentToolOutputFolderTest {
         assertEquals(900, result.getInt("end_line"))
         assertEquals(9, result.getInt("offset"))
         assertEquals(891, result.getInt("limit"))
-        assertTrue(result.getString("preview").length >= 3_000)
+        assertEquals(12_000, result.getInt("total_chars"))
+        assertTrue(result.getString("preview").length in 3_000..6_000)
         assertTrue(result.getString("preview").contains("offset/limit 分段重读"))
     }
 
-    @Test fun protectsAtLeast24KOfTailAndDoesNotFoldSmallOrStructuredContent() {
-        val short = history(output = "x".repeat(3_001))
+    @Test fun protectsAtLeast120KOfTailAndDoesNotFoldSmallOrStructuredContent() {
+        val short = history(rounds = 14, output = "x".repeat(6_001))
         assertEquals(0, AgentToolOutputFolder.fold(short, 1).changedMessages)
-        val messages = history(rounds = 12)
+        val messages = history(rounds = 16, output = "x".repeat(12_000))
         val structured = JSONArray().put(JSONObject().put("type", "text").put("text", "image/text".repeat(2_000)))
         messages.getJSONObject(3).put("content", structured)
-        messages.getJSONObject(5).put("content", "s".repeat(3_000))
+        messages.getJSONObject(5).put("content", "s".repeat(6_000))
         assertTrue(AgentToolOutputFolder.fold(messages, 1).changedMessages > 0)
         assertSame(structured, messages.getJSONObject(3).getJSONArray("content"))
-        assertEquals("s".repeat(3_000), messages.getJSONObject(5).getString("content"))
+        assertEquals("s".repeat(6_000), messages.getJSONObject(5).getString("content"))
     }
 
     @Test fun serialisedEnvelopeIsBoundedAndPreservesExactMetadataAndUnicodeHeadTail() {
@@ -107,15 +119,16 @@ class AgentToolOutputFolderTest {
                     folded[i] = message.toString()
                 }
             }
-            appendExchange(messages, 9 + turn, "z".repeat(8_000))
+            appendExchange(messages, 15 + turn, "z".repeat(12_000))
             messages.put(AgentConversationCodec.userTextMessage("next $turn"))
         }
         assertTrue(folded.size >= 8)
     }
 
     @Test fun closedBatchBoundaryProtectsAllSiblingToolResults() {
-        val messages = history(rounds = 4, output = "x".repeat(10_000))
-        val assistant = messages.getJSONObject(4)
+        val messages = history(rounds = 14, output = "x".repeat(20_000))
+        val assistantIndex = 2 + (14 - 8) * 2
+        val assistant = messages.getJSONObject(assistantIndex)
         val call = AgentModelClient.ToolCall("sibling", "read_file", "{}")
         assistant.getJSONArray("tool_calls").put(JSONObject().put("id", call.id).put("type", "function")
             .put("function", JSONObject().put("name", call.name).put("arguments", "{}")))
@@ -123,13 +136,13 @@ class AgentToolOutputFolderTest {
         val expanded = JSONArray()
         for (i in 0 until messages.length()) {
             expanded.put(messages.getJSONObject(i))
-            if (i == 5) expanded.put(sibling)
+            if (i == assistantIndex + 1) expanded.put(sibling)
         }
         val before = expanded.toString()
         AgentToolOutputFolder.fold(expanded, 1)
-        // The second assistant is in the protected three; both its results survive exactly.
-        assertEquals(messages.getJSONObject(5).toString(), expanded.getJSONObject(5).toString())
-        assertSame(sibling, expanded.getJSONObject(6))
+        // 边界落在最近八组交换之前，同一组内的兄弟结果必须一起保持原样。
+        assertEquals(messages.getJSONObject(assistantIndex + 1).toString(), expanded.getJSONObject(assistantIndex + 1).toString())
+        assertSame(sibling, expanded.getJSONObject(assistantIndex + 2))
         assertNotEquals(before, expanded.toString())
     }
 
@@ -158,7 +171,7 @@ class AgentToolOutputFolderTest {
                 1 -> GeminiEphemeralState.attachSteps(signed, JSONArray().put(JSONObject()
                     .put("type", "function_call").put("thought_signature", "exact-signature")))
                 2 -> ResponsesEphemeralState.attachOutputItems(signed, JSONArray().put(JSONObject()
-                    .put("type", "function_call").put("call_id", "call-8")))
+                    .put("type", "function_call").put("call_id", "call-14")))
             }
             val before = messages.toString()
             val signedBefore = signed.toString()
@@ -190,7 +203,7 @@ class AgentToolOutputFolderTest {
         assertEquals(90_000, session.effectiveTokens())
         session.prepareRequest(JSONArray())
         assertEquals(90_000, session.effectiveTokens())
-        for (i in 4..8) appendExchange(messages, i, "x".repeat(8_000))
+        for (i in 4..14) appendExchange(messages, i, "x".repeat(12_000))
         messages.put(AgentConversationCodec.userTextMessage("next"))
         val expected = JSONArray(messages.toString())
         val saved = AgentToolOutputFolder.fold(expected, 1).savedTokens
@@ -214,7 +227,7 @@ class AgentToolOutputFolderTest {
         assertEquals(journal.length(), snapshot.consumedTranscriptMessages)
     }
 
-    private fun history(rounds: Int = 8, output: String = "x".repeat(8_000), endTurn: Boolean = true) = JSONArray()
+    private fun history(rounds: Int = 14, output: String = "x".repeat(12_000), endTurn: Boolean = true) = JSONArray()
         .put(JSONObject().put("role", "system").put("content", "fixed"))
         .put(AgentConversationCodec.userTextMessage("one task")).also { messages ->
             for (i in 1..rounds) appendExchange(messages, i, output)

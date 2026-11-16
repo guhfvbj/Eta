@@ -3,18 +3,21 @@ package io.github.mangi.eta.agent.model
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 仅折叠已结束用户轮次的旧结果；保留最近三次交换和 24K 尾部，不改 transcript 或签名链。 */
+/**
+ * 折叠旧工具结果，保留最近 8 组 assistant 交换与最近 120K 字符尾部，不改 transcript 或签名链。
+ * 同一用户轮次内的早期结果也会折叠，只有最近保护区不受影响。
+ */
 internal object AgentToolOutputFolder {
-    const val LARGE_OUTPUT_CHARS = 3_000
-    const val MAX_FOLDED_CHARS = 1_500
-    const val MAX_READ_FILE_FOLDED_CHARS = 4_000
-    private const val PROTECTED_TAIL_CHARS = 24_000
-    private const val PROTECTED_ASSISTANTS = 3
+    const val LARGE_OUTPUT_CHARS = 6_000
+    const val MAX_FOLDED_CHARS = 3_000
+    const val MAX_READ_FILE_FOLDED_CHARS = 6_000
+    private const val PROTECTED_TAIL_CHARS = 120_000
+    private const val PROTECTED_ASSISTANTS = 8
     private val envelopeKeys = listOf("ok", "tool", "path", "code", "next_offset_bytes", "revision",
         "document_id", "subagent_id", "environment", "identity", "offset_bytes", "next_offset_chars",
         "next_cursor", "complete", "partial", "truncated", "stop_reason", "next_offset", "has_more", "session_id",
         "offset", "limit", "start_line", "end_line", "line_count", "total_lines", "offset_chars", "limit_chars",
-        "next_line", "start_line_reached", "line_truncated", "size_bytes", "bytes_read")
+        "next_line", "start_line_reached", "line_truncated", "size_bytes", "bytes_read", "total_chars")
 
     data class FoldResult(val changedMessages: Int = 0, val savedTokens: Int = 0)
 
@@ -43,10 +46,9 @@ internal object AgentToolOutputFolder {
             tailStart--
             tailChars += messages.getJSONObject(tailStart).toString().length
         }
-        val latestUser = (systemCount until messages.length()).lastOrNull {
-            messages.getJSONObject(it).optString("role") == "user" && !messages.getJSONObject(it).optBoolean("_eta_observation")
-        } ?: systemCount
-        val bound = minOf(tailStart, assistants[assistants.size - PROTECTED_ASSISTANTS], latestUser)
+        // 同轮也可折叠：SignedToolContext.hasPendingResponse 前置拦截签名链，open 检查
+        // 拒绝未闭合交换，splits 只取完整交换边界，因此不会拆开调用与兄弟工具结果。
+        val bound = minOf(tailStart, assistants[assistants.size - PROTECTED_ASSISTANTS])
         val end = splits.lastOrNull { it <= bound } ?: return FoldResult()
         var changed = 0
         var savedTokens = 0L
@@ -85,7 +87,7 @@ internal object AgentToolOutputFolder {
         // JSON escaping can expand quotes/control characters. Fit the serialized result,
         // not just the preview; the binary search is deterministic for identical input.
         var low = 0
-        var high = if (readFile) 3_000 else 1_200
+        var high = if (readFile) 5_000 else 2_500
         while (low < high) {
             val size = (low + high + 1) / 2
             envelope.put("preview", preview(content, size, readFile))
@@ -101,7 +103,7 @@ internal object AgentToolOutputFolder {
         if (tail > 0 && text[text.length - tail].isLowSurrogate()) tail--
         val hint = if (readFile) {
             "已折叠旧文件输出，需要细节时用 offset/limit 分段重读该文件（read_file 使用 offset_bytes/max_lines/max_bytes，续读带 expected_revision）"
-        } else "已折叠旧轮次输出，需要细节时按范围查询"
+        } else "已折叠旧工具输出，需要细节时按范围查询"
         return text.take(head) + "\n[... $hint；省略 ${text.length - head - tail} 字符 ...]\n" + text.takeLast(tail)
     }
 }

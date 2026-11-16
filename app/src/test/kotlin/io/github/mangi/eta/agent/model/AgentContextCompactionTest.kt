@@ -310,8 +310,8 @@ class AgentContextCompactionTest {
             response("之前的工作已完成。")
         }, AgentRunController()).compact(jsonHistory(), 1, emptySet())
         assertEquals(1, requests)
-        for (turn in 1..4) assertTrue(seen.any { it.contains("问题 $turn") })
-        for (turn in 5..6) {
+        for (turn in 1..2) assertTrue(seen.any { it.contains("问题 $turn") })
+        for (turn in 3..6) {
             assertFalse(seen.any { it.contains("问题 $turn") })
             assertTrue(result.toString().contains("问题 $turn"))
         }
@@ -337,7 +337,7 @@ class AgentContextCompactionTest {
     }
 
     @Test
-    fun compactionPreservesTwoRecentClosedFileExchangesAndCountsOnlyPrefixUsers() {
+    fun compactionPreservesFourRecentClosedFileExchangesAndCountsOnlyPrefixUsers() {
         val source = (1..6).flatMap { turn -> listOf(
             AgentModelClient.ConversationMessage("user", "inspect $turn"),
             AgentModelClient.ConversationMessage("assistant", toolCallsJson = """[{"id":"read-$turn","type":"function","function":{"name":"read_file","arguments":"{}"}}]"""),
@@ -352,12 +352,31 @@ class AgentContextCompactionTest {
         val history = AgentConversationCodec.transcript(result, 1)
         val summary = history.first()
         assertTrue(summary.contextSummary)
-        assertTrue(summary.compactedUserTurns in 1..4)
+        assertEquals(2, summary.compactedUserTurns)
         assertEquals(summary.compactedUserTurns, summary.summaryThroughUserTurn)
         assertEquals(6, history.sumOf { it.compactedUserTurns + if (it.role == "user") 1 else 0 })
-        for (turn in 5..6) assertTrue(history.contains(source.first { it.toolCallId == "read-$turn" }))
+        for (turn in 3..6) assertTrue(history.contains(source.first { it.toolCallId == "read-$turn" }))
         assertTrue(AgentContextCompactor.canSplit((1 until result.length()).map(result::getJSONObject), result.length() - 1))
         assertTrue(result.toString().length < messages.toString().length)
+    }
+
+    @Test
+    fun singleTurnTailBudgetScalesWithWindowAndStopsAt480KCharacters() {
+        val messages = JSONArray().put(AgentConversationCodec.userTextMessage("继续"))
+        repeat(30) { index ->
+            val call = AgentModelClient.ToolCall("read-$index", "read_file", """{"path":"File.kt"}""")
+            messages.put(AgentConversationCodec.assistantHistoryMessage(JSONObject().put("content", ""), listOf(call)))
+            messages.put(AgentConversationCodec.toolResultMessage(call, AgentModelClient.ToolResult("x".repeat(50_000))))
+        }
+        for ((window, retainedTools) in listOf(300_000 to 7, 600_000 to 9)) {
+            val result = AgentContextCompactor(config.copy(contextWindow = window), provider { _, _ -> response("已完整读取 File.kt，结论待验证。") },
+                AgentRunController()).compact(messages, 0, emptySet())
+            val tail = AgentConversationCodec.transcript(result, 0).filter { it.role == "tool" }
+            assertEquals(retainedTools, tail.size)
+            assertTrue(tail.all { it.content == "x".repeat(50_000) })
+            assertEquals("read-${30 - retainedTools}", tail.first().toolCallId)
+            assertTrue(result.toString().length <= messages.toString().length * 0.85)
+        }
     }
 
     @Test
@@ -410,7 +429,7 @@ class AgentContextCompactionTest {
     fun summaryMcpMetadataComesOnlyFromCompactedPrefix() {
         val groups = listOf(McpDeferredGroup("mcp:old", "old", setOf("mcp_old"), "Old"),
             McpDeferredGroup("mcp:tail", "tail", setOf("mcp_tail"), "Tail"))
-        val source = (1..3).flatMap { turn -> listOf(
+        val source = (1..5).flatMap { turn -> listOf(
             AgentModelClient.ConversationMessage("user", "task $turn"),
             AgentModelClient.ConversationMessage("assistant", toolCallsJson = """[{"id":"call-$turn","function":{"name":"${if (turn == 1) "mcp_old" else "mcp_tail"}","arguments":"{}"}}]"""),
             AgentModelClient.ConversationMessage("tool", "result", toolCallId = "call-$turn"),
@@ -434,6 +453,11 @@ class AgentContextCompactionTest {
             AgentModelClient.ConversationMessage("tool", output, toolCallId = "read"),
         )
         val summarizer = AgentContextSummarizer(config, provider { request, _ ->
+            val instructions = request.messages.getJSONObject(0).getString("content")
+            listOf("方法签名", "已验证的调用关系", "已确认事实 / 尚未验证假设 / 已排除方案",
+                "本段历史中已完整读过的文件及其结论", "用户硬约束与禁止项的原文要点", "敏感工具").forEach {
+                assertTrue(instructions.contains(it))
+            }
             val text = request.messages.getJSONObject(1).getString("content")
             assertTrue(text.contains("[assistant]\nline one\nline two \"quoted\""))
             assertTrue(text.contains("[tool_call read_file id=read]\n{\"path\":\"file.kt\"}"))
@@ -513,7 +537,7 @@ class AgentContextCompactionTest {
         ))
         assertTrue(fallback.contains("goal"))
         assertFalse(fallback.contains("PRIVATE_"))
-        assertTrue(fallback.length <= 12_000)
+        assertTrue(fallback.length <= 24_000)
         val original = jsonHistory()
         val before = original.toString()
         val result = AgentContextCompactor(config, provider { _, _ -> error("fallback must not call the model") }, AgentRunController())
@@ -526,13 +550,14 @@ class AgentContextCompactionTest {
     fun singleUserToolHeavyHistoryNeverCompactsOnlyItsOldSummaryAndHeadersStayUnique() {
         val header = AgentContextSummarizer.SUMMARY_HEADER
         var requests = 0
+        val summaryInputs = mutableListOf<String>()
         val compactor = AgentContextCompactor(config, provider { request, _ ->
             requests++
             val input = request.messages.getJSONObject(1).getString("content")
+            summaryInputs += input
             assertFalse(input.contains("[Eta 上下文摘要"))
             assertTrue(input.contains("当前任务"))
             assertTrue(input.contains("现在直接修改 Kotlin，不要再等待确认"))
-            assertTrue(input.substringAfter("待整理的历史：").contains("read_file"))
             response("$header\n$header\n已经读取文件，下一步按当前指令修改。")
         }, AgentRunController())
         val original = JSONArray().put(AgentConversationCodec.toJsonObject(AgentModelClient.ConversationMessage(
@@ -562,6 +587,9 @@ class AgentContextCompactionTest {
             assertNotEquals(previous.toString(), result.toString())
             previous = result
         }
+        // 分片预算放大后，单个分片可能从工具结果处开始，不含 assistant 的 tool_calls；
+        // 因此断言“整体覆盖了工具历史”，而不是要求每个分片都出现 read_file。
+        assertTrue(summaryInputs.any { it.substringAfter("待整理的历史：").contains("read_file") })
         assertTrue(requests >= 2)
     }
 
@@ -580,7 +608,7 @@ class AgentContextCompactionTest {
         // 摘要模型预算需容纳 899 字；用正常窗口生成，再以真实 usage 触发自动压缩。
         val automatic = AgentContextSession(config, messages, 0, "cooldown", noProgressProvider,
             AgentRunController(), { emptySet() }, {}, {})
-        automatic.observeInputTokens(100_000)
+        automatic.observeInputTokens(110_000)
         automatic.compact()
         val saved = AgentContextSnapshot.decode(automatic.snapshot()!!.encode())!!
         assertTrue(saved.tokenBaseline!!.compactionNoProgressCount > 0)
@@ -694,7 +722,7 @@ class AgentContextCompactionTest {
                 )
                 response("已归档此前历史与工具结果。\n关键实体与线索：get_current_context")
             } else if (round++ == 0) {
-                emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 100_000, cachedTokens = 90_000)))
+                emit(ProviderEvent.Usage(AgentTokenUsage(inputTokens = 110_000, cachedTokens = 90_000)))
                 ProviderResponse(
                     JSONObject()
                         .put("role", "assistant")
@@ -887,6 +915,26 @@ class AgentContextCompactionTest {
             enableCacheReuse = true,
         ).compactWithOutcome(jsonHistory(), 1, emptySet())
         assertEquals(2, requests)
+    }
+
+    @Test
+    fun invalidCacheSummaryFallsBackToBoundedIsolatedSummary() {
+        for (invalid in listOf("", "null", "长".repeat(48_001))) {
+            var requests = 0
+            AgentContextCompactor(config, provider { request, _ ->
+                if (requests++ == 0) {
+                    assertTrue(request.tools.length() > 0)
+                    response(invalid)
+                } else {
+                    assertEquals(0, request.tools.length())
+                    assertEquals(16_384, request.outputLimit)
+                    response("保留已核实的事实。")
+                }
+            }, AgentRunController(), mainTools = AgentToolCatalog.build(terminalTools = false, browserTools = false),
+                enableCacheReuse = true,
+            ).compactWithOutcome(jsonHistory(), 1, emptySet())
+            assertEquals(2, requests)
+        }
     }
 
     private fun history() = (1..6).flatMap { turn -> listOf(
