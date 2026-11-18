@@ -15,9 +15,24 @@ internal class BackgroundTerminalJobs(
     private val logger: AgentLogger,
     private val acquireLease: (() -> Unit) -> Boolean = { true },
     private val releaseLease: () -> Unit = {},
-    private val onCompleted: (DetachedTask) -> Unit = {},
+    private val onCompleted: (DetachedTask, String?) -> Unit = { _, _ -> },
     private val completionNotificationsEnabled: () -> Boolean = { true },
 ) : AutoCloseable {
+    constructor(
+        supervisor: DetachedTaskSupervisor,
+        logger: AgentLogger,
+        acquireLease: (() -> Unit) -> Boolean = { true },
+        releaseLease: () -> Unit = {},
+        onCompleted: (DetachedTask) -> Unit,
+        completionNotificationsEnabled: () -> Boolean = { true },
+    ) : this(
+        supervisor = supervisor,
+        logger = logger,
+        acquireLease = acquireLease,
+        releaseLease = releaseLease,
+        onCompleted = { task, _ -> onCompleted(task) },
+        completionNotificationsEnabled = completionNotificationsEnabled,
+    )
     private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "eta-background-commands").apply { isDaemon = true }
     }
@@ -187,8 +202,13 @@ internal class BackgroundTerminalJobs(
                 if (task.consumedAt != null || task.deliveryAttemptedAt != null || task.completionNotified ||
                     task.delivery == JobDelivery.INLINE) return@forEach
                 try {
-                    val handled = runCatching { completionSink?.onJobCompleted(task) == true }.getOrDefault(false)
-                    if (handled) supervisor.markDeliveryAttempted(task.id) else onCompleted(task)
+                    val outcome = runCatching {
+                        completionSink?.onJobCompletedWithReason(task) ?: JobCompletionOutcome.Fallback()
+                    }.getOrElse { JobCompletionOutcome.Fallback("唤醒执行异常，本次仅通知") }
+                    when (outcome) {
+                        JobCompletionOutcome.Handled -> supervisor.markDeliveryAttempted(task.id)
+                        is JobCompletionOutcome.Fallback -> onCompleted(task, outcome.reason)
+                    }
                     supervisor.markCompletionNotified(task.id)
                 } catch (failure: Exception) {
                     logger.warn("后台命令完成派发失败：type=${failure.javaClass.simpleName}")

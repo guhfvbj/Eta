@@ -13,7 +13,7 @@ internal object BackgroundCommandNotification {
     private const val CHANNEL = "eta_background_commands"
     private const val NOTIFICATION_ID = 1124
 
-    fun show(context: Context, task: DetachedTask) {
+    fun show(context: Context, task: DetachedTask, note: String? = null) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "后台命令结果", NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(context, 0,
@@ -24,12 +24,15 @@ internal object BackgroundCommandNotification {
             "timed_out" -> "后台命令已超时"
             "stopped" -> "后台命令已停止"
             "interrupted" -> "后台命令已中断"
+            "root_unavailable" -> "后台命令已结束（Root 不可用）"
             else -> "后台命令执行失败"
         }
+        val baseText = task.description.ifBlank { "在终端的后台任务中查看状态和日志" }
+        val text = note?.trim()?.takeIf { it.isNotEmpty() }?.let { "$baseText · $it" } ?: baseText
         val notification = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
-            .setContentText(task.description.ifBlank { "在终端的后台任务中查看状态和日志" })
+            .setContentText(text)
             .setSubText(task.exitCode?.let { "退出码 $it" })
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentIntent(open)

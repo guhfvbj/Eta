@@ -177,7 +177,7 @@ private fun DaemonTaskRow(
 @Composable
 private fun daemonStatusColor(task: DaemonTaskUi) = when {
     task.running -> StatusSuccess
-    task.status == "failed" || task.status == "timed_out" -> MiuixTheme.colorScheme.error
+    task.status == "failed" || task.status == "timed_out" || task.status == "root_unavailable" -> MiuixTheme.colorScheme.error
     else -> MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.5f)
 }
 
@@ -190,6 +190,7 @@ private fun daemonMeta(task: DaemonTaskUi): String {
         "timed_out" -> "已超时"
         "stopped" -> "已停止"
         "interrupted" -> "已中断"
+        "root_unavailable" -> "Root 不可用"
         else -> stringResource(if (task.running) R.string.terminal_daemon_running else R.string.terminal_daemon_exited)
     }
     return "$environmentLabel · ${task.identity} · $stateLabel"

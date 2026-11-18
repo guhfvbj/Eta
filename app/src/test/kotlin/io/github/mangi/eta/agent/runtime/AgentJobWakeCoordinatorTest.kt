@@ -98,6 +98,27 @@ class AgentJobWakeCoordinatorTest {
         assertEquals(listOf("exists", "inject", "budget"), f.calls)
     }
 
+    @Test fun exhaustedBudgetReportsItsFallbackReasonOnce() {
+        val f = Fixture().apply { budgetAvailable = false }
+        val first = f.coordinator.onJobCompletedWithReason(task())
+        assertTrue(first is io.github.mangi.eta.agent.terminal.JobCompletionOutcome.Fallback)
+        assertEquals("已连续唤醒 3 次，本次仅通知",
+            (first as io.github.mangi.eta.agent.terminal.JobCompletionOutcome.Fallback).reason)
+        val second = f.coordinator.onJobCompletedWithReason(task())
+        assertEquals(first, second)
+        assertEquals(1, f.budgets)
+        assertEquals(0, f.loads)
+        assertEquals(0, f.wakes)
+    }
+
+    @Test fun wakeRejectionIsReportedAsFallbackReason() {
+        val f = Fixture().apply { wakeAccepted = false }
+        val outcome = f.coordinator.onJobCompletedWithReason(task())
+        assertTrue(outcome is io.github.mangi.eta.agent.terminal.JobCompletionOutcome.Fallback)
+        assertEquals("后台唤醒异常，本次仅通知",
+            (outcome as io.github.mangi.eta.agent.terminal.JobCompletionOutcome.Fallback).reason)
+    }
+
     @Test fun missingBaseConsumesBudgetOnlyOnce() {
         val f = Fixture().apply { hasBase = false }
         repeat(2) { assertFalse(f.coordinator.onJobCompleted(task())) }

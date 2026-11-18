@@ -183,8 +183,12 @@ internal class DetachedTaskSupervisor(
         if (tasks.isEmpty()) return emptyList()
         // 不同身份分组巡检：/proc/<pid>/environ 只有进程属主与 root 可读，用任务自身身份探测最稳。
         val aliveById = mutableMapOf<String, Boolean>()
+        val rootMissingById = mutableSetOf<String>()
         tasks.filter { it.completedAt == null && COMMAND_PROCESSES[it.id] == null }.groupBy { it.identity }.forEach { (identity, group) ->
-            if (identity == "root" && !rootAvailable()) return@forEach
+            if (identity == "root" && !rootAvailable()) {
+                group.filter { it.commandTask }.forEach { rootMissingById += it.id }
+                return@forEach
+            }
             val probeScript = aliveCheckFunction() + "\n" + group.joinToString("\n") { task ->
                 "if eta_alive ${task.pid} ${shellQuote(ownerProof(task))}; " +
                     "then echo '${task.id} 1'; else echo '${task.id} 0'; fi"
@@ -209,6 +213,9 @@ internal class DetachedTaskSupervisor(
         // 探测失败的任务保守视为仍在运行，不误报死亡；确认死亡的才允许被 prune 清掉。
         val statuses = tasks.map { task ->
             if (task.completedAt != null) return@map DetachedTaskStatus(task, false)
+            if (task.id in rootMissingById) {
+                return@map DetachedTaskStatus(completeCommand(task.id, null, "root_unavailable") ?: task, false)
+            }
             val local = COMMAND_PROCESSES[task.id]
             // 本进程 waiter 负责排空输出和提交完成；不抢先把尚未完成落盘的记录标为退出。
             var running = if (local != null) true else aliveById[task.id] ?: true

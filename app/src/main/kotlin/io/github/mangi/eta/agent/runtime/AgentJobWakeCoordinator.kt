@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.runtime
 
 import android.content.Context
 import io.github.mangi.eta.agent.terminal.DetachedTask
+import io.github.mangi.eta.agent.terminal.JobCompletionOutcome
 import io.github.mangi.eta.agent.terminal.JobCompletionSink
 import io.github.mangi.eta.agent.terminal.JobDelivery
 import io.github.mangi.eta.data.db.EtaDatabase
@@ -33,36 +34,61 @@ internal class AgentJobWakeCoordinator(
     private val injectIntoActiveRun = injectIntoActiveRun ?: { id: String, text: String ->
         AgentRuntimeService.deliverToActiveRun(id, text, currentJobId)
     }
-    private val wake = wake ?: { base: AgentContinuationBaseStore.Base, text: String ->
-        AgentRuntimeService.wakeForJobCompletion(requireNotNull(context), base, text, currentJobId)
-    }
+    private val wake = wake
+    private val wakeDetailed: (AgentContinuationBaseStore.Base, String) -> AgentRuntimeService.WakeResult =
+        if (wake != null) {
+            { base, text ->
+                if (wake.invoke(base, text)) AgentRuntimeService.WakeResult.Accepted
+                else AgentRuntimeService.WakeResult.Rejected(AgentRuntimeService.WakeRejectReason.INTERNAL_ERROR)
+            }
+        } else {
+            { base, text ->
+                AgentRuntimeService.wakeForJobCompletionDetailed(requireNotNull(context), base, text, currentJobId)
+            }
+        }
     // 宿主落盘前的同一快照也可能重入；成功结果返回 true，避免重复降级通知。
-    private val settlements = linkedMapOf<String, Boolean>()
+    private val settlements = linkedMapOf<String, JobCompletionOutcome>()
 
     @Synchronized
-    override fun onJobCompleted(task: DetachedTask): Boolean = runCatching {
+    override fun onJobCompleted(task: DetachedTask): Boolean =
+        onJobCompletedWithReason(task) == JobCompletionOutcome.Handled
+
+    @Synchronized
+    override fun onJobCompletedWithReason(task: DetachedTask): JobCompletionOutcome = runCatching {
         val conversationId = task.conversationId
-        if (task.originRunId == null || conversationId == null) return false
-        if (task.delivery == JobDelivery.INLINE) return false
-        if (task.consumedAt != null || task.deliveryAttemptedAt != null) return false
+        if (task.originRunId == null || conversationId == null) return JobCompletionOutcome.Fallback()
+        if (task.delivery == JobDelivery.INLINE) return JobCompletionOutcome.Fallback()
+        if (task.consumedAt != null || task.deliveryAttemptedAt != null) return JobCompletionOutcome.Fallback()
         if (!conversationExists(conversationId)) {
             removeBase(conversationId)
-            return false
+            return JobCompletionOutcome.Fallback("原会话已删除，本次仅通知")
         }
-        if (task.delivery == JobDelivery.QUIET) return false
+        if (task.delivery == JobDelivery.QUIET) return JobCompletionOutcome.Fallback()
         settlements[task.id]?.let { return it }
         // 先登记尝试；即使外部副作用抛错，也不重复执行同一任务。
-        settlements[task.id] = false
+        settlements[task.id] = JobCompletionOutcome.Fallback()
         currentJobId = task.id
         val text = notice(task)
-        val handled = when {
-            injectIntoActiveRun(conversationId, text) -> true
-            !wakeBudget.tryConsume(conversationId) -> false
-            else -> loadBase(conversationId)?.let { wake(it, text) } ?: false
+        val outcome: JobCompletionOutcome = when {
+            injectIntoActiveRun(conversationId, text) -> JobCompletionOutcome.Handled
+            !wakeBudget.tryConsume(conversationId) ->
+                JobCompletionOutcome.Fallback("已连续唤醒 $MAX_CONSECUTIVE_JOB_WAKES 次，本次仅通知")
+            else -> {
+                val base = loadBase(conversationId)
+                if (base == null) {
+                    JobCompletionOutcome.Fallback("会话基座不可用，本次仅通知")
+                } else {
+                    when (val wakeResult = wakeDetailed(base, text)) {
+                        AgentRuntimeService.WakeResult.Accepted -> JobCompletionOutcome.Handled
+                        is AgentRuntimeService.WakeResult.Rejected ->
+                            JobCompletionOutcome.Fallback(wakeResult.reason.userMessage)
+                    }
+                }
+            }
         }
-        settlements[task.id] = handled
-        handled
-    }.getOrDefault(false)
+        settlements[task.id] = outcome
+        outcome
+    }.getOrElse { JobCompletionOutcome.Fallback("唤醒判定异常，本次仅通知") }
 
     private class PersistentWakeBudget(private val context: Context?) : WakeBudget {
         override fun tryConsume(conversationId: String): Boolean = synchronized(BUDGET_LOCK) {

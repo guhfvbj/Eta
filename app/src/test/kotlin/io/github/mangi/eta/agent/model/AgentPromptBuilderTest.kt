@@ -62,6 +62,7 @@ class AgentPromptBuilderTest {
         assertTrue(terminal.contains("同一个物理文件夹"))
         assertTrue(terminal.contains("禁止在两个环境之间重复复制"))
         assertTrue(terminal.contains("web_search、fetch_url"))
+        assertTrue(terminal.contains("唤醒若被系统限制会以通知告知"))
         assertFalse(terminal.contains("async=true"))
         assertFalse(terminal.contains("read_async_result"))
     }

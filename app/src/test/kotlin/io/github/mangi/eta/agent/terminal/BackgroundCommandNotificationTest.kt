@@ -29,4 +29,15 @@ class BackgroundCommandNotificationTest {
         assertEquals(Notification.VISIBILITY_PRIVATE, notification.visibility)
         assertEquals(MainActivity.ACTION_OPEN_TERMINAL, shadowOf(notification.contentIntent).savedIntent.action)
     }
+
+    @Test fun notificationIncludesWakeFallbackNoteAndRootUnavailableTitle() {
+        val context = RuntimeEnvironment.getApplication()
+        val task = DetachedTask("notification-job-root", 42, "token", "echo secret", "/private", "root",
+            TerminalEnvironment.ANDROID, "/private/log", 1, commandTask = true, description = "Root 任务",
+            completedAt = 2, endReason = "root_unavailable")
+        BackgroundCommandNotification.show(context, task, "已连续唤醒 3 次，本次仅通知")
+        val notification = context.getSystemService(NotificationManager::class.java).activeNotifications.single().notification
+        assertEquals("后台命令已结束（Root 不可用）", notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals("Root 任务 · 已连续唤醒 3 次，本次仅通知", notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+    }
 }

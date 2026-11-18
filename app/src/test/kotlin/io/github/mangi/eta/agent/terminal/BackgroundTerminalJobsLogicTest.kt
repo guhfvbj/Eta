@@ -145,6 +145,46 @@ class BackgroundTerminalJobsLogicTest {
         } finally { launcher.complete(); controller.closeAll(); worker.shutdownNow() }
     }
 
+    @Test fun rootCommandCompletesWithRootUnavailableWhenRootIsLost() {
+        val file = File(temporary.root, "tasks.json")
+        val runningRootTask = DetachedTask(
+            id = "job_root_lost",
+            pid = 4242,
+            token = "token",
+            command = "sleep 30",
+            cwd = temporary.root.path,
+            identity = "root",
+            environment = TerminalEnvironment.ANDROID,
+            logPath = File(temporary.root, "job_root_lost.log").path,
+            startedAt = 1L,
+            commandTask = true,
+            conversationId = "conversation",
+            originRunId = "origin-run",
+            delivery = JobDelivery.WAKEUP,
+        )
+        file.writeText(org.json.JSONArray().put(runningRootTask.toRecordJson()).toString())
+        val supervisor = DetachedTaskSupervisor(
+            NoopLogger, file, daemonDir = temporary.root.path, rootAvailable = { false },
+        )
+        val reasons = mutableListOf<String?>()
+        val jobs = BackgroundTerminalJobs(
+            supervisor,
+            NoopLogger,
+            onCompleted = { _, note -> reasons += note; notifications.incrementAndGet() },
+        ).also { hosts += it }
+        jobs.completionSink = object : JobCompletionSink {
+            override fun onJobCompleted(task: DetachedTask) = false
+            override fun onJobCompletedWithReason(task: DetachedTask) =
+                JobCompletionOutcome.Fallback("已连续唤醒 3 次，本次仅通知")
+        }
+        val listed = JSONObject(jobs.list(false)).getJSONArray("tasks").getJSONObject(0)
+        assertEquals("root_unavailable", listed.getString("status"))
+        assertFalse(listed.getBoolean("running"))
+        assertEquals("root_unavailable", supervisor.findTask("job_root_lost")!!.endReason)
+        assertEquals(1, notifications.get())
+        assertEquals(listOf("已连续唤醒 3 次，本次仅通知"), reasons)
+    }
+
     @After fun closeHosts() { hosts.forEach { it.close() } }
 
     private object NoopLogger : AgentLogger {

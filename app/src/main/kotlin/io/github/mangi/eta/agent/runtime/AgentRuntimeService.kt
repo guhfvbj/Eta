@@ -1554,6 +1554,20 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     internal data class RunPublication(val conversationId: String?, val runId: String, val started: Boolean)
 
+    internal enum class WakeRejectReason(val userMessage: String) {
+        EXECUTION_SERVICE_REJECTED("系统限制后台启动，本次仅通知"),
+        POLICY_DISABLED("会话配置或工具权限不允许继续，本次仅通知"),
+        STALE_BASE("会话已变更或基座已过期，本次仅通知"),
+        DELIVERY_TIMEOUT("服务启动超时，本次仅通知"),
+        RUNTIME_BUSY("会话忙或运行队列已满，本次仅通知"),
+        INTERNAL_ERROR("后台唤醒异常，本次仅通知"),
+    }
+
+    internal sealed interface WakeResult {
+        data object Accepted : WakeResult
+        data class Rejected(val reason: WakeRejectReason) : WakeResult
+    }
+
     companion object {
         @Volatile
         private var activeInstance: AgentRuntimeService? = null
@@ -1576,24 +1590,49 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             activeInstance?.deliverJobNotice(conversationId, notice, jobId) ?: false
 
         /** FGS 租约先接力，再通过普通 startRun 路径执行；不主动显示浮层。 */
-        fun wakeForJobCompletion(context: Context, base: AgentContinuationBaseStore.Base, notice: String, jobId: String): Boolean {
+        fun wakeForJobCompletion(context: Context, base: AgentContinuationBaseStore.Base, notice: String, jobId: String): Boolean =
+            wakeForJobCompletionDetailed(context, base, notice, jobId) == WakeResult.Accepted
+
+        internal fun wakeForJobCompletionDetailed(
+            context: Context,
+            base: AgentContinuationBaseStore.Base,
+            notice: String,
+            jobId: String,
+        ): WakeResult {
             val newRunId = "run-${UUID.randomUUID()}"
             var request = AgentContinuationBuilder.buildJobNotice(base, notice, jobId, newRunId)
             val stopped = AtomicBoolean(false)
             if (!AgentExecutionService.acquire(context, "run:$newRunId", allowBoundFallback = true) {
                     stopped.set(true)
                     Handler(Looper.getMainLooper()).post { activeInstance?.cancelRun(newRunId) }
-                }) return false
+                }) return WakeResult.Rejected(WakeRejectReason.EXECUTION_SERVICE_REJECTED)
             var handedOver = false
             try {
+                var rejectReason: WakeRejectReason? = null
                 val resolved = runBlocking(Dispatchers.IO) {
-                    val (conversation, history) = jobWakeHistory(context, base.conversationId) ?: return@runBlocking null
+                    val (conversation, history) = jobWakeHistory(context, base.conversationId) ?: run {
+                        rejectReason = WakeRejectReason.STALE_BASE
+                        return@runBlocking null
+                    }
                     val current = ConversationRuntimeConfigResolver.resolve(conversation,
-                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true) ?: return@runBlocking null
+                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true) ?: run {
+                        rejectReason = WakeRejectReason.POLICY_DISABLED
+                        return@runBlocking null
+                    }
                     // 终端撤权或模型明确无工具时，无法读取 terminal_job 接手任务，直接降级通知。
-                    current.takeIf { AgentJobWakePolicy.canWake(base, it, history) }
-                } ?: return false
-                if ("terminal_job" in Prefs.disabledTools()) return false
+                    when {
+                        !current.canWakeForTerminalJob -> {
+                            rejectReason = WakeRejectReason.POLICY_DISABLED
+                            null
+                        }
+                        !AgentJobWakePolicy.isFresh(base, history) -> {
+                            rejectReason = WakeRejectReason.STALE_BASE
+                            null
+                        }
+                        else -> current
+                    }
+                } ?: return WakeResult.Rejected(rejectReason ?: WakeRejectReason.POLICY_DISABLED)
+                if ("terminal_job" in Prefs.disabledTools()) return WakeResult.Rejected(WakeRejectReason.POLICY_DISABLED)
                 request = AgentContinuationBuilder.buildJobNotice(base,
                     AgentJobWakePolicy.notice(base, resolved, notice), jobId, newRunId).copy(config = resolved.config)
                 pendingJobWakes += newRunId
@@ -1605,44 +1644,91 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 val completed = CountDownLatch(1)
                 val accepted = AtomicBoolean(false)
                 val abandoned = AtomicBoolean(false)
+                val deliveryRejectReason = java.util.concurrent.atomic.AtomicReference(WakeRejectReason.RUNTIME_BUSY)
                 val attempt = object : Runnable {
                     override fun run() {
-                        if (abandoned.get() || stopped.get()) { completed.countDown(); return }
+                        if (abandoned.get() || stopped.get()) {
+                            deliveryRejectReason.set(WakeRejectReason.EXECUTION_SERVICE_REJECTED)
+                            completed.countDown()
+                            return
+                        }
                         val instance = activeInstance?.takeUnless { it.destroyed }
                         if (instance == null) {
                             if (android.os.SystemClock.uptimeMillis() < deadline) main.postDelayed(this, 25)
-                            else completed.countDown()
+                            else {
+                                deliveryRejectReason.set(WakeRejectReason.DELIVERY_TIMEOUT)
+                                completed.countDown()
+                            }
                             return
                         }
                         runCatching {
                             if (!abandoned.get() && !stopped.get()) {
                                 // UI 发送先删除旧基座，再做 write-ahead 持久化；投递前再次检查，
                                 // 覆盖配置解析与 Main 接纳之间的并发窗口。只改标题/置顶不影响历史戳。
+                                var windowReject: WakeRejectReason? = null
                                 val latestResolved = runBlocking(Dispatchers.IO) {
                                     val stored = AgentContinuationBaseStore.default(context).load(base.conversationId)
-                                    if (stored?.runId != base.runId || "terminal_job" in Prefs.disabledTools()) return@runBlocking null
-                                    val latest = jobWakeHistory(context, base.conversationId) ?: return@runBlocking null
-                                    ConversationRuntimeConfigResolver.resolve(latest.first,
-                                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true)
-                                        ?.takeIf { AgentJobWakePolicy.canWake(base, it, latest.second) }
+                                    if (stored?.runId != base.runId) {
+                                        windowReject = WakeRejectReason.STALE_BASE
+                                        return@runBlocking null
+                                    }
+                                    if ("terminal_job" in Prefs.disabledTools()) {
+                                        windowReject = WakeRejectReason.POLICY_DISABLED
+                                        return@runBlocking null
+                                    }
+                                    val latest = jobWakeHistory(context, base.conversationId) ?: run {
+                                        windowReject = WakeRejectReason.STALE_BASE
+                                        return@runBlocking null
+                                    }
+                                    val current = ConversationRuntimeConfigResolver.resolve(latest.first,
+                                        preferences = Prefs.localAgentPreferences(), supportsSearchSuggestions = true) ?: run {
+                                        windowReject = WakeRejectReason.POLICY_DISABLED
+                                        return@runBlocking null
+                                    }
+                                    when {
+                                        !current.canWakeForTerminalJob -> {
+                                            windowReject = WakeRejectReason.POLICY_DISABLED
+                                            null
+                                        }
+                                        !AgentJobWakePolicy.isFresh(base, latest.second) -> {
+                                            windowReject = WakeRejectReason.STALE_BASE
+                                            null
+                                        }
+                                        else -> current
+                                    }
                                 }
-                                if (latestResolved == null || abandoned.get() || stopped.get()) { completed.countDown(); return }
+                                if (latestResolved == null || abandoned.get() || stopped.get()) {
+                                    deliveryRejectReason.set(
+                                        when {
+                                            abandoned.get() || stopped.get() -> WakeRejectReason.EXECUTION_SERVICE_REJECTED
+                                            else -> windowReject ?: WakeRejectReason.POLICY_DISABLED
+                                        }
+                                    )
+                                    completed.countDown()
+                                    return
+                                }
                                 request = AgentContinuationBuilder.buildJobNotice(base,
                                     AgentJobWakePolicy.notice(base, latestResolved, notice), jobId, newRunId)
                                     .copy(config = latestResolved.config)
-                                accepted.set(instance.startRun(request, onStarted = { publishRun(request, true) }))
+                                val started = instance.startRun(request, onStarted = { publishRun(request, true) })
+                                accepted.set(started)
+                                if (!started) deliveryRejectReason.set(WakeRejectReason.RUNTIME_BUSY)
                                 if (abandoned.get() || stopped.get()) {
                                     instance.cancelRun(newRunId)
                                     accepted.set(false)
+                                    deliveryRejectReason.set(WakeRejectReason.EXECUTION_SERVICE_REJECTED)
                                 }
                             }
-                        }.onFailure { AndroidAgentLogger.warn("后台唤醒投递失败：${it.javaClass.simpleName}") }
+                        }.onFailure {
+                            deliveryRejectReason.set(WakeRejectReason.INTERNAL_ERROR)
+                            AndroidAgentLogger.warn("后台唤醒投递失败：${it.javaClass.simpleName}")
+                        }
                         completed.countDown()
                     }
                 }
                 if (Looper.myLooper() == Looper.getMainLooper()) {
                     // 主线程不能等待自身的 onCreate；已有实例时可立即投递，否则降级通知。
-                    if (activeInstance == null) return false
+                    if (activeInstance == null) return WakeResult.Rejected(WakeRejectReason.DELIVERY_TIMEOUT)
                     attempt.run()
                 } else {
                     main.post(attempt)
@@ -1650,15 +1736,15 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                         abandoned.set(true)
                         main.removeCallbacks(attempt)
                         main.post { activeInstance?.cancelRun(newRunId) }
-                        return false
+                        return WakeResult.Rejected(WakeRejectReason.DELIVERY_TIMEOUT)
                     }
                 }
                 handedOver = accepted.get()
-                return handedOver
+                return if (handedOver) WakeResult.Accepted else WakeResult.Rejected(deliveryRejectReason.get())
             } catch (failure: Exception) {
                 if (failure is InterruptedException) Thread.currentThread().interrupt()
                 AndroidAgentLogger.warn("后台唤醒失败：${failure.javaClass.simpleName}")
-                return false
+                return WakeResult.Rejected(WakeRejectReason.INTERNAL_ERROR)
             } finally {
                 pendingJobWakes -= newRunId
                 if (!handedOver) {
