@@ -100,6 +100,12 @@ internal fun toolDisplayNameResource(name: String): Int? = when (name) {
     "list_directory" -> R.string.tool_list_directory
     "memory_get" -> R.string.tool_memory_get
     "memory_write" -> R.string.tool_memory_write
+    "ov_memory_recall" -> R.string.tool_ov_memory_recall
+    "ov_memory_store" -> R.string.tool_ov_memory_store
+    "ov_memory_forget" -> R.string.tool_ov_memory_forget
+    "ov_read" -> R.string.tool_ov_read
+    "ov_list" -> R.string.tool_ov_list
+    "ov_search" -> R.string.tool_ov_search
     "set_alarm" -> R.string.tool_set_alarm
     "set_timer" -> R.string.tool_set_timer
     "device_status" -> R.string.tool_device_status

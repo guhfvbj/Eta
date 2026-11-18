@@ -151,6 +151,10 @@ internal object EtaBackupRepository {
             EtaBackupJsonStreams.stage(appContext, input) { phase = it }.use { staged ->
                 phase = "validate_import"
                 val summary = EtaBackupValidation.validate(staged)
+                // Operational remote identity is device-local and never restored from user data.
+                // Disable before replacing conversations so no old worker can upload into them.
+                OpenVikingSettingsRepository.disable()
+                io.github.mangi.eta.agent.openviking.OpenVikingSyncScheduler.cancel(appContext)
                 val document = staged.header
                 val database = EtaDatabase.get(appContext)
                 val previousMemory = AgentMemoryRepository.snapshot().content
@@ -170,6 +174,7 @@ internal object EtaBackupRepository {
                         database.withTransaction {
                             cancellation.ensureActive()
                             phase = "restore_providers"
+                            OpenVikingBackupPolicy.clearForRestore(database)
                             credentialIds += database.providerDao().providers().map { it.provider.id }
                             database.providerDao().replaceAll(document.providers.map {
                                 ProviderWithModelsSeed(it.provider.awaitingCredentialCleanup(), it.models)

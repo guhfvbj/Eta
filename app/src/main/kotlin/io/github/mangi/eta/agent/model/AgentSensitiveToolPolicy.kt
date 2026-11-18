@@ -43,6 +43,7 @@ internal object AgentSensitiveToolPolicy {
         "set_setting",
         "memory_get",
         "memory_write",
+        "ov_memory_recall", "ov_memory_store", "ov_memory_forget", "ov_read", "ov_list", "ov_search",
         "character_memory_get",
         "character_memory_write",
     )

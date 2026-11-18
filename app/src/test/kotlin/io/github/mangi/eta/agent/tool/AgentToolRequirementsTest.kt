@@ -108,6 +108,7 @@ class AgentToolRequirementsTest {
         terminalTools = true, browserTools = true, deviceDirectTools = true,
         deviceSensitiveReadTools = true, deviceSensitiveActionTools = true,
         skillGitHubDiscovery = true, skillGitHubInstall = true, memoryTools = true,
+        openVikingTools = io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names,
         capabilities = AgentToolCapabilities(rootAvailable = root),
     )
 

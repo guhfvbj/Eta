@@ -27,8 +27,14 @@ import androidx.room.migration.Migration
         UserPersonaEntity::class,
         AgentTaskEntity::class,
         AgentTaskRunEntity::class,
+        OpenVikingSessionEntity::class,
+        OpenVikingOutboxEntity::class,
+        OpenVikingOperationEntity::class,
+        OpenVikingInjectionEntity::class,
+        OpenVikingCacheEntity::class,
+        OpenVikingSyncStateEntity::class,
     ],
-    version = 28,
+    version = 29,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -39,6 +45,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
     abstract fun mcpServerDao(): McpServerDao
     abstract fun characterDao(): CharacterDao
     abstract fun agentTaskDao(): AgentTaskDao
+    abstract fun openVikingDao(): OpenVikingDao
 
     companion object {
         @Volatile
@@ -74,6 +81,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_25_26,
                         MIGRATION_26_27,
                         MIGRATION_27_28,
+                        MIGRATION_28_29,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db); createAgentTaskTables(db) }
@@ -92,6 +100,8 @@ internal abstract class EtaDatabase : RoomDatabase() {
                 instance = null
             }
         }
+
+        internal val MIGRATION_28_29 = Migration(28, 29) { database -> OpenVikingSchema.create(database) }
 
         internal val MIGRATION_19_20 = Migration(19, 20) { database ->
             database.execSQL("ALTER TABLE conversation_context_checkpoints ADD COLUMN journal_json TEXT NOT NULL DEFAULT ''")

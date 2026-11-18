@@ -49,6 +49,7 @@ internal class AgentLoop(
     private val dynamicMcpGroupsProvider: () -> List<McpDeferredGroup> = { emptyList() },
     private val maxToolRounds: Int? = null,
     initialTokenBaseline: AgentContextTokenBaseline? = null,
+    private val requestContext: AgentRequestContext? = null,
 ) {
     data class Result(
         val content: String,
@@ -137,8 +138,10 @@ internal class AgentLoop(
                 roundTools.optJSONObject(index)?.optJSONObject("function")?.optString("name")
             }
             publishTranscript()
+            if (roleplayContext == null) requestContext?.prepare(messages)
             context.prepareRequest(roundTools)
             if (purpose.allowsTools) context.compact()
+            if (roleplayContext == null) requestContext?.prepare(messages)
             context.captureRequest()
             val requestMessages = AssistantScreenContextProjection.project(
                 roleplayContext?.projectMessages(messages) ?: messages,
@@ -370,9 +373,13 @@ internal class AgentLoop(
         return true
     }
 
-    private fun steeringMessage(supplement: SteeringMessage): JSONObject =
-        AgentConversationCodec.userTextMessage(steeringPrompt(supplement))
-            .put("_eta_message_id", "user-$operationId-supplement-${++supplementIndex}")
+    private fun steeringMessage(supplement: SteeringMessage): JSONObject {
+        val id = "user-$operationId-supplement-${++supplementIndex}"
+        if (roleplayContext == null) requestContext?.userInput(id, supplement.text, supplement.source)
+        return AgentConversationCodec.userTextMessage(steeringPrompt(supplement))
+            .put("_eta_message_id", id)
+            .apply { if (supplement.source == AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB) put("_eta_openviking_skip_recall", true) }
+    }
 
     private fun executeToolBatch(
         round: Int,

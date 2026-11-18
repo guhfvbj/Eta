@@ -729,6 +729,7 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.PromptToolGroups -> stringResource(R.string.prompt_groups_title)
     is AppRoute.Tasks -> stringResource(R.string.automation_title)
     is AppRoute.Memory -> stringResource(R.string.route_memory)
+    is AppRoute.OpenVikingSettings -> stringResource(R.string.openviking_settings_title)
     is AppRoute.LinuxEnvironment -> stringResource(R.string.route_linux_environment)
     is AppRoute.Workspace -> stringResource(R.string.capability_workspace)
     is AppRoute.SharedFolders -> stringResource(R.string.route_shared_folders)

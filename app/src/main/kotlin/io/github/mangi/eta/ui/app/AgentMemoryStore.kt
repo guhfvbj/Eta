@@ -15,6 +15,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.data.repository.OpenVikingCredentialState
+import io.github.mangi.eta.data.repository.OpenVikingSecretStore
+import io.github.mangi.eta.data.repository.OpenVikingSettingsRepository
+import io.github.mangi.eta.ui.screens.memory.openVikingSummaryText
 
 /** 记忆页的读取、编辑与保存状态；与会话和 Agent run 无共享状态。 */
 internal class AgentMemoryStore(
@@ -27,6 +35,28 @@ internal class AgentMemoryStore(
 
     var memoryState by mutableStateOf(AgentMemoryUiState())
         private set
+
+    init {
+        scope.launch {
+            try {
+                combine(OpenVikingSettingsRepository.settingsFlow(), SettingsDataStore.settingsFlow()) { ov, general ->
+                    ov to general.memoryEnabled
+                }.collectLatest { (settings, parentEnabled) ->
+                    val available = withContext(Dispatchers.IO) {
+                        OpenVikingSecretStore(appContext).credential(settings.secretRevision) is OpenVikingCredentialState.Available
+                    }
+                    OpenVikingSettingsRepository.statusFlow(appContext, runCatching { settings.connectionId() }.getOrNull()).collectLatest { status ->
+                        withContext(Dispatchers.Main) {
+                            memoryState = memoryState.copy(openVikingSummary = openVikingSummaryText(appContext, settings, status, available, parentEnabled))
+                        }
+                    }
+                }
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                // Memory.md editing remains available even when the optional status store cannot load.
+            }
+        }
+    }
 
     fun refreshMemory() {
         if (!hasLoadedOnce) {
@@ -53,6 +83,7 @@ internal class AgentMemoryStore(
                             draftBytes = nextBytes,
                             coreBudgetChars = coreBudget,
                             notice = memoryState.notice,
+                            openVikingSummary = memoryState.openVikingSummary,
                         )
                     }
                 },

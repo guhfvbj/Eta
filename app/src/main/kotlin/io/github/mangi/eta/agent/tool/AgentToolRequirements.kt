@@ -41,6 +41,7 @@ internal object AgentToolRequirements {
             "search_notification_history", "recent_app_activity", "app_usage_summary",
             "get_current_location", "get_device_environment", "memory_get", "memory_write",
             "character_memory_get", "character_memory_write",
+            "ov_memory_recall", "ov_memory_store", "ov_memory_forget", "ov_read", "ov_list", "ov_search",
             "tasks_triggers", "tasks_list", "tasks_create", "tasks_update",
             "tasks_delete", "tasks_run", "tasks_cancel", "tasks_history",
             "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",

@@ -187,6 +187,24 @@ class AgentLocalToolsPermissionTest {
     }
 
     @Test
+    fun openVikingRechecksMemoryAndRoleplayBeforeAnyExecutionOrRemoteSetup() {
+        val names = io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names
+        for ((enabled, writable, expected) in listOf(
+            Triple(false, true, "MEMORY_DISABLED"),
+            Triple(true, false, "OPENVIKING_ROLEPLAY_BLOCKED"),
+        )) {
+            tools(memoryEnabled = { enabled }, memoryWritable = writable,
+                beforeToolExecution = { error("Denied remote tools must stop before the execution boundary") }).use { instance ->
+                names.forEach { name ->
+                    val result = instance.execute(AgentModelClient.ToolCall("denied-$name", name, "{}"))
+                    assertTrue(result.sensitive)
+                    assertEquals(expected, JSONObject(result.content).getString("code"))
+                }
+            }
+        }
+    }
+
+    @Test
     fun memoryPermissionIsRecheckedImmediatelyBeforeExecution() {
         val enabled = AtomicBoolean(true)
         val tools = tools(memoryEnabled = enabled::get)

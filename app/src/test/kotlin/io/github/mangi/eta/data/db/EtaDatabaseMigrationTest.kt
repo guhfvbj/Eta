@@ -42,12 +42,13 @@ class EtaDatabaseMigrationTest {
                             EtaDatabase.MIGRATION_25_26.migrate(db)
                             EtaDatabase.MIGRATION_26_27.migrate(db)
                             EtaDatabase.MIGRATION_27_28.migrate(db)
+                            EtaDatabase.MIGRATION_28_29.migrate(db)
                         }
                     }
                 }).build(),
         )
         open(26).use { it.writableDatabase }
-        val helper = open(28)
+        val helper = open(29)
         try {
             val db = helper.writableDatabase
             db.query("SELECT history_json, journal_json, runtime_state_json FROM conversation_context_checkpoints").use {
@@ -69,7 +70,7 @@ class EtaDatabaseMigrationTest {
     }
 
     @Test
-    fun migration6To28PreservesDataAndMovesCompleteConversationContext() {
+    fun migration6To29PreservesDataAndMovesCompleteConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -109,6 +110,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_25_26,
                 EtaDatabase.MIGRATION_26_27,
                 EtaDatabase.MIGRATION_27_28,
+                EtaDatabase.MIGRATION_28_29,
             )
             .build()
         try {
@@ -196,16 +198,16 @@ class EtaDatabaseMigrationTest {
     }
 
     @Test
-    fun officialAndForkVersions24Through27MigrateTo28WithoutDataLoss() {
+    fun officialAndForkVersions24Through28MigrateTo29WithoutDataLoss() {
         val context = RuntimeEnvironment.getApplication() as Context
         val origins = listOf(24 to "official", 25 to "official", 26 to "official",
-            26 to "fork", 27 to "fork", 27 to "partial")
+            26 to "fork", 27 to "fork", 27 to "partial", 28 to "official")
         for ((version, lineage) in origins) {
             val name = "m$version-$lineage-${UUID.randomUUID()}.db"
             createHistoricalDatabase(context, name, version, lineage)
             val database = Room.databaseBuilder(context, EtaDatabase::class.java, name)
                 .addMigrations(EtaDatabase.MIGRATION_24_25, EtaDatabase.MIGRATION_25_26,
-                    EtaDatabase.MIGRATION_26_27, EtaDatabase.MIGRATION_27_28)
+                    EtaDatabase.MIGRATION_26_27, EtaDatabase.MIGRATION_27_28, EtaDatabase.MIGRATION_28_29)
                 .build()
             try {
                 // Opening through Room validates the complete entity schema, foreign keys and indices.
@@ -216,7 +218,16 @@ class EtaDatabaseMigrationTest {
                 val checkpoint = runBlocking(Dispatchers.IO) { database.conversationDao().contextCheckpoint("conv-1") }
                 assertEquals(if (lineage == "fork" && version == 27) "saved-runtime" else "", checkpoint?.runtimeStateJson)
                 val db = database.openHelper.readableDatabase
-                assertEquals(28, db.version)
+                assertEquals(29, db.version)
+                for (table in listOf("sessions", "outbox", "operations", "injections", "cache", "sync_state")) {
+                    db.query("SELECT COUNT(*) FROM openviking_$table").use { cursor ->
+                        check(cursor.moveToFirst())
+                        assertEquals(0, cursor.getInt(0))
+                    }
+                }
+                db.query("PRAGMA foreign_key_list(openviking_injections)").use { cursor ->
+                    assertEquals(0, cursor.count)
+                }
                 db.query("SELECT COUNT(*) FROM agent_tasks").use {
                     check(it.moveToFirst())
                     assertEquals(if (lineage == "fork") 1 else 0, it.getInt(0))
@@ -250,6 +261,11 @@ class EtaDatabaseMigrationTest {
                             EtaDatabase.MIGRATION_20_21, EtaDatabase.MIGRATION_21_22,
                             EtaDatabase.MIGRATION_22_23, EtaDatabase.MIGRATION_23_24).forEach { it.migrate(db) }
                         if (version >= 25) EtaDatabase.MIGRATION_24_25.migrate(db)
+                        if (version >= 28) {
+                            EtaDatabase.MIGRATION_25_26.migrate(db)
+                            EtaDatabase.MIGRATION_26_27.migrate(db)
+                            EtaDatabase.MIGRATION_27_28.migrate(db)
+                        }
                         // Reproduce the actual shipped schemas, rather than the reconciled migrations.
                         if (lineage == "official" && version == 26) {
                             db.execSQL("ALTER TABLE conversation_messages ADD COLUMN cache_write_tokens INTEGER")

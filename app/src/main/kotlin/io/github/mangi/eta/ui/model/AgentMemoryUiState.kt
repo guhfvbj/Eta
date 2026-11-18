@@ -14,6 +14,7 @@ data class AgentMemoryUiState(
     val maxBytes: Int = AgentMemoryStore.MAX_FILE_BYTES,
     val coreBudgetChars: Int = 8_000,
     val notice: String? = null,
+    val openVikingSummary: String = "",
 ) {
     val hasUnsavedChanges: Boolean get() = draft != savedContent
     val canSave: Boolean

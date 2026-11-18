@@ -193,6 +193,14 @@ internal class AgentContextSession(
             }
             runController.throwIfCancelled()
             val candidate = outcome.messages
+            // Persist the successful replacement's unique identity in its summary before saving.
+            // fold-N can restart after a history reset; it is not a unique lifecycle identifier.
+            for (index in 0 until candidate.length()) {
+                val message = candidate.getJSONObject(index)
+                if (message.optBoolean("_eta_context_summary") && message.optString("_eta_compaction_archive_id") == outcome.archiveId) {
+                    message.put("_eta_compaction_epoch_id", operation)
+                }
+            }
             val previousBaseline = baseline
             val previousNoProgress = noProgressCount
             val previousCooldown = cooldownRemaining

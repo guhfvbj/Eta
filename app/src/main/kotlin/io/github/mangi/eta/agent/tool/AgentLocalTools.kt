@@ -94,6 +94,7 @@ internal class AgentLocalTools(
         runBlocking { AgentMemoryRepository.isEnabled() }
     },
     private val memoryWritable: Boolean = true,
+    private val openVikingAllowed: Boolean = true,
     private val screenshotExcludedPackages: () -> Set<String> = { emptySet() },
     private val screenObservationProvider: (
         (AgentScreenObservationContract.Options) -> RootShellDeviceController.Observation
@@ -173,12 +174,14 @@ internal class AgentLocalTools(
     private val pendingSkillConflict = AtomicReference(pendingSkillConflict)
     private val inspectedGitHubSnapshots =
         ConcurrentHashMap<String, GitHubInspectionSnapshot>()
+    private val openVikingTools by lazy { io.github.mangi.eta.agent.openviking.OpenVikingTools(context) { openVikingAllowed && memoryWritable } }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         publishedObservation.set(PublishedObservation())
         if (browserSessionRef.isInitialized()) browserSessionRef.value.interruptAgentAction(browserRunId)
         webTools.close()
+        openVikingTools.close()
         terminalController.interruptAll()
         deviceController.close()
         rootCommandExecutor.close()
@@ -310,6 +313,7 @@ internal class AgentLocalTools(
                 in AgentFileToolCatalog.names -> textResult(terminalTool { terminalController.fileTool(toolCall.name, args) })
                 "memory_get" -> textResult(memoryGet(args))
                 "memory_write" -> textResult(memoryWrite(args))
+                in io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names -> openVikingTools.execute(toolCall)
                 "skills_list" -> textResult(skillsList(args))
                 "skills_read" -> textResult(skillsRead(args))
                 "skills_read_resource" -> textResult(skillsReadResource(args))
@@ -325,6 +329,9 @@ internal class AgentLocalTools(
             }
         }.getOrElse { throwable ->
             if (throwable is AgentRunCancelledException) throw throwable
+            if (toolCall.name in io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names) {
+                return@getOrElse AgentModelClient.ToolResult(errorResult("OPENVIKING_FAILED", "OpenViking 调用未完成；请核对配置与参数"), sensitive = true)
+            }
             textResult(
                 errorResult(
                     code = when (throwable) {
@@ -396,13 +403,20 @@ internal class AgentLocalTools(
     }
 
     private fun memoryToolPermissionError(toolName: String): AgentModelClient.ToolResult? {
+        val remote = toolName in io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names
+        if (remote && (!openVikingAllowed || !memoryWritable)) {
+            return AgentModelClient.ToolResult(
+                content = errorResult("OPENVIKING_ROLEPLAY_BLOCKED", "角色会话不能访问现实远端记忆"),
+                sensitive = true,
+            )
+        }
         if (toolName == "memory_write" && !memoryWritable) {
             return AgentModelClient.ToolResult(
                 content = errorResult("REAL_MEMORY_READ_ONLY", "角色会话的现实记忆只读；剧情请使用角色记忆工具"),
                 sensitive = true,
             )
         }
-        if (toolName !in MEMORY_TOOL_NAMES || memoryToolsEnabled()) return null
+        if ((toolName !in MEMORY_TOOL_NAMES && !remote) || memoryToolsEnabled()) return null
         return AgentModelClient.ToolResult(
             content = errorResult("MEMORY_DISABLED", "记忆已在设置中关闭"),
             sensitive = true,

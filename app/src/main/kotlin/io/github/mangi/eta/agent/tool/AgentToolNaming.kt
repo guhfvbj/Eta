@@ -156,6 +156,12 @@ internal object AgentToolNaming {
         // 记忆与人格
         "memory_get" to "记忆与人格|读长期记忆",
         "memory_write" to "记忆与人格|写长期记忆",
+        "ov_memory_recall" to "记忆与人格|OpenViking 召回",
+        "ov_memory_store" to "记忆与人格|OpenViking 保存",
+        "ov_memory_forget" to "记忆与人格|OpenViking 删除",
+        "ov_read" to "记忆与人格|OpenViking 读取",
+        "ov_list" to "记忆与人格|OpenViking 目录",
+        "ov_search" to "记忆与人格|OpenViking 搜索",
         "character_memory_get" to "记忆与人格|读角色记忆",
         "character_memory_write" to "记忆与人格|写角色记忆",
 

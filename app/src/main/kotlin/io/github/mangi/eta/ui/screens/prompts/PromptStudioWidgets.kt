@@ -143,6 +143,12 @@ internal suspend fun buildEffectivePreview(
         skillGitHubInstall = true,
         memoryTools = memoryContext.enabled,
         memoryWritable = true,
+        openVikingTools = if (memoryEnabled) runCatching {
+            val settings = io.github.mangi.eta.data.repository.OpenVikingSettingsRepository.settings()
+            val credential = io.github.mangi.eta.data.repository.OpenVikingSecretStore(context).credential(settings.secretRevision)
+            if (credential is io.github.mangi.eta.data.repository.OpenVikingCredentialState.Available)
+                io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.allowedNames(settings) else emptySet()
+        }.getOrDefault(emptySet()) else emptySet(),
         capabilities = capabilities,
         localWebSearch = !config.usesHostedWebSearch,
         policy = policy,

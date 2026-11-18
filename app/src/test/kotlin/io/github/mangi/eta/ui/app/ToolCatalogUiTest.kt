@@ -30,6 +30,19 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class ToolCatalogUiTest {
     @Test
+    fun openVikingToolsAppearInMemoryCardsAndPromptSelectionWithoutNewBooleanPreferences() {
+        val names = io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names
+        val memoryCards = buildToolsState(RuntimeEnvironment.getApplication()).groups.first { it.id == "memory" }.tools.map { it.id }
+        assertTrue(memoryCards.containsAll(names))
+        assertTrue(io.github.mangi.eta.ui.screens.prompts.ALL_TOOL_NAMES.containsAll(names))
+        names.forEach { name ->
+            assertEquals(RootRequirement.NONE, toolCardRequirement(name).rootRequirement)
+            assertNotEquals(Icons.Rounded.Build, iconForTool(name))
+            assertTrue(toolDisplayNameResource(name) != null)
+        }
+    }
+
+    @Test
     fun everyRuntimeToolAndDisplayedCardHasASpecificIcon() {
         val tools = AgentToolCatalog.build(
             terminalTools = true,

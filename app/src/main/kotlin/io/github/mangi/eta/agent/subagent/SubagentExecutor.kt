@@ -45,6 +45,7 @@ internal class SubagentExecutor(
     private val providerFor: (AgentModelClient.ModelConfig) -> AgentProviderClient = ProviderClientFactory::getClient,
     private val maxToolRounds: Int = 48,
     private val onSessionChanged: () -> Unit = {},
+    private val openVikingToolNames: Set<String> = emptySet(),
 ) {
     private val progressiveMcp = mcpLoadingMode != Prefs.Keys.MCP_LOADING_MODE_OFF
     private val mcpSearchEnabled = mcpLoadingMode == Prefs.Keys.MCP_LOADING_MODE_SEARCH
@@ -154,6 +155,10 @@ internal class SubagentExecutor(
             mcpSnapshot, entry.openedMcpGroups, mcpSearchEnabled, profile::isToolAllowed,
         )
         val childToolExecutor = AgentModelClient.ToolExecutor { subCall ->
+            if (subCall.name in io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.names &&
+                (subCall.name !in openVikingToolNames || subCall.name in io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.writes)) {
+                return@ToolExecutor errorResult("OPENVIKING_SUBAGENT_BLOCKED", "此子会话不可使用该远端记忆工具")
+            }
             childController.throwIfCancelled()
             // 导航工具由已授权的 MCP 组派生，不走 Profile 的普通工具白名单，也不触碰父 Agent 的加载状态。
             if (progressiveMcp && subCall.name in McpProgressiveLoader.names) {
@@ -255,6 +260,7 @@ internal class SubagentExecutor(
                 runController = childController,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
+                openVikingToolNames = openVikingToolNames.intersect(io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.reads),
                 additionalTools = if (progressiveMcp) JSONArray() else {
                     profile.filterTools(JSONArray().also(mcpSnapshot::appendModelTools))
                 },

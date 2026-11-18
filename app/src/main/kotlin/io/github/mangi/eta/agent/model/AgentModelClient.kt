@@ -131,6 +131,8 @@ internal object AgentModelClient {
         initialTokenBaseline: AgentContextTokenBaseline? = null,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
+        requestContext: AgentRequestContext? = null,
+        openVikingToolNames: Set<String> = emptySet(),
         onEvent: (AgentEvent) -> Unit = {},
     ): ModelResponse.Text {
         config.validate()
@@ -200,6 +202,7 @@ internal object AgentModelClient {
                 skillGitHubInstall = true,
                 memoryTools = memoryContext.enabled,
                 memoryWritable = roleplayContext == null,
+                openVikingTools = if (roleplayContext == null) openVikingToolNames else emptySet(),
                 capabilities = capabilities,
                 localWebSearch = !config.usesHostedWebSearch,
                 disabledTools = Prefs.disabledTools(),
@@ -313,6 +316,7 @@ internal object AgentModelClient {
             initialSupplementIndex = initialSupplementIndex,
             toolsForRound = ::toolsForRound,
             maxToolRounds = maxToolRounds,
+            requestContext = if (roleplayContext == null) requestContext else null,
             initialTokenBaseline = initialTokenBaseline,
         )
         val result = try {
@@ -464,6 +468,7 @@ internal object AgentModelClient {
         val summaryThroughUserTurn: Int = 0,
         val messageId: String = "",
         val compactionArchiveId: String = "",
+        val compactionEpochId: String = "",
     )
 
     fun interface ToolExecutor {

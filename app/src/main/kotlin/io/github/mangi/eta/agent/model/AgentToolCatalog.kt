@@ -19,6 +19,7 @@ internal object AgentToolCatalog {
         capabilities: AgentToolCapabilities = AgentToolCapabilities(rootAvailable = true),
         localWebSearch: Boolean = true,
         disabledTools: Set<String> = emptySet(),
+        openVikingTools: Set<String> = emptySet(),
     ): JSONArray =
         capabilities.project(JSONArray().also { tools ->
             AgentContextAppToolCatalog.appendTo(tools)
@@ -40,6 +41,7 @@ internal object AgentToolCatalog {
                 githubInstall = skillGitHubInstall,
             )
             if (memoryTools) AgentMemoryToolCatalog.appendTo(tools, writable = memoryWritable)
+            if (memoryWritable) AgentOpenVikingToolCatalog.appendTo(tools, openVikingTools)
             if (memoryWritable) AgentTaskToolCatalog.appendTo(tools)
             if (terminalTools) {
                 AgentFileVisionToolCatalog.appendTo(tools)

@@ -67,6 +67,7 @@ sealed interface AgentSystemEnhanceAction {
 }
 
 sealed interface AgentMemoryAction {
+    data object OpenOpenVikingSettings : AgentMemoryAction
     data object NavigateBack : AgentMemoryAction
     data class ToggleEnabled(val enabled: Boolean) : AgentMemoryAction
     data class DraftChanged(val content: String) : AgentMemoryAction

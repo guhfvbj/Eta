@@ -87,11 +87,11 @@ internal class AgentRuntimeRunExecutor(
         var response: AgentModelClient.ModelResponse.Text? = null
         var cancelled = false
         var checkpointRecorder: AgentRunCheckpointRecorder? = null
+        var openViking: io.github.mangi.eta.agent.openviking.OpenVikingRuntimeContext? = null
+        var memoryCapture: io.github.mangi.eta.agent.openviking.OpenVikingRunCapture? = null
         val timing = AgentRunTiming(AndroidAgentLogger)
         val capabilities = AgentToolCapabilitiesCache({ AgentToolCapabilities.capture(appContext) })
 
-        // 失败清理需要在 try 外拿到会话 id。
-        var memoryConversationId: String? = null
         val result = try {
             val contextWindow = request.config.knownContextWindow
             checkpointRecorder = AgentRunCheckpointRecorder.create(appContext, request)
@@ -120,7 +120,6 @@ internal class AgentRuntimeRunExecutor(
                 ?.let { AgentUiHandoffPayload.from(it.payload) }
             val conversationId = uiPayload?.conversationId
                 ?.takeIf { it.isNotBlank() }
-            memoryConversationId = conversationId
             val roleplayContext = conversationId?.let { id ->
                 runBlocking { RoleplayRunContext.resolve(appContext, id, contextWindow, memoryEnabled) }
             }
@@ -173,6 +172,32 @@ internal class AgentRuntimeRunExecutor(
             val openedMcpGroups = ConcurrentHashMap.newKeySet<String>()
             val mcpLoader = McpProgressiveLoader(mcpSnapshot, openedMcpGroups, mcpSearchEnabled)
             val browserKey = AgentConversationIdentity.fromHandoff(request.handoff, request.runId)
+            openViking = io.github.mangi.eta.agent.openviking.OpenVikingRuntimeContext.create(
+                appContext, conversationId ?: browserKey, runController, roleplayContext != null, memoryEnabled,
+                skipRecallMessageId = uiPayload?.takeIf {
+                    it.promptSupplement?.source == AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB
+                }?.promptMessageId(request.runId),
+            )
+            val remoteContext = openViking
+            val storeProvenance = io.github.mangi.eta.agent.openviking.OpenVikingCaptureProvenance().apply {
+                if (request.assistantScreenContext.isNotBlank() || request.images.isNotEmpty() || request.history.any {
+                    it.role == "tool" || it.contextSummary || it.toolCallsJson.isNotBlank() || it.contentJson.contains("image")
+                }) taint()
+            }
+            val realUserOrigin = request.operation == AgentRuntimeWire.OP_CHAT && request.handoff?.source != "automation" &&
+                uiPayload?.promptSupplement?.source != AgentRuntimeWire.SUPPLEMENT_SOURCE_BACKGROUND_JOB
+            if (realUserOrigin && roleplayContext == null) storeProvenance.userInput(request.prompt)
+            memoryCapture = io.github.mangi.eta.agent.openviking.OpenVikingRunCapture.create(
+                appContext, conversationId ?: browserKey, request.runId,
+                uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}", request.prompt,
+                roleplay = roleplayContext != null,
+                userOrigin = realUserOrigin,
+                history = request.history, screenOrImages = request.assistantScreenContext.isNotBlank() || request.images.isNotEmpty(),
+            )
+            val remoteToolNames = remoteContext?.settings?.let {
+                io.github.mangi.eta.agent.model.AgentOpenVikingToolCatalog.allowedNames(it)
+            }.orEmpty()
+            val memoryLifecycle = AgentRuntimeMemoryLifecycle(conversationId) { remoteContext?.compacted(it) }
             val runtimeState = conversationId?.let { AgentConversationRuntimeStore.load(appContext, it) }
             if (runtimeState != null) SubagentSessionStore.restore(browserKey, runtimeState.subagents)
             browserBinding = BrowserSessionRegistry.acquireRun(browserKey, request.runId)
@@ -211,6 +236,7 @@ internal class AgentRuntimeRunExecutor(
                     runBlocking { AgentMemoryRepository.isEnabled() }
                 },
                 memoryWritable = roleplayContext == null,
+                openVikingAllowed = roleplayContext == null,
                 screenshotExcludedPackages = {
                     entrySurfaceGuard?.consumeScreenshotExcludedPackages().orEmpty()
                 },
@@ -326,6 +352,7 @@ internal class AgentRuntimeRunExecutor(
                         it.copy(subagents = SubagentSessionStore.export(browserKey))
                     }
                 },
+                openVikingToolNames = remoteToolNames,
             )
             val runTools = JSONArray().also { tools ->
                 if (!progressiveMcp) mcpSnapshot.appendModelTools(tools)
@@ -343,7 +370,11 @@ internal class AgentRuntimeRunExecutor(
                 }
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
-                if (progressiveMcp && call.name in McpProgressiveLoader.names) {
+                if (call.name == "ov_memory_store" && !storeProvenance.allowsExplicitStore(
+                        runCatching { JSONObject(call.argumentsJson).optString("content") }.getOrDefault(""))) {
+                    AgentModelClient.ToolResult(JSONObject().put("ok", false).put("code", "OPENVIKING_TAINTED_STORE_BLOCKED")
+                        .put("message", "This run has seen untrusted memory, screen, or tool data; content must be a verbatim span of the current user's original input.").toString(), sensitive = true)
+                } else if (progressiveMcp && call.name in McpProgressiveLoader.names) {
                     mcpLoader.execute(call)
                 } else if (call.name in AgentSubagentToolCatalog.names) {
                     if (!subagentAllowed()) {
@@ -392,8 +423,7 @@ internal class AgentRuntimeRunExecutor(
                 compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
                 initialTokenBaseline = runtimeState?.tokenBaseline,
                 onContextSnapshot = { snapshot ->
-                    // 压缩会把历史里的记忆写入摘要掉，下一轮需要重新注入最新记忆。
-                    ConversationMemoryPins.forget(conversationId)
+                    // Ordinary checkpoints preserve the pinned system prefix and remote epoch.
                     val committed = snapshot.copy(operationId = request.runId)
                     AgentRunCheckpointStore.saveContext(appContext, request.runId, committed)
                     if (conversationId != null) AgentConversationRuntimeStore.update(appContext, conversationId) {
@@ -414,12 +444,26 @@ internal class AgentRuntimeRunExecutor(
                 runController = runController,
                 skillContext = skillContext,
                 memoryContext = memoryContext,
+                requestContext = object : io.github.mangi.eta.agent.model.AgentRequestContext {
+                    override fun prepare(messages: JSONArray) {
+                        remoteContext?.prepare(messages)
+                        if (remoteContext?.hasInjected == true) storeProvenance.taint()
+                    }
+                    override fun userInput(messageId: String, text: String, source: String) {
+                        if (source == AgentRuntimeWire.SUPPLEMENT_SOURCE_USER) storeProvenance.userInput(text) else storeProvenance.taint()
+                        memoryCapture?.userInput(messageId, text, source)
+                    }
+                },
+                openVikingToolNames = remoteToolNames,
                 additionalTools = runTools,
                 mcpProjection = if (progressiveMcp) mcpSnapshot else null,
                 mcpSearchEnabled = mcpSearchEnabled,
                 openedMcpGroupsProvider = { openedMcpGroups.toSet() },
                 executionContext = executor.terminalExecutionContext,
             ) { event ->
+                storeProvenance.accept(event)
+                memoryCapture?.accept(event)
+                memoryLifecycle.accept(event)
                 timing.accept(event)
                 acceptEvent(
                     session,
@@ -441,8 +485,7 @@ internal class AgentRuntimeRunExecutor(
                 rewriteTargetMessageId = request.rewriteTargetMessageId,
             )
         } catch (throwable: Throwable) {
-            // 失败时历史是否完整落盘不确定，放弃固定的记忆快照；记忆未变时重新注入的内容逐字节相同。
-            ConversationMemoryPins.forget(memoryConversationId)
+            // Failed requests and ordinary checkpoints must not evict pinned prompt memory.
             cancelled = runController.isCancelled || throwable is AgentRunCancelledException
             val modelFailure = throwable as? AgentModelExecutionException
             val message = if (cancelled) {
@@ -488,6 +531,7 @@ internal class AgentRuntimeRunExecutor(
                 rewriteTargetMessageId = request.rewriteTargetMessageId,
             )
         } finally {
+            runCatching { openViking?.close() }
             runCatching { toolsBinding?.close() }
             runCatching { toolExecutor?.close() }
             runCatching { guiRun?.close() }
@@ -503,6 +547,7 @@ internal class AgentRuntimeRunExecutor(
         }
 
         if (cancelled && session.isTerminal) {
+            memoryCapture?.finish(false, "", openViking?.hasInjected == true)
             runCatching { checkpointRecorder?.seal(terminalReason, cancelled = true) }
             runCatching {
                 persistArtifacts(snapshotRequest(request), result, archivedEvents.orEmpty())
@@ -539,7 +584,11 @@ internal class AgentRuntimeRunExecutor(
                         "Agent runtime artifact persistence failed: type=${throwable.safeLogType()}"
                     )
                 }
+            // Session owns COMMITTING here: cancellation cannot turn this into an aborted input,
+            // and source receipts reach Room before a client can start the next user turn.
+            memoryCapture?.finish(result.ok && !runController.isCancelled, result.content, openViking?.hasInjected == true)
         }
+        if (!committed) memoryCapture?.finish(false, "", openViking?.hasInjected == true)
         return Outcome(
             result = result,
             entrySurfaceGuard = entrySurfaceGuard,

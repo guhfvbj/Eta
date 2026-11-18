@@ -837,6 +837,10 @@ fun AgentAppRoot(
                 io.github.mangi.eta.ui.screens.tasks.AgentTasksScreen(onBack = ::popRoute)
             }
 
+            entry<AppRoute.OpenVikingSettings>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.memory.OpenVikingSettingsScreen(onBack = ::popRoute)
+            }
+
             entry<AppRoute.Memory>(swipeDismiss = swipeDismiss) {
                 LaunchedEffect(Unit) {
                     memory.refreshMemory()
@@ -846,6 +850,7 @@ fun AgentAppRoot(
                     onAction = { action ->
                         when (action) {
                             AgentMemoryAction.NavigateBack -> popRoute()
+                            AgentMemoryAction.OpenOpenVikingSettings -> pushRoute(AppRoute.OpenVikingSettings)
                             is AgentMemoryAction.ToggleEnabled -> memory.setMemoryEnabled(action.enabled)
                             is AgentMemoryAction.DraftChanged -> memory.updateMemoryDraft(action.content)
                             AgentMemoryAction.Save -> memory.saveMemory()

@@ -35,6 +35,7 @@ internal object AgentToolDirectory {
         openableMcpGroups: List<McpDeferredGroup> = emptyList(),
         mcpSearchEnabled: Boolean = true,
         toolFilter: ((JSONArray) -> JSONArray)? = null,
+        openVikingTools: Set<String> = emptySet(),
     ): JSONArray {
         if (rewriteReply) return JSONArray()
         val tools = AgentToolCatalog.build(
@@ -50,6 +51,7 @@ internal object AgentToolDirectory {
             capabilities = capabilities,
             localWebSearch = localWebSearch,
             disabledTools = disabledTools,
+            openVikingTools = openVikingTools,
         )
         if (additionalTools != null) {
             for (index in 0 until additionalTools.length()) {

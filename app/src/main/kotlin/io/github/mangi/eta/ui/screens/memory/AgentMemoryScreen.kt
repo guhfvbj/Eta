@@ -297,7 +297,7 @@ private fun MemorySettingsGroup(
             Group {
                 CouiSwitchPreference(
                     title = stringResource(R.string.ui_enable_memory_4b69b7),
-                    summary = stringResource(R.string.ui_after_closing_no_memory_will_be_injected_and_the_mod_db3d23),
+                    summary = stringResource(R.string.openviking_memory_master_summary),
                     checked = state.enabled,
                     enabled = !state.isLoading,
                     onCheckedChange = { onAction(AgentMemoryAction.ToggleEnabled(it)) },
@@ -307,6 +307,12 @@ private fun MemorySettingsGroup(
                     title = stringResource(R.string.ui_core_memory_injection_budget_48b5d5),
                     summary = stringResource(R.string.memory_budget_summary, formatNumber(state.coreBudgetChars)),
                     showChevron = false,
+                )
+                Divider()
+                CouiPreference(
+                    title = stringResource(R.string.openviking_settings_title),
+                    summary = state.openVikingSummary.ifBlank { stringResource(R.string.openviking_status_disabled) },
+                    onClick = { onAction(AgentMemoryAction.OpenOpenVikingSettings) },
                 )
             }
         }
@@ -318,7 +324,7 @@ private fun MemorySettingsGroup(
             ) {
                 SwitchPreference(
                     title = stringResource(R.string.ui_enable_memory_4b69b7),
-                    summary = stringResource(R.string.ui_after_closing_no_memory_will_be_injected_and_the_mod_db3d23),
+                    summary = stringResource(R.string.openviking_memory_master_summary),
                     checked = state.enabled,
                     enabled = !state.isLoading,
                     onCheckedChange = { onAction(AgentMemoryAction.ToggleEnabled(it)) },
@@ -326,6 +332,11 @@ private fun MemorySettingsGroup(
                 BasicComponent(
                     title = stringResource(R.string.ui_core_memory_injection_budget_48b5d5),
                     summary = stringResource(R.string.memory_budget_summary, formatNumber(state.coreBudgetChars)),
+                )
+                BasicComponent(
+                    title = stringResource(R.string.openviking_settings_title),
+                    summary = state.openVikingSummary.ifBlank { stringResource(R.string.openviking_status_disabled) },
+                    onClick = { onAction(AgentMemoryAction.OpenOpenVikingSettings) },
                 )
             }
         }

@@ -48,6 +48,9 @@ internal object AgentConversationCodec {
                 if (message.compactionArchiveId.isNotBlank()) {
                     target.put("_eta_compaction_archive_id", message.compactionArchiveId)
                 }
+                if (message.contextSummary && message.compactionEpochId.isNotBlank()) {
+                    target.put("_eta_compaction_epoch_id", message.compactionEpochId)
+                }
                 when {
                     message.contentJson.isNotBlank() ->
                         target.put("content", JSONTokener(message.contentJson).nextValue())
@@ -73,6 +76,7 @@ internal object AgentConversationCodec {
             compactedUserTurns = message.optInt("_eta_compacted_users"),
             summaryThroughUserTurn = message.optInt("_eta_summary_through_user"),
             compactionArchiveId = message.optString("_eta_compaction_archive_id"),
+            compactionEpochId = if (message.optBoolean("_eta_context_summary")) message.optString("_eta_compaction_epoch_id") else "",
             content = (contentValue as? String).orEmpty(),
             contentJson = if (
                 contentValue == null ||

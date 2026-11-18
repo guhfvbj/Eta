@@ -59,7 +59,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 /**
  * 工具边界页：目录 → 分类（左右滑页）→ 单个工具。
  *
- * 目录页只放状态与分类入口，不再把 135 个工具和分类清单堆在同一屏。
+ * 目录页只放状态与分类入口；含 OpenViking 的全量名称来自统一 requirement registry。
  */
 @Composable
 internal fun PromptToolsScreen(

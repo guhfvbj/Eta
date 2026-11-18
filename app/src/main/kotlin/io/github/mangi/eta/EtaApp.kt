@@ -29,6 +29,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -61,6 +63,15 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         }
         PredictiveBackController.apply(applicationInfo, predictiveBackEnabled)
         AgentMemoryRepository.init(this)
+        applicationScope.launch {
+            kotlinx.coroutines.flow.combine(
+                io.github.mangi.eta.data.repository.OpenVikingSettingsRepository.settingsFlow(),
+                SettingsDataStore.settingsFlow(),
+            ) { remote, local -> remote to local.memoryEnabled }.distinctUntilChanged().collect {
+                io.github.mangi.eta.agent.openviking.OpenVikingSyncScheduler.cancel(this@EtaApp)
+                io.github.mangi.eta.agent.openviking.OpenVikingSyncScheduler.request(this@EtaApp)
+            }
+        }
         ProviderRepository.init(this)
         applicationScope.launch {
             val jobs = TerminalRuntime.backgroundJobs(this@EtaApp)

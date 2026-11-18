@@ -25,6 +25,7 @@ class AppRouteSerializationTest {
             AppRoute.Terminal,
             AppRoute.Tools,
             AppRoute.WebToolsSettings,
+            AppRoute.OpenVikingSettings,
             AppRoute.Skills,
             AppRoute.Subagents,
             AppRoute.ConversationTitleSettings,

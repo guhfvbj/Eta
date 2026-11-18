@@ -61,6 +61,7 @@ internal class AgentTraceFormatter {
             AgentConversationToolCatalog.READ_HISTORY -> "读取当前会话历史"
             "memory_get", "character_memory_get", "memory_write", "character_memory_write" ->
                 AgentPersonalResultFormatter.summarizeArguments(toolCall.name, toolCall.argumentsJson) ?: "记忆"
+            in AgentOpenVikingToolCatalog.names -> AgentPersonalResultFormatter.summarizeArguments(toolCall.name, toolCall.argumentsJson) ?: "OpenViking"
             "skills_list" -> "查看技能列表"
             "skills_read" -> "读取技能"
             "skills_read_resource" -> "读取技能资源"

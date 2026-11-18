@@ -352,7 +352,7 @@ internal val COMMON_TOOL_SETS: List<Pair<String, List<String>>> = listOf(
     "只读检索" to listOf(
         "web_search", "fetch_url", "search_files", "search_downloads", "read_file",
         "read_image", "stat_file", "list_directory", "glob_files", "grep_files",
-        "get_current_context", "memory_get", "skills_list", "skills_read", "skills_read_resource",
+        "get_current_context", "memory_get", "ov_memory_recall", "ov_read", "ov_list", "ov_search", "skills_list", "skills_read", "skills_read_resource",
     ),
     "文件编辑" to listOf(
         "read_file", "write_file", "edit_file", "stat_file", "list_directory", "glob_files",

@@ -130,6 +130,12 @@ internal fun buildToolsState(context: Context): AgentToolsUiState =
                 tools = listOf(
                     ToolItemUi("memory_get", context.getString(R.string.tool_ui_read_memory_979135), context.getString(R.string.tool_ui_paged_to_read_or_retrieve_long_term_memory_in_me_88afc4)),
                     ToolItemUi("memory_write", context.getString(R.string.tool_ui_organize_memory_2b08eb), context.getString(R.string.tool_ui_partially_update_append_or_clear_long_term_memor_c1bab6)),
+                    ToolItemUi("ov_memory_recall", context.getString(R.string.tool_ov_memory_recall), context.getString(R.string.tool_ov_memory_recall_description)),
+                    ToolItemUi("ov_memory_store", context.getString(R.string.tool_ov_memory_store), context.getString(R.string.tool_ov_memory_store_description)),
+                    ToolItemUi("ov_memory_forget", context.getString(R.string.tool_ov_memory_forget), context.getString(R.string.tool_ov_memory_forget_description)),
+                    ToolItemUi("ov_read", context.getString(R.string.tool_ov_read), context.getString(R.string.tool_ov_read_description)),
+                    ToolItemUi("ov_list", context.getString(R.string.tool_ov_list), context.getString(R.string.tool_ov_list_description)),
+                    ToolItemUi("ov_search", context.getString(R.string.tool_ov_search), context.getString(R.string.tool_ov_search_description)),
                     ToolItemUi("character_memory_get", "读取剧情记忆", "仅角色会话可用，读取当前角色的长期剧情和关系。"),
                     ToolItemUi("character_memory_write", "整理剧情记忆", "仅角色会话可用，更新当前角色的剧情记忆，不写入现实 MEMORY.md。"),
                 ),

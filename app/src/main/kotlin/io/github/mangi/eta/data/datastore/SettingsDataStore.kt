@@ -22,6 +22,7 @@ import io.github.mangi.eta.data.model.ConversationTitleSettings
 import io.github.mangi.eta.data.model.SpeechSettings
 import io.github.mangi.eta.data.model.SubagentSettings
 import io.github.mangi.eta.data.model.WebToolsSettings
+import io.github.mangi.eta.data.model.OpenVikingSettings
 import kotlinx.serialization.json.Json
 import io.github.mangi.eta.data.model.Settings
 import java.io.IOException
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.map
 internal object SettingsDataStore {
     private val SPEECH_SETTINGS = stringPreferencesKey("speech_settings_v1")
     private val WEB_TOOLS_SETTINGS = stringPreferencesKey("web_tools_settings_v1")
+    private val OPENVIKING_SETTINGS = stringPreferencesKey("openviking_settings_v1")
     private val SUBAGENT_SETTINGS = stringPreferencesKey("subagent_settings_v1")
     private val CONVERSATION_TITLE_SETTINGS = stringPreferencesKey("conversation_title_settings_v1")
     private val ASSISTANT_OVERLAY_SETTINGS = stringPreferencesKey("assistant_overlay_settings_v1")
@@ -40,6 +42,24 @@ internal object SettingsDataStore {
         ignoreUnknownKeys = true
         encodeDefaults = true
         coerceInputValues = true
+    }
+
+    fun openVikingSettingsFlow(): Flow<OpenVikingSettings> {
+        ensureInitialized()
+        return dataStore.data.catch { cause ->
+            if (cause is IOException) emit(emptyPreferences()) else throw cause
+        }.map { prefs ->
+            prefs[OPENVIKING_SETTINGS]?.let { raw ->
+                runCatching { speechJson.decodeFromString<OpenVikingSettings>(raw) }.getOrNull()
+            } ?: OpenVikingSettings()
+        }
+    }
+
+    suspend fun openVikingSettings(): OpenVikingSettings = openVikingSettingsFlow().first()
+
+    suspend fun setOpenVikingSettings(settings: OpenVikingSettings) {
+        ensureInitialized()
+        dataStore.edit { it[OPENVIKING_SETTINGS] = speechJson.encodeToString(settings) }
     }
 
     fun speechSettingsFlow(): Flow<SpeechSettings> {

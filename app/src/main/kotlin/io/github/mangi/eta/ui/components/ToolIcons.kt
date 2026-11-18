@@ -91,7 +91,8 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "computer", "computer_call", "计算机操作" -> Icons.Rounded.Computer
     "image_generation", "image_generation_call", "图像生成" -> Icons.Rounded.Image
     "mcp_call", "MCP 工具" -> Icons.Rounded.Extension
-    "memory_get", "memory_write", "character_memory_get", "character_memory_write" ->
+    "memory_get", "memory_write", "character_memory_get", "character_memory_write",
+    "ov_memory_recall", "ov_memory_store", "ov_memory_forget", "ov_read", "ov_list", "ov_search" ->
         Icons.Rounded.Psychology
     "release_gui" -> Icons.Rounded.Smartphone
     "present_to_user" -> Icons.AutoMirrored.Rounded.OpenInNew

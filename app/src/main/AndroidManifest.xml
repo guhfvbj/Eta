@@ -155,6 +155,8 @@
 
         <service android:name=".agent.automation.AgentTaskJobService"
             android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name=".agent.openviking.OpenVikingSyncJobService"
+            android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
         <service android:name=".agent.automation.AgentTriggerMonitorService"
             android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

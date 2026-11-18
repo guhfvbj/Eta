@@ -18,10 +18,14 @@ internal object AssistantScreenContextProjection {
 
     fun copy(source: JSONObject, target: JSONObject) {
         attach(target, source.optString(KEY))
+        io.github.mangi.eta.agent.openviking.OpenVikingContextProjection.copy(source, target)
     }
 
     /** 仅投影到 Provider 请求，不把自动采集内容拼进用户原话或持久上下文。 */
-    fun project(messages: JSONArray): JSONArray {
+    fun project(messages: JSONArray): JSONArray =
+        io.github.mangi.eta.agent.openviking.OpenVikingContextProjection.project(projectScreen(messages))
+
+    private fun projectScreen(messages: JSONArray): JSONArray {
         if ((0 until messages.length()).none { messages.optJSONObject(it)?.has(KEY) == true }) return messages
         return JSONArray().also { projected ->
             for (index in 0 until messages.length()) {

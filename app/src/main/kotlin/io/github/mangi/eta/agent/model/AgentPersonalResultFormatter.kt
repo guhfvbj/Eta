@@ -12,6 +12,14 @@ internal object AgentPersonalResultFormatter {
         val isCharacter = toolName.startsWith("character_")
         val label = if (isCharacter) "剧情记忆" else "记忆"
         when (toolName) {
+            in AgentOpenVikingToolCatalog.names -> "OpenViking · " + when (toolName) {
+                "ov_memory_recall" -> "召回记忆"
+                "ov_memory_store" -> "保存记忆"
+                "ov_memory_forget" -> "删除记忆"
+                "ov_read" -> "读取内容"
+                "ov_list" -> "列出目录"
+                else -> "搜索资料"
+            }
             "memory_get", "character_memory_get" -> {
                 val query = args.optString("query").trim()
                 if (query.isNotEmpty()) "检索$label" else "读取$label"
@@ -31,6 +39,11 @@ internal object AgentPersonalResultFormatter {
         if (json.opt("ok") == false || json.optString("status") in setOf("unconfirmed", "failed")) return null
 
         when (toolName) {
+            in AgentOpenVikingToolCatalog.names -> return when (toolName) {
+                "ov_memory_store" -> "已加入加密队列，尚未确认抽取完成"
+                "ov_memory_forget" -> "已提交单文件删除"
+                else -> "已读取 OpenViking 参考数据"
+            }
             "memory_get", "character_memory_get" -> return summarizeMemoryGet(toolName, json)
             "memory_write", "character_memory_write" -> return summarizeMemoryWrite(toolName, json)
             "read_sms_code" -> {
